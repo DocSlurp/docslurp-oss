@@ -23,6 +23,20 @@ export interface PageFanOutOptions<B> {
   run: (bundle: B) => Promise<UsageSummary>;
   onUsage: (usage: UsageSummary) => void;
   isSlotUnavailable: (error: unknown) => boolean;
+  /**
+   * A bundle refused because the run is out of funds (the activity paused it, or found it paused): the bundle goes back on
+   * the queue, nothing is recorded as a page failure, and dispatch waits for the pause signal and then for the resume that
+   * isPaused already waits on. When the pause signal is slow or lost, the lane tries again after `spendPauseWaitMs` (the
+   * activity re-checks the balance before any work, so a still-unfunded retry is refused again at no cost).
+   * Unset (runs started before this rule): such a bundle fails the fan-out as before.
+   */
+  isSpendPaused?: (error: unknown) => boolean;
+  spendPauseWaitMs?: number;
+  /**
+   * Waits for `predicate` at most `ms` (Temporal `condition(predicate, ms)`, whose timer is cancelled when the predicate wins,
+   * so pause cycles leave no timers in history). Default: `waitFor` raced with `sleep`.
+   */
+  waitForTimeout?: (predicate: () => boolean, ms: number) => Promise<unknown>;
   waitFor: (predicate: () => boolean) => Promise<void>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
@@ -39,6 +53,8 @@ export interface PageFanOutStats {
   dispatched: number;
   slotDenials: number;
   minWindow: number;
+  /** Bundles requeued because the run was paused for funds. */
+  spendPauses: number;
 }
 
 /** Jittered exponential backoff for slot denials: 1–2 s, 2–4 s, … capped at 15–30 s. */
@@ -51,17 +67,23 @@ export async function runPageFanOut<B>(options: PageFanOutOptions<B>): Promise<P
   const max = Math.max(1, Math.floor(options.concurrency));
   const quietPeriodMs = options.quietPeriodMs ?? 10_000;
   const pending = [...options.bundles];
-  const stats: PageFanOutStats = { dispatched: 0, slotDenials: 0, minWindow: max };
+  const stats: PageFanOutStats = { dispatched: 0, slotDenials: 0, minWindow: max, spendPauses: 0 };
   let limit = max;
   let inFlight = 0;
   let backingOff = 0;
   let consecutiveDenials = 0;
   let lastDenialAt = Number.NEGATIVE_INFINITY;
   let failure: { error: unknown } | undefined;
+  // A lane is waiting out a spend pause: nothing is dispatched until it is done (then at most one probe at a time).
+  let spendHold = false;
+  // Bundles a spend pause handed back: their redispatch is not charged to the admission budget again.
+  const spendRequeued = new Set<B>();
+  const waitForTimeout = options.waitForTimeout
+    ?? ((predicate: () => boolean, ms: number) => Promise.race([options.waitFor(predicate), options.sleep(ms)]));
 
   const stop = () => failure !== undefined || options.isCancelled();
   const canDispatch = () =>
-    pending.length > 0 && inFlight < limit && backingOff === 0 && !options.isPaused();
+    pending.length > 0 && inFlight < limit && backingOff === 0 && !spendHold && !options.isPaused();
 
   const lane = async (): Promise<void> => {
     for (;;) {
@@ -71,7 +93,7 @@ export async function runPageFanOut<B>(options: PageFanOutOptions<B>): Promise<P
       inFlight += 1;
       stats.dispatched += 1;
       try {
-        options.beforeDispatch?.();
+        if (!spendRequeued.delete(bundle)) options.beforeDispatch?.();
         const usage = await options.run(bundle);
         inFlight -= 1;
         consecutiveDenials = 0;
@@ -82,6 +104,24 @@ export async function runPageFanOut<B>(options: PageFanOutOptions<B>): Promise<P
         options.onUsage(usage);
       } catch (error) {
         inFlight -= 1;
+        if (options.isSpendPaused?.(error) && !options.isCancelled()) {
+          stats.spendPauses += 1;
+          pending.unshift(bundle);
+          spendRequeued.add(bundle);
+          // One dispatch at a time until pages succeed again (the window regrows as after a slot denial).
+          limit = 1;
+          stats.minWindow = Math.min(stats.minWindow, limit);
+          lastDenialAt = options.now();
+          options.onWindow?.(limit, inFlight);
+          if (spendHold) continue;
+          spendHold = true;
+          try {
+            await waitForTimeout(() => options.isPaused() || options.isCancelled(), options.spendPauseWaitMs ?? 60_000);
+          } finally {
+            spendHold = false;
+          }
+          continue;
+        }
         if (!options.isSlotUnavailable(error) || options.isCancelled()) {
           failure ??= { error };
           return;

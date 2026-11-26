@@ -3,12 +3,12 @@ import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { createHash } from "node:crypto";
 import { BILLABLE_UNIT_METRICS, decodeTextBytes, defaultPipelineFeatures, pageCredits, textPageCount } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { loadFixtureDocument } from "../test/load-document.js";
 
 import { recordPageBaseFee } from "../db/page-base-fee.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
 import { Store } from "../db/store.js";
 import { recordMeasuredTextPageCount, TEXT_MEASURE_MAX_BYTES } from "../lib/text-page-count.js";
-import { authorizeMeasuredPages } from "../lib/measured-page-authorization.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -60,9 +60,10 @@ afterEach(() => { setSpendCheckConfig(null); });
 afterAll(async () => { await store?.close(); await server?.stop(); await db?.close(); });
 
 async function stateFor(runId: string, documentId: string) {
-  const document = (await store.loadDocument(documentId))!;
+  const document = (await loadFixtureDocument(store, documentId))!;
   const state = WorkflowState.create(await store.loadRun(runId), [document]);
-  state.store = store;
+  state.executionGeneration = state.run.executionGeneration;
+  state.bindStore(store);
   state.usageLedger.runId = runId;
   return { state, document };
 }
@@ -90,7 +91,7 @@ describe("text pages are measured in full by the worker, and only that count bil
     expect(await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource })).toEqual({ pages: fullCount, estimate: apiEstimate });
     expect(await pageRow("big")).toEqual({ page_count: fullCount, page_count_source: "counted" });
     const sql = (store as unknown as { sql: Parameters<typeof recordPageBaseFee>[0] }).sql;
-    const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("run1"), [(await store.loadDocument("big"))!, (await store.loadDocument("small"))!]));
+    const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("run1"), [(await loadFixtureDocument(store, "big"))!, (await loadFixtureDocument(store, "small"))!]));
     expect(charges.fastPages).toBe(fullCount + 2);
     const { rows } = await db.query<{ amount: string; cost_cents: string }>(`select amount::text, cost_cents::text from usage_events where run_id = 'run1' and metric = $1`, [BILLABLE_UNIT_METRICS.fastPage]);
     expect(Number(rows[0]!.amount)).toBe(fullCount + 2);
@@ -107,8 +108,10 @@ describe("text pages are measured in full by the worker, and only that count bil
   it("pauses the run when the measured pages above the estimate no longer fit the balance", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     const { state, document } = await stateFor("run2", "poor");
-    expect(await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async () => bytes })).toMatchObject({ pages: fullCount });
-    await expect(authorizeMeasuredPages(state, document)).rejects.toMatchObject({ name: "RunPolicyError" });
+    // The page basis records the count, then authorizes the raise: the run is paused and the document stopped.
+    await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async () => bytes })).rejects.toMatchObject({ name: "RunPolicyError", paused: true });
+    expect(await pageRow("poor")).toEqual({ page_count: fullCount, page_count_source: "counted" });
+    await expect(state.pageBasis.authorize(document)).rejects.toMatchObject({ name: "RunPolicyError" });
     const { rows } = await db.query<{ control_state: string | null }>(`select control_state from project_runs where id = 'run2'`);
     expect(rows[0]!.control_state).toBe("paused");
   }, 60_000);
@@ -123,13 +126,13 @@ describe("text pages are measured in full by the worker, and only that count bil
     expect(await pageRow("poor")).toEqual({ page_count: apiEstimate, page_count_source: "assumed" });
   }, 60_000);
 
-  it("Store.pauseRunForSpend pauses a processing run once; a second pause reports blocked, not paused", async () => {
+  it("PostgresPageBasisLedger.pauseForFunds pauses a processing run once; a second pause reports blocked, not paused", async () => {
     await db.exec(`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values (100, 'run3', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract', '${pipeline}', 1)`);
     const run = { id: "run3", orgId: "o1", projectId: "w1", userId: "u1" };
-    expect(await store.pauseRunForSpend(run, "credit_exhausted")).toEqual({ paused: true, blocked: true });
+    expect(await store.pageBasisLedger.pauseForFunds(run, "credit_exhausted")).toEqual({ paused: true, blocked: true });
     const { rows } = await db.query<{ control_state: string; pause_reason: string }>(`select control_state, pause_reason from project_runs where id = 'run3'`);
     expect(rows[0]).toEqual({ control_state: "paused", pause_reason: "credit_exhausted" });
-    expect(await store.pauseRunForSpend(run, "credit_exhausted")).toEqual({ paused: false, blocked: true });
+    expect(await store.pageBasisLedger.pauseForFunds(run, "credit_exhausted")).toEqual({ paused: false, blocked: true });
   }, 60_000);
 });

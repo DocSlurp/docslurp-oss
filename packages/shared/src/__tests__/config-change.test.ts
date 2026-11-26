@@ -8,7 +8,7 @@ import {
   indexConfigOf,
   indexConfigHash,
 } from "../config-change.js";
-import { affectedStages, defaultPipelineFeatures, normalizePipelineFeatures, pipelineFeaturesSchema, pipelineStagePlan, compilePipelinePlan } from "../index.js";
+import { affectedStages, defaultPipelineFeatures, normalizePipelineFeatures, pipelineFeaturesSchema, pipelineFeaturesShape, pipelineStagePlan, compilePipelinePlan } from "../index.js";
 
 const ctx = { documents: 3, pages: 120, env: { DOCSLURP_CHART_EXPORT: "on" } };
 const base = normalizePipelineFeatures(defaultPipelineFeatures);
@@ -16,7 +16,7 @@ const withF = (patch: Record<string, unknown>) => normalizePipelineFeatures({ ..
 
 describe("PIPELINE_FIELD_IMPACT", () => {
   it("classifies every PipelineFeatures field", () => {
-    const keys = Object.keys(pipelineFeaturesSchema.shape);
+    const keys = Object.keys(pipelineFeaturesShape);
     expect(keys.length).toBeGreaterThan(30);
     expect(keys.filter((key) => !(key in PIPELINE_FIELD_IMPACT))).toEqual([]);
     expect(Object.keys(PIPELINE_FIELD_IMPACT).filter((key) => !keys.includes(key))).toEqual([]);

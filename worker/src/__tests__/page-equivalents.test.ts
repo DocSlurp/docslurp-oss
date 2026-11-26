@@ -10,6 +10,7 @@ import {
   pageTextEquivalents, stripHtmlMarkup, textPageCount, billedPageEquivalents, billedPagePageEquivalents, DEFAULT_PAGE_EQUIVALENT_ALLOWANCE, DISTINCT_TEST_PRICING, installTestPricing,
 } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { loadFixtureDocument } from "../test/load-document.js";
 
 import { recordPageBaseFee } from "../db/page-base-fee.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
@@ -70,13 +71,14 @@ async function documentRun(pages: number, mime = "application/pdf", facts: objec
       values (100, '${runId}', '${org.org}', 'u1', '${org.project}', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, ${pages});
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
       values ('${documentId}', '${org.org}', 'u1', '${org.project}', '${runId}', 'f', '${mime}', 'raw/${documentId}', 'processing', ${pages}, 'counted', '${JSON.stringify(facts)}', 1, '${STAGED_SHA}');`);
-  const document = (await store.loadDocument(documentId))!;
+  const document = (await loadFixtureDocument(store, documentId))!;
   const state = WorkflowState.create(await store.loadRun(runId), [document]);
-  state.store = store;
+  state.executionGeneration = state.run.executionGeneration;
+  state.bindStore(store);
   return { state, document, runId, documentId };
 }
 async function billedFastPages(runId: string, documentId: string): Promise<number> {
-  const state = WorkflowState.create(await store.loadRun(runId), [(await store.loadDocument(documentId))!]);
+  const state = WorkflowState.create(await store.loadRun(runId), [(await loadFixtureDocument(store, documentId))!]);
   return (await recordPageBaseFee(sql(), state)).fastPages;
 }
 
@@ -172,16 +174,16 @@ describe("stuffed PDFs bill the text extraction actually produced", () => {
 
   it("a 200-inch page bills its rendered area, capped per page, through the raster cache's sink", async () => {
     const { runId, documentId } = await documentRun(2);
-    configurePageAreaSink(createPageAreaSink(sql(), store));
-    const document = (await store.loadDocument(documentId))!;
+    configurePageAreaSink(createPageAreaSink(store));
+    const document = (await loadFixtureDocument(store, documentId))!;
     await recordRenderedPageAreas(runId, document, [{ pageNumber: 1, area: pageAreaEquivalentsPt(14_400, 14_400) }, { pageNumber: 2, area: pageAreaEquivalentsPt(612, 792) }]);
     expect(document.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
     // Page 1 counts as the cap, page 2 as one page.
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
     expect(await billedFastPages(runId, documentId)).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
     // A second render of the same page records nothing more.
     await recordRenderedPageAreas(runId, document, [{ pageNumber: 1, area: PAGE_AREA_EQUIVALENTS_CAP }]);
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
   });
 
   it("an uploaded image's frames count their area as the OCR reads them, and their text", async () => {
@@ -192,7 +194,7 @@ describe("stuffed PDFs bill the text extraction actually produced", () => {
       [{ pageNumber: 1, sourceWidth: 20_000, sourceHeight: 20_000 }, { pageNumber: 2, sourceWidth: 1_700, sourceHeight: 2_200 }]))!;
     expect(measured.equivalents).toBe(2);
     // Nothing above one page per frame: billing_pages is not raised (the frames bill as their OCR reads, one Rich page each).
-    expect((await store.loadDocument(ordinary.documentId))!.billingPages).toBeNull();
+    expect((await loadFixtureDocument(store, ordinary.documentId))!.billingPages).toBeNull();
     // A raised read cap reads more pixels: the large frame counts 2 there.
     vi.stubEnv("DOCSLURP_OCR_MAX_LONG_EDGE", "4000");
     try {
@@ -200,7 +202,7 @@ describe("stuffed PDFs bill the text extraction actually produced", () => {
       const big = (await recordExtractedPageEquivalents(raised.state, raised.document, "image", "frame one\fframe two",
         [{ pageNumber: 1, sourceWidth: 20_000, sourceHeight: 20_000 }]))!;
       expect(big.equivalents).toBe(3);
-      expect((await store.loadDocument(raised.documentId))!.billingPages).toBe(3);
+      expect((await loadFixtureDocument(store, raised.documentId))!.billingPages).toBe(3);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -216,7 +218,7 @@ describe("stuffed PDFs bill the text extraction actually produced", () => {
     const { state, document, documentId } = await documentRun(3);
     const measured = (await recordExtractedPageEquivalents(state, document, "pdf", "page one\fpage two\fpage three"))!;
     expect(measured).toMatchObject({ pages: 3, equivalents: 3, densePages: [], billingPages: null });
-    expect((await store.loadDocument(documentId))!.billingPages).toBeNull();
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBeNull();
   });
 });
 
@@ -296,7 +298,7 @@ describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 u
     const { state, document, runId, documentId } = await documentRun(2);
     const measured = (await recordExtractedPageEquivalents(state, document, "pdf", `${"y".repeat(Math.round(3.5 * 3_500))}\f${"z".repeat(3 * 3_500)}`))!;
     expect(measured).toMatchObject({ equivalents: 7, billed: 5, densePages: [1] });
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(5);
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(5);
     expect(await billedFastPages(runId, documentId)).toBe(5);
   });
 
@@ -308,7 +310,7 @@ describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 u
         { pageNumber: 2, sourceWidth: 8_000, sourceHeight: 8_000 }, // read at 4,000 px: 960 x 960 pt, 2 standard pages of area
       ]))!;
       expect(measured.billed).toBe(1 + 2);
-      expect((await store.loadDocument(documentId))!.billingPages).toBe(3);
+      expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(3);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -322,9 +324,9 @@ describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 u
     const measured = (await recordExtractedPageEquivalents(state, document, "pdf", "A short caption on a tabloid page."))!;
     expect(measured).toMatchObject({ equivalents: 1, billed: 1 });
     // Its area arrives when the page is rendered (the raster cache's sink), under the same allowance.
-    configurePageAreaSink(createPageAreaSink(sql(), store));
+    configurePageAreaSink(createPageAreaSink(store));
     await recordRenderedPageAreas(runId, document, [{ pageNumber: 1, area: pageAreaEquivalentsPt(792, 1_224) }]);
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(2);
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(2);
     expect(await billedFastPages(runId, documentId)).toBe(2);
   });
 
@@ -332,7 +334,7 @@ describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 u
     const { state, document, documentId } = await documentRun(1, "text/html", { declaredMimeType: "text/html", sniffedMimeType: null, mimeType: "text/html", format: "html", container: null, encoding: "utf-8", mismatch: "none" });
     const measured = (await recordExtractedPageEquivalents(state, document, "html", "v".repeat(2 * 3_500)))!;
     expect(measured).toMatchObject({ equivalents: 2, billed: 2 });
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(2);
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(2);
   });
 
   it("billing uses the installed pricing provider's allowance for paged formats, never for HTML", async () => {
@@ -341,7 +343,7 @@ describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 u
       const paged = await documentRun(1);
       const pdf = (await recordExtractedPageEquivalents(paged.state, paged.document, "pdf", "u".repeat(2 * 3_500)))!;
       expect(pdf).toMatchObject({ equivalents: 2, billed: 2 });
-      expect((await store.loadDocument(paged.documentId))!.billingPages).toBe(2);
+      expect((await loadFixtureDocument(store, paged.documentId))!.billingPages).toBe(2);
     } finally {
       installTestPricing(DISTINCT_TEST_PRICING);
     }
@@ -365,11 +367,11 @@ describe("whole-document text formats bill their true count from intake through 
     const { state, document, runId, documentId } = await documentRun(intake, "text/plain", textFacts);
     const measured = (await recordExtractedPageEquivalents(state, document, "plain-text", text))!;
     expect(measured).toMatchObject({ pages: 1, equivalents: 10, billed: 10 });
-    const stored = (await store.loadDocument(documentId))!;
+    const stored = (await loadFixtureDocument(store, documentId))!;
     expect(stored.billingPages ?? stored.pageCount).toBe(10);
     expect(await billedFastPages(runId, documentId)).toBe(10);
     // A retry measures the same and changes nothing.
-    await recordExtractedPageEquivalents(state, (await store.loadDocument(documentId))!, "plain-text", text);
+    await recordExtractedPageEquivalents(state, (await loadFixtureDocument(store, documentId))!, "plain-text", text);
     expect(await billedFastPages(runId, documentId)).toBe(10);
     // No per-page facts: a later rendered-area record cannot add the text a second time.
     expect((await db.query(`select count(*)::int as n from document_page_facts where document_id = '${documentId}' and text_equivalents is not null`)).rows).toEqual([{ n: 0 }]);
@@ -402,14 +404,14 @@ describe("whole-document text formats bill their true count from intake through 
     const { state, document, runId, documentId } = await documentRun(4, "text/plain", textFacts);
     const measured = (await recordExtractedPageEquivalents(state, document, "plain-text", text))!;
     expect(measured.billed).toBe(10);
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(10);
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(10);
     expect(await billedFastPages(runId, documentId)).toBe(10);
   });
 
   it("form feeds in a text file are not pages: the text rule runs over the whole text", async () => {
     const { state, document, runId, documentId } = await documentRun(1, "text/plain", textFacts);
     await recordExtractedPageEquivalents(state, document, "plain-text", "a\fb\fc\fd");
-    expect((await store.loadDocument(documentId))!.billingPages).toBeNull();
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBeNull();
     expect(await billedFastPages(runId, documentId)).toBe(1);
   });
 });
@@ -459,7 +461,7 @@ describe("rendered-area equivalents are authorized like every measured page (cou
 
   it("an area-only increase on an unfunded run pauses it before anything renders, caches or charges", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
-    configurePageAreaSink(createPageAreaSink(sql(), store));
+    configurePageAreaSink(createPageAreaSink(store));
     const { document, runId, documentId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", project: "w3" });
     const before = await balance("o3");
     const { calls, artifacts, cache } = rasterHarness();
@@ -471,68 +473,68 @@ describe("rendered-area equivalents are authorized like every measured page (cou
     expect(await balance("o3")).toBe(before);
     // The measurement is durable and the in-memory document carries it: page 1 at the cap plus page 2.
     expect(document.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
   });
 
   it("a retry after a failed authorization authorizes again, though the count is already stored", async () => {
-    const authorize = vi.fn();
-    const real = createPageAreaSink(sql(), store);
+    // Each authorization reads the run's measured pages first; the first read fails, as a dropped connection would.
+    const readMeasured = store.pageBasisLedger.runMeasurements.bind(store.pageBasisLedger);
     let failNext = true;
-    configurePageAreaSink({
-      record: real.record,
-      authorize: async (runId: string, document: Document) => {
-        authorize(document.billingPages);
-        if (failNext) { failNext = false; throw new Error("spend check unavailable"); }
-        await real.authorize(runId, document);
-      },
+    const authorize = vi.spyOn(store.pageBasisLedger, "runMeasurements").mockImplementation(async (...args) => {
+      if (failNext) { failNext = false; throw new Error("spend check unavailable"); }
+      return await readMeasured(...args);
     });
+    configurePageAreaSink(createPageAreaSink(store));
     const { runId, documentId } = await documentRun(2);
     const { calls, artifacts, cache } = rasterHarness();
-    await expect(cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] })).rejects.toThrow("spend check unavailable");
+    await expect(cache.renderSelectedPages({ document: (await loadFixtureDocument(store, documentId))!, runId, pageNumbers: [1, 2] })).rejects.toThrow("spend check unavailable");
     expect(artifacts.size).toBe(0);
     expect(calls.pdftoppm).toBe(0);
     // The retry loads the document with billing_pages already raised; it is authorized anyway, then renders.
-    const retried = (await store.loadDocument(documentId))!;
+    const retried = (await loadFixtureDocument(store, documentId))!;
     expect(retried.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
     const pages = await cache.renderSelectedPages({ document: retried, runId, pageNumbers: [1, 2] });
     expect(authorize).toHaveBeenCalledTimes(2);
+    authorize.mockRestore();
     expect(pages.map((page) => page.cacheHit)).toEqual([false, false]);
     expect(artifacts.size).toBe(2);
   });
 
   it("a cached render was authorized when it was cached: a hit measures and authorizes nothing again", async () => {
-    const authorize = vi.fn();
-    const real = createPageAreaSink(sql(), store);
-    configurePageAreaSink({ record: real.record, authorize: async (runId: string, document: Document) => { authorize(); await real.authorize(runId, document); } });
+    const authorize = vi.spyOn(store.pageBasisLedger, "runMeasurements");
+    configurePageAreaSink(createPageAreaSink(store));
     const { runId, documentId } = await documentRun(2);
     const { calls, cache } = rasterHarness();
-    await cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] });
+    await cache.renderSelectedPages({ document: (await loadFixtureDocument(store, documentId))!, runId, pageNumbers: [1, 2] });
     expect(authorize).toHaveBeenCalledTimes(1);
-    const again = await cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] });
+    const again = await cache.renderSelectedPages({ document: (await loadFixtureDocument(store, documentId))!, runId, pageNumbers: [1, 2] });
     expect(again.every((page) => page.cacheHit)).toBe(true);
     expect(authorize).toHaveBeenCalledTimes(1);
+    authorize.mockRestore();
     expect(calls).toEqual({ pdfinfo: 1, pdftoppm: 2 });
     expect(await billedFastPages(runId, documentId)).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
   });
 
   it("a page area that cannot be recorded leaves nothing cached, so the retry measures it", async () => {
-    const real = createPageAreaSink(sql(), store);
+    const recordEquivalents = store.pageBasisLedger.recordPageEquivalents.bind(store.pageBasisLedger);
     let failNext = true;
-    configurePageAreaSink({
-      record: async (args) => { if (failNext) { failNext = false; throw new Error("database unavailable"); } return await real.record(args); },
-      authorize: real.authorize,
+    const record = vi.spyOn(store.pageBasisLedger, "recordPageEquivalents").mockImplementation(async (...args) => {
+      if (failNext) { failNext = false; throw new Error("database unavailable"); }
+      return await recordEquivalents(...args);
     });
+    configurePageAreaSink(createPageAreaSink(store));
     const { runId, documentId } = await documentRun(2);
     const { artifacts, cache } = rasterHarness();
-    await expect(cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] })).rejects.toThrow("database unavailable");
+    await expect(cache.renderSelectedPages({ document: (await loadFixtureDocument(store, documentId))!, runId, pageNumbers: [1, 2] })).rejects.toThrow("database unavailable");
     expect(artifacts.size).toBe(0);
-    await cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] });
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
+    await cache.renderSelectedPages({ document: (await loadFixtureDocument(store, documentId))!, runId, pageNumbers: [1, 2] });
+    record.mockRestore();
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
   });
 
   it("the native engine's renders are authorized the same way: an unfunded run caches nothing", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
-    configurePageAreaSink(createPageAreaSink(sql(), store));
+    configurePageAreaSink(createPageAreaSink(store));
     const { document, runId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", project: "w3" });
     const png = (width: number, height: number) => {
       const buf = Buffer.alloc(33);
@@ -591,7 +593,7 @@ describe("VM-extracted page areas bill from the layout facts' page boxes (real-M
     const sizes = facts([{ pageNumber: 1, widthPt: 792, heightPt: 1224 }, { pageNumber: 2, widthPt: 612, heightPt: 792 }]);
     const measured = (await recordExtractedPageEquivalents(state, document, "pdf", "A short caption\fAnother short page", [], { pageSizesPt: sizes }))!;
     expect(measured).toMatchObject({ pages: 2, equivalents: 3, billed: 3 });
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(3);
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(3);
     expect(await billedFastPages(runId, documentId)).toBe(3);
   });
 
@@ -609,7 +611,7 @@ describe("VM-extracted page areas bill from the layout facts' page boxes (real-M
     expect(processedPdfPages("caption\f", "vm-pdf")).toBe(2);
     const measured = (await recordExtractedPageEquivalents(state, document, "pdf", "caption\f", [], { extractor: "vm-pdf", pageSizesPt: sizes }))!;
     expect(measured).toMatchObject({ pages: 2, billed: 5 });
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(5);
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(5);
     expect(await billedFastPages(runId, documentId)).toBe(5);
   });
 
@@ -622,7 +624,7 @@ describe("VM-extracted page areas bill from the layout facts' page boxes (real-M
     const sizes = facts([4, 5].map((pageNumber) => ({ pageNumber, widthPt: 1224, heightPt: 1584 })));
     const measured = (await recordExtractedPageEquivalents(state, document, "pdf", markdown, [], { extractor: "vm-pdf", pageSizesPt: sizes }))!;
     expect(measured).toMatchObject({ pages: 5, billed: 1 + 1 + 1 + 4 + 4 });
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(11);
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(11);
   });
 
   it("several trailing blank pages each keep their slot and area; the rows match the processed count", async () => {
@@ -633,7 +635,7 @@ describe("VM-extracted page areas bill from the layout facts' page boxes (real-M
     const sizes = facts([3, 4].map((pageNumber) => ({ pageNumber, widthPt: 1224, heightPt: 792 })));
     const measured = (await recordExtractedPageEquivalents(state, document, "pdf", markdown, [], { extractor: "doppler-md", pageSizesPt: sizes }))!;
     expect(measured).toMatchObject({ pages: 4, billed: 1 + 1 + 2 + 2 });
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(6);
+    expect((await loadFixtureDocument(store, documentId))!.billingPages).toBe(6);
     // pdftotext terminates every page: the same text from poppler-text is 3 pages, the last blank.
     expect(splitProcessedPdfPages(markdown, "poppler-text")).toEqual(["caption", "", ""]);
   });

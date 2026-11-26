@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKER_ENTRYPOINT="${ROOT_DIR}/vendor-artifacts/operator-config/worker-host.mjs"
 VENV="${DOCSLURP_WORKER_VENV:-${ROOT_DIR}/.venv}"
 INSTALL_ON_STARTUP="${DOCSLURP_WORKER_INSTALL_HEAVY_DEPS_ON_STARTUP:-true}"
 REQUIREMENTS_MODE="${DOCSLURP_WORKER_REQUIREMENTS_MODE:-auto}"
@@ -33,7 +34,8 @@ CLAMD_BIN="${DOCSLURP_CLAMD_BIN:-}"
 # One rule for "development" in this script and the worker (packages/shared/src/runtime-environment.ts; a parity test
 # in worker/src/lib/unsafe-overrides.test.ts runs both over odd values): trim ASCII whitespace from both ends and
 # lower-case ASCII letters only, then NODE_ENV development, test or empty is development and any other value is not.
-# A DOCSLURP_SERVICE_PROFILE containing "service" is never development.
+# A DOCSLURP_PROFILE or DOCSLURP_SERVICE_PROFILE containing "service" is never development; no other profile value
+# (dev, selfhost) makes a non-development NODE_ENV development (the worker refuses dev outside development at startup).
 normalize_env_setting() {
   local LC_ALL=C
   local value="$1" ws=$' \t\n\v\f\r'
@@ -43,10 +45,12 @@ normalize_env_setting() {
 }
 
 is_development_env() {
-  local node_env profile
+  local node_env profile legacy_profile
   node_env="$(normalize_env_setting "${NODE_ENV:-}")"
-  profile="$(normalize_env_setting "${DOCSLURP_SERVICE_PROFILE:-}")"
-  [[ "${profile}" != *service* ]] && [[ -z "${node_env}" || "${node_env}" == "development" || "${node_env}" == "test" ]]
+  profile="$(normalize_env_setting "${DOCSLURP_PROFILE:-}")"
+  legacy_profile="$(normalize_env_setting "${DOCSLURP_SERVICE_PROFILE:-}")"
+  [[ "${profile}" != *service* ]] && [[ "${legacy_profile}" != *service* ]] \
+    && [[ -z "${node_env}" || "${node_env}" == "development" || "${node_env}" == "test" ]]
 }
 
 if [[ "${1:-}" == "--environment-class" ]]; then
@@ -107,7 +111,8 @@ refuse_unsafe_overrides() {
     *) refused+=(DOCSLURP_CLAMAV_ENABLED) ;;
   esac
   value="$(normalize_env_setting "${DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS:-}")"
-  if [[ -n "${value}" && ! "${value}" =~ ^([1-9]|1[0-9]|2[0-4])$ ]]; then
+  # ASCII digits only, whatever the locale: [0-9] matches other scripts' digits under UTF-8 collation.
+  if [[ -n "${value}" ]] && ! LC_ALL=C bash -c '[[ "$1" =~ ^([1-9]|[1-6][0-9]|7[0-2])$ ]]' _ "${value}"; then
     refused+=(DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS)
   fi
   value="$(normalize_env_setting "${DOCSLURP_PARSER_SANDBOX:-}")"
@@ -121,6 +126,14 @@ refuse_unsafe_overrides() {
 }
 
 refuse_unsafe_overrides
+if [[ "${DOCSLURP_WORKER_HOST:-external}" != "external" ]]; then
+  echo "DOCSLURP_WORKER_HOST must be external" >&2
+  exit 1
+fi
+if [[ ! -f "$WORKER_ENTRYPOINT" || -L "$WORKER_ENTRYPOINT" ]]; then
+  echo "Hosted worker startup requires a staged worker-host.mjs" >&2
+  exit 1
+fi
 CLAMAV_ENABLED="$(normalize_env_setting "${CLAMAV_ENABLED}")"
 CLAMAV_MAX_DB_AGE_HOURS="$(normalize_env_setting "${CLAMAV_MAX_DB_AGE_HOURS}")"
 
@@ -373,7 +386,8 @@ verify_clamav_signature_freshness() {
   fi
   age_hours=$(( age_seconds / 3600 ))
 
-  if (( age_seconds > CLAMAV_MAX_DB_AGE_HOURS * 3600 )); then
+  # Written so that an arithmetic error (a limit that is not a number) reads as stale, never as fresh.
+  if ! (( age_seconds <= CLAMAV_MAX_DB_AGE_HOURS * 3600 )); then
     clamav_warn_or_exit \
       "ClamAV signature database is stale (${age_hours}h old, max ${CLAMAV_MAX_DB_AGE_HOURS}h)" \
       "${CLAMAV_FAIL_OPEN_ON_STALE_DB}"
@@ -492,7 +506,7 @@ run_worker_with_updater() {
   local pending_signal="" exited="" status=0
   trap 'pending_signal=TERM' TERM
   trap 'pending_signal=INT' INT
-  node "${ROOT_DIR}/worker/dist/temporal/worker.js" &
+  node "$WORKER_ENTRYPOINT" &
   WORKER_PID="$!"
   trap 'stop_worker TERM; exit 143' TERM
   trap 'stop_worker INT; exit 130' INT
@@ -633,5 +647,5 @@ configure_runtime_memory_budgets
 if [[ -n "${FRESHCLAM_PID}" ]]; then
   run_worker_with_updater
 else
-  exec node "${ROOT_DIR}/worker/dist/temporal/worker.js"
+  exec node "$WORKER_ENTRYPOINT"
 fi

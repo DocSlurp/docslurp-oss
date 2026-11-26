@@ -1,11 +1,12 @@
-import { authorizeComputeCohort } from "../extractors/plugins.js";
-import { serveFirstPassResult } from "../pipeline/first-pass.js";
+import { authorizeComputeCohort, runBacklogHint } from "../extractors/plugins.js";
+import { firstPassResultGlyphs, serveFirstPassResult } from "../pipeline/first-pass.js";
 import { dopplerBinDir } from "./doppler.js";
 import {
-  acceptSandboxedPdfResult, noteSalvagedFigures, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
+  acceptSandboxedPdfResult, noteSalvagedFigures, noteSandboxedPdfPoolMember, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
   type SandboxedPdfRunContext,
 } from "../extractors/plugins.js";
 import { dopplerConverterPath } from "./doppler.js";
+import { dopplerPageFactsRequest } from "../lib/doppler-page-facts.js";
 import { localOcrCommandArgs, localOcrPaths } from "../ocr/local.js";
 import { localOcrRefusal, resolveOcrMode, OcrRefusedError } from "../ocr/mode.js";
 import { recordShardTimingInContext, type ShardCalibration } from "../pipeline/shard-calibration.js";
@@ -18,9 +19,10 @@ import {
   type InstalledVendorBundle,
 } from "./vendor-bundles.js";
 import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
-import { isDevelopmentEnvironment, DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
+import { recordPoolServed } from "../lib/capability-pools.js";
+import { isDevelopmentEnvironment, poolMemberForBackend, DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rm, stat } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -112,6 +114,8 @@ export interface CommandPlan {
    * writes only to the directories of its output arguments.
    */
   readOnlyInputs?: boolean;
+  /** The most output bytes the command may hand back, per file and in total (SandboxLimits.maxOutputBytes). */
+  maxOutputBytes?: number;
 }
 
 /**
@@ -865,7 +869,8 @@ export class CommandRunner {
     }
     const provider = requireSandboxedPdfProvider();
     provider.assertConfigured();
-    return { binary: provider.id, args: [], available: true, sandboxedPdf: { input: source, output } };
+    const pageFacts = dopplerPageFactsRequest();
+    return { binary: provider.id, args: [], available: true, sandboxedPdf: { input: source, output, ...(pageFacts ? { pageFacts } : {}) } };
   }
 
   async extractText(source: string, pages: number, preservePageBreaks = false): Promise<CommandPlan> {
@@ -1210,7 +1215,7 @@ export class CommandRunner {
   }
 
   /**
-   * OCR in a fresh VM through the registered provider (DOCSLURP_OCR_MODE=vm). Refuses without one: VM OCR never falls back
+   * OCR in a VM through the registered provider (DOCSLURP_OCR_MODE=vm). Refuses without one: VM OCR never falls back
    * to the worker host or to another reader.
    */
   async sandboxedOcrRead(job: SandboxedOcrJob): Promise<CommandPlan> {
@@ -1418,20 +1423,18 @@ export class CommandRunner {
   }
 
   /**
-   * Run `fn` (one document's quarantine: never more than one document per session, council M1) in a malware scanner session when
-   * DOCSLURP_QUARANTINE_SCAN_SNAPSHOT is on: its VMs are restored from a clean snapshot in which clamd already holds the
-   * staged signatures (providers/modal/scanner.ts), and serve only `tenantKey`'s commands. Signature freshness is read on
-   * this host from the staged daily header, so no VM runs `clamscan --version`. Off, or without VM-only parsing, `fn`
-   * runs unchanged. A provider without scanner sessions keeps the per-command path (same VM isolation), loudly logged.
+   * Run `fn` (one document's quarantine) in a malware scanner session when DOCSLURP_QUARANTINE_SCAN_SNAPSHOT is on: its
+   * VMs are restored from a clean snapshot in which clamd already holds the staged signatures (providers/modal/scanner.ts).
+   * Signature freshness is read on this host from the staged daily header, so no VM runs `clamscan --version`. Off, or
+   * without VM-only parsing, `fn` runs unchanged. A provider without scanner sessions keeps the per-command path (same VM isolation), loudly logged.
    */
-  async withMalwareScanner<T>(tenantKey: string | null | undefined, fn: () => Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
+  async withMalwareScanner<T>(fn: () => Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
     if (!quarantineScanSnapshotEnabled(env) || !vmOnlyParsing(env)) return fn();
     const sandbox = registeredParserSandbox();
     if (!sandbox || sandbox.provider.id !== "modal") {
       console.error(`[quarantine] status=scanner-snapshot-unsupported provider=${sandbox?.provider.id ?? "none"}: DOCSLURP_QUARANTINE_SCAN_SNAPSHOT needs the modal parser sandbox; scanning per command`);
       return fn();
     }
-    if (!tenantKey) throw new SandboxPolicyError("a malware scanner session needs the run's organization");
     const policy = resolveMalwareScanPolicy(env);
     const staged = await stageClamDefinitions(policy.databaseDirectory);
     try {
@@ -1441,7 +1444,7 @@ export class CommandRunner {
       const documentId = currentPerfContext()?.documentId ?? "none";
       const scope = new SandboxSessionScope(() => sandbox.provider.openSession(sandbox.config, {
         activityId: `scanner:${runId}:${documentId}`,
-        scanner: { tenantKey, definitionsDir: staged.dir, signatureSetHash: staged.hash, expectedVersion: header.version },
+        scanner: { definitionsDir: staged.dir, signatureSetHash: staged.hash, expectedVersion: header.version },
       }));
       try {
         return await runWithSandboxScope(scope, () => scannerDefinitionsStorage.run(header, fn));
@@ -1867,7 +1870,8 @@ export class CommandRunner {
     if (plan.sandboxedOcr) {
       const provider = requireSandboxedOcrProvider();
       const frames = plan.pages ?? plan.sandboxedOcr.maxFrames;
-      // Ownership hints come from trusted run state; neither authorizes sharing a VM across jobs.
+      // Ownership hints come from trusted run state; only the live SQL grant (authorizeCohort, its orgId) lets a provider
+      // reuse a VM across jobs, and only within that organization.
       const context = currentPerfContext();
       const scope = context?.orgId && context.projectId && context.documentId && context.executionGeneration !== undefined
         ? { orgId: context.orgId, projectId: context.projectId, runId: context.runId, documentId: context.documentId, executionGeneration: context.executionGeneration }
@@ -1875,6 +1879,8 @@ export class CommandRunner {
       const ocrContext = {
         ...(context?.orgId ? { tenantKey: context.orgId } : {}), ...(context?.documentId ? { affinityKey: context.documentId } : {}),
         ...(scope ? { authorizeCohort: () => authorizeComputeCohort(scope) } : {}),
+        // Read lazily (a provider asks only when it needs it), cached per run, scoped to the run's own organization.
+        ...(context?.orgId && context.runId ? { runBacklog: () => runBacklogHint({ orgId: context.orgId!, runId: context.runId }) } : {}),
       };
       return { remote: provider.run(plan.sandboxedOcr, signal, ocrContext), timeoutMs: provider.timeoutMs(frames), release: async () => {} };
     }
@@ -1884,12 +1890,22 @@ export class CommandRunner {
       // The first pass already converted this document in a batch VM: serve that result instead of booting another VM.
       const served = await serveFirstPassResult(currentPerfContext(), plan.sandboxedPdf);
       if (served) {
-        return { remote: Promise.resolve(acceptSandboxedPdfResult(plan.sandboxedPdf, served, pages)), timeoutMs: provider.timeoutMs(pages), release: async () => {} };
+        // A math batch's facts are accepted as a math run's again (council #467): grids unknown, unmapped glyphs read.
+        const glyphs = firstPassResultGlyphs(currentPerfContext());
+        return { remote: Promise.resolve(acceptSandboxedPdfResult(plan.sandboxedPdf, served, pages, { glyphs })), timeoutMs: provider.timeoutMs(pages), release: async () => {} };
       }
       // The provider shards long documents itself and notes progress as shards finish.
       return {
         remote: provider.run(plan.sandboxedPdf, this.sandboxedPdfContext(pages, provider.shardProfile?.key), signal)
-          .then((result) => acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages), (error: unknown) => {
+          .then((result) => {
+            const accepted = acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages);
+            // The text pool member that served it (the pool stamps failovers; a single provider is its own member).
+            const poolMemberId = result.poolMemberId ?? poolMemberForBackend("text", provider.id)?.id;
+            noteSandboxedPdfPoolMember(plan.sandboxedPdf!, poolMemberId);
+            // A failover pool records its own serves; a single provider's is recorded here.
+            if (!result.poolMemberId) recordPoolServed("text", poolMemberId ?? null, Math.max(1, pages));
+            return poolMemberId ? { ...accepted, poolMemberId } : accepted;
+          }, (error: unknown) => {
             // A failed job may still hand back the shards that finished (`error.figures`): kept for the stage to store.
             noteSalvagedFigures(plan.sandboxedPdf!, error, pages);
             throw error;
@@ -1915,6 +1931,7 @@ export class CommandRunner {
       limits: {
         timeoutMs: plan.timeoutMs ?? resolveCommandTimeoutMs(pages),
         ...(this.commandRssBudgetKb ? { rssBudgetMb: Math.round(this.commandRssBudgetKb / 1024) } : {}),
+        ...(plan.maxOutputBytes !== undefined ? { maxOutputBytes: plan.maxOutputBytes } : {}),
       },
     });
     const { session, release } = await this.acquireSession();
@@ -1946,7 +1963,7 @@ export class CommandRunner {
         const started = new Promise<void>((resolve) => (onStart = resolve));
         // Bound to this stage's context: a pooled VM's idle time is recorded in this stage's ledger when the VM is reaped.
         const recordUsage = AsyncResource.bind((event: UsageEvent) => recordRemoteUsage(event));
-        // The run's organization travels with every remote command: a scanner session runs only its own.
+        // The run's organization travels with every remote command: a scanner session runs only its own organization's.
         const orgId = currentPerfContext()?.orgId;
         const remote = session.run({ ...command, ...(documentId ? { affinityKey: documentId } : {}), ...(orgId ? { tenantKey: orgId } : {}) }, signal, { onStart, recordUsage });
         if (!session.reportsStart) return { remote, timeoutMs: command.limits.timeoutMs, release };
@@ -2724,21 +2741,29 @@ export async function stageClamDefinitions(directory: string): Promise<StagedCla
   }
   const previous = stagedDefinitions;
   const staging = (async () => {
-    const hash = createHash("sha256");
-    for (const name of names) {
-      hash.update(`${name}\0`);
-      for await (const chunk of createReadStream(path.join(directory, name))) hash.update(chunk as Buffer);
-    }
-    const digest = hash.digest("hex");
-    const dir = await mkdtemp(path.join(tmpdir(), `docslurp-clam-definitions-${digest.slice(0, 32)}-`));
+    const temporary = await mkdtemp(path.join(tmpdir(), "docslurp-clam-definitions-preparing-"));
+    let dir: string;
+    let digest: string;
     try {
-      await chmod(dir, 0o700);
+      await chmod(temporary, 0o700);
+      const hash = createHash("sha256");
+      let copiedBytes = 0;
       for (const name of names) {
-        await copyFile(path.join(directory, name), path.join(dir, name));
-        await chmod(path.join(dir, name), 0o444);
+        const staged = path.join(temporary, name);
+        await copyFile(path.join(directory, name), staged);
+        await chmod(staged, 0o444);
+        const info = await stat(staged);
+        copiedBytes += info.size;
+        if (copiedBytes > 512 * 1024 * 1024) throw new Error("ClamAV signature assets exceed transfer limit");
+        hash.update(`${name}\0${info.size}\0`);
+        for await (const chunk of createReadStream(staged)) hash.update(chunk as Buffer);
       }
+      digest = hash.digest("hex");
+      const suffix = temporary.slice(-6);
+      dir = path.join(tmpdir(), `docslurp-clam-definitions-${digest}-${suffix}`);
+      await rename(temporary, dir);
     } catch (error) {
-      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      await rm(temporary, { recursive: true, force: true }).catch(() => {});
       throw error;
     }
     stagedDefinitionUse.set(dir, { refs: 0, retired: false });
@@ -2795,7 +2820,8 @@ export function buildSandboxCommand(args: {
  */
 export function recordRemoteUsage(usage: UsageEvent): void {
   const context = currentPerfContext();
-  if (!context) {
+  // A context without a usage ledger (an isolation-only context of a deferred activity) is as unrecorded as none.
+  if (!context?.pushUsage) {
     console.error(
       `[usage-unrecorded] provider=${usage.provider} model=${usage.model} metric=${usage.metric} amount=${usage.amount} ` +
         `unit=${usage.unit} costCents=${usage.costCents}: remote usage outside a stage context has no usage ledger`,
@@ -2952,6 +2978,23 @@ export async function readClamDefinitionsHeader(files: readonly string[]): Promi
   return newest!;
 }
 
+/**
+ * Oldest signature set a deployed worker may scan with, whatever the setting says.
+ * Upstream publishes about once a day, so a 24-hour limit leaves a daily window
+ * where the newest published set is already too old and no worker can start; 72
+ * hours covers that and one missed publish. start-worker.sh and
+ * unsafe-overrides.ts refuse a larger value at startup.
+ */
+export const MAX_DEPLOYED_SIGNATURE_AGE_HOURS = 72;
+
+/** Deployed: a whole number from 1 to the cap, else the 24-hour default. A typo or an oversized value never selects the weakest limit. */
+function deployedSignatureAgeHours(raw: string | undefined): number {
+  const value = raw?.trim() ?? "";
+  if (!/^[1-9][0-9]?$/.test(value)) return 24;
+  const hours = Number(value);
+  return hours <= MAX_DEPLOYED_SIGNATURE_AGE_HOURS ? hours : 24;
+}
+
 export function resolveMalwareScanPolicy(
   env: NodeJS.ProcessEnv = process.env,
 ): MalwareScanPolicy {
@@ -2965,7 +3008,7 @@ export function resolveMalwareScanPolicy(
     maxSignatureAgeHours:
       isDevelopmentEnvironment(env)
         ? readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24
-        : Math.min(readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24, 24),
+        : deployedSignatureAgeHours(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS),
     databaseDirectory: env.DOCSLURP_CLAMAV_DB_DIR?.trim() || "/var/lib/clamav",
   };
 }

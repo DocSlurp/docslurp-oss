@@ -4,15 +4,17 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { defaultPipelineFeatures, pageCredits, pricing, PUBLIC_ERROR_MESSAGES, publicDocumentError } from "@docslurp/shared";
+import { defaultPipelineFeatures, pageCredits, pricing, PUBLIC_ERROR_MESSAGES, publicDocumentError, TEST_PAGE_CREDITS } from "@docslurp/shared";
 
-import { enforceRunSpendForCharge, SpendCheckUnavailableError, setSpendCheckConfig } from "../db/spend-check.js";
+import { SpendCheckUnavailableError, setSpendCheckConfig } from "../db/spend-check.js";
 import { pushUsageEvent } from "../lib/perf-context.js";
 
 import { documentExtractorRegistry } from "../extractors/registry.js";
 import type { SandboxedOcrJob } from "../extractors/plugins.js";
 import type { Document, ProjectRun } from "../models.js";
-import { WorkflowState } from "../pipeline/pipeline.js";
+import { PostgresPageBasisLedger } from "../db/page-basis-ledger.js";
+import { bindMemoryPageBasis, MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
+import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage, OCR_MAX_CONSECUTIVE_FAILED_BATCHES, OCR_PDF_BATCH_PAGES } from "../stages/extract-markdown.js";
 import { fakeOcrRunner, ocrResultFor, type FakeFrame } from "../test/fake-ocr.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -26,7 +28,13 @@ function createRun(pipeline: Record<string, unknown> = {}, pagesTotal = 1): Proj
   return {
     id: "run-1", orgId: "org-1", userId: "user-1", kind: "bulk-upload", status: "processing", stage: "extract-markdown",
     totalDocuments: 1, processedDocuments: 0, pagesTotal, pagesProcessed: 0, spentCents: 0,
-    pipeline: { ...defaultPipelineFeatures, markdownExtraction: true, ...pipeline },
+    pipeline: {
+      ...defaultPipelineFeatures,
+      // This OCR suite opts into Auto. Native-only cases override the quality.
+      ladder: { ...defaultPipelineFeatures.ladder, maxRung: "ocr" },
+      markdownExtraction: true,
+      ...pipeline,
+    },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
   } as ProjectRun;
 }
@@ -112,7 +120,7 @@ async function harness(args: {
   const filename = args.filename ?? (args.format === "image" ? "scanned-memo.png" : "scan.pdf");
   const sourcePath = path.join(scratch, filename);
   await writeFile(sourcePath, "bytes");
-  internals.sources = { get: async () => ({ path: sourcePath, sha256: "sha-doc-1" }) };
+  internals.sources = { acquire: async () => ({ path: sourcePath, release: async () => {}, sha256: "sha-doc-1" }) };
   internals.recordSourcePageFacts = async () => undefined;
   internals.buildParserArtifacts = async () => [];
   internals.recordPageImageEvidence = async () => null;
@@ -130,11 +138,13 @@ async function harness(args: {
   const mimeType = args.mimeType ?? (args.format === "image" ? "image/png" : "application/pdf");
   const document = createDocument(filename, mimeType, pageCount);
   const state = WorkflowState.create(createRun(args.pipeline, pageCount), [document]);
+  // A funded run by default: an in-memory page basis with no balance limit (spendStore below sets one).
+  const ledger = bindMemoryPageBasis(state);
   state.usageLedger.runId = "run-1";
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", args.format);
-  const richEvents = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich");
+  const richEvents = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-ocr");
   return {
-    stage, state, attempted, configs, objects, manifests, runner, jobs: ocr.jobs, richEvents,
+    stage, state, ledger, attempted, configs, objects, manifests, runner, jobs: ocr.jobs, richEvents,
     richIds: () => richEvents().map((event) => event.id),
     checkpoint: () => state.documentStage("doc-1", "extract-markdown"),
     text: () => [...objects.entries()].filter(([key]) => key.endsWith(".md")).map(([, bytes]) => bytes.toString("utf8")),
@@ -151,6 +161,24 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/**
+ * Binds the harness's state to a store whose page basis is an in-memory ledger over the run's documents (page counts, the
+ * run's counted TIFFs) that pauses the run past `balance` credits, and records the run events it appends.
+ */
+function spendStore(h: Awaited<ReturnType<typeof harness>>, balance: number) {
+  const ledger = new MemoryPageBasisLedger({ balance }).seed(h.state.documents);
+  const events: Array<Record<string, unknown>> = [];
+  const known: Record<string, unknown> = {
+    getCompletedPages: async () => new Set<number>(),
+    appendEvent: async (event: Record<string, unknown>) => { events.push(event); },
+    pageBasisLedger: ledger,
+  };
+  const store = new Proxy(known, { get: (target, key: string) => target[key] ?? (async () => undefined) }) as unknown as CheckpointStore;
+  h.state.bindStore(store);
+  const calls = { get pageCounts() { return ledger.pageCountWrites.map((write) => write.pages); }, checks: ledger.checks, events };
+  return { ledger, calls };
+}
+
 describe("image documents are read by the OCR extractor", () => {
   it("routes an image to the ocr extractor and bills page-ocr once for the frame with words", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
@@ -163,7 +191,7 @@ describe("image documents are read by the OCR extractor", () => {
       expect(h.jobs[0]).toMatchObject({ kind: "image", recognisers: expect.any(Array) });
       expect(h.jobs[0]!.pages).toBeUndefined();
       expect(h.text()).toContain("Invoice total 4200");
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:1"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:1"]);
       expect(h.richEvents()[0]?.metadata).toMatchObject({ readBy: "page-ocr" });
     } finally { await h.cleanup(); }
   });
@@ -183,42 +211,30 @@ describe("image documents are read by the OCR extractor", () => {
       // The page basis is the frames read, so the Markdown's three pages, page rows and the bill agree.
       expect(h.state.documents[0]!.pageCount).toBe(3);
       // An uploaded image bills Rich per frame read, words or not (0.75 credits; 0.5 under the earlier words rule).
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:1", "rich:run-1:doc-1:2", "rich:run-1:doc-1:3"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:1", "ocr:run-1:doc-1:2", "ocr:run-1:doc-1:3"]);
     } finally { await h.cleanup(); }
   });
 
-  /** A store that persists page counts, reports the run's counted TIFFs and pauses the run past `balance` credits. */
-  function spendStore(balance: number) {
-    const calls = { pageCounts: [] as number[], checks: [] as number[], events: [] as Array<Record<string, unknown>> };
-    const known: Record<string, unknown> = {
-      getCompletedPages: async () => new Set<number>(),
-      setDocumentPageCount: async (_run: string, _doc: string, pages: number) => { calls.pageCounts.push(pages); return true; },
-      countedImageFrames: async () => calls.pageCounts.length ? [{ documentId: "doc-1", pageCount: calls.pageCounts.at(-1)!, chargedPages: 0 }] : [],
-      enforceSpendForCharge: async (_run: unknown, credits: number) => { calls.checks.push(credits); return { paused: credits > balance }; },
-      appendEvent: async (event: Record<string, unknown>) => { calls.events.push(event); },
-    };
-    const store = new Proxy(known, { get: (target, key: string) => target[key] ?? (async () => undefined) });
-    return { store, calls };
-  }
 
   it("checks the balance for a TIFF's counted frames before charging any: a low balance pauses the run and refuses it", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const frames = Array.from({ length: 40 }, (_, index) => ({ frame: index + 1, text: `Page ${index + 1}` }));
     const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1, frames: () => frames });
-    const { store, calls } = spendStore(1);
-    (h.state as any).store = store;
+    const { ledger, calls } = spendStore(h, 1);
+    // The read was sized while the balance still covered every frame; by the frame check it holds 1 credit.
+    ledger.largestFundedCharge = async (_run, max) => max;
     try {
       await h.stage.run(h.state);
       const checkpoint = h.checkpoint();
       expect(checkpoint?.status).toBe("failed");
       expect(publicDocumentError(checkpoint?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageFramesUnfunded);
-      // 39 frames beyond intake's one page, Rich: 9.75 credits checked against a 1-credit balance, and nothing charged.
+      // 39 frames beyond intake's one page, OCR: checked against a 1-credit balance they exceed, and nothing charged.
       expect(calls.pageCounts).toEqual([40]);
-      // Two checks: the pre-read one for the first Rich page (0.25, fits), then the counted frames.
+      // Two checks: the pre-read one for the first OCR page (fits), then the counted frames.
       expect(calls.checks).toHaveLength(2);
-      expect(calls.checks[0]).toBeCloseTo(0.25);
-      expect(calls.checks[1]).toBeGreaterThanOrEqual(9.75);
+      expect(calls.checks[0]).toBeCloseTo(TEST_PAGE_CREDITS.ocr);
+      expect(calls.checks[1]).toBeGreaterThanOrEqual(39 * TEST_PAGE_CREDITS.ocr);
       expect(h.richIds()).toEqual([]);
     } finally { await h.cleanup(); }
   });
@@ -230,11 +246,11 @@ describe("image documents are read by the OCR extractor", () => {
     const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1,
       frames: (job) => all.slice(0, job.maxFrames),
       result: (job) => ocrResultFor(job, all.slice(0, job.maxFrames), { truncatedFrames: all.length > job.maxFrames }) });
-    const { store, calls } = spendStore(1);
+    // Enough for the first OCR page, not for the five frames past it.
+    const { ledger, calls } = spendStore(h, TEST_PAGE_CREDITS.ocr * 2.5);
     const sized: number[] = [];
     // The balance covers 5 frames (the read-only sizing query); the run is not paused by asking.
-    (store as any).largestFundedCharge = async (_run: unknown, max: number) => { sized.push(max); return 5; };
-    (h.state as any).store = store;
+    ledger.largestFundedCharge = async (_run, max) => { sized.push(max); return 5; };
     try {
       await h.stage.run(h.state);
       expect(sized).toEqual([64]);
@@ -252,18 +268,17 @@ describe("image documents are read by the OCR extractor", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const frames = Array.from({ length: 40 }, (_, index) => ({ frame: index + 1, text: `Page ${index + 1}` }));
     const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1, frames: () => frames });
-    const { store, calls } = spendStore(1);
+    const { ledger, calls } = spendStore(h, 1);
     const sized: number[] = [];
-    (store as any).largestFundedCharge = async (_run: unknown, max: number, creditsFor: (n: number) => number) => { sized.push(creditsFor(max)); return max; };
+    ledger.largestFundedCharge = async (_run, max, creditsFor) => { sized.push(creditsFor(max)); return max; };
     // Attempt 1: the frame check's balance read fails after the frames were recorded as the page count.
-    const real = (store as any).enforceSpendForCharge;
+    const real = ledger.checkCharge.bind(ledger);
     let checks = 0;
-    (store as any).enforceSpendForCharge = async (run: unknown, credits: number) => {
+    ledger.checkCharge = async (run, credits) => {
       checks += 1;
       if (checks === 2) throw new SpendCheckUnavailableError("connection terminated");
       return await real(run, credits);
     };
-    (h.state as any).store = store;
     try {
       await expect(h.stage.run(h.state)).rejects.toMatchObject({ name: "SpendCheckUnavailableError" });
       expect(h.checkpoint()?.status).not.toBe("failed");
@@ -272,14 +287,14 @@ describe("image documents are read by the OCR extractor", () => {
       const document = h.state.documents[0]!;
       expect(document.pageCount).toBe(40);
       document.intakePageCount = 1;
-      (store as any).enforceSpendForCharge = real;
+      ledger.checkCharge = real;
       await h.stage.run(h.state);
       // The read was sized against intake (39 unpriced Rich frames), not against the recorded 40...
       expect(sized).toHaveLength(2);
       expect(sized[1]).toBeGreaterThan(0);
       expect(sized[1]).toBeCloseTo(sized[0]!);
       // ...and the frame check ran again and refused the image: run paused, nothing charged.
-      expect(calls.checks.at(-1)).toBeGreaterThanOrEqual(9.75);
+      expect(calls.checks.at(-1)).toBeGreaterThanOrEqual(39 * TEST_PAGE_CREDITS.ocr);
       expect(h.checkpoint()?.status).toBe("failed");
       expect(publicDocumentError(h.checkpoint()?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageFramesUnfunded);
       expect(h.richIds()).toEqual([]);
@@ -288,18 +303,17 @@ describe("image documents are read by the OCR extractor", () => {
 
   describe("the balance changes between sizing the read and the frame check", () => {
     // Sizing funds 5 frames of a 40-frame TIFF; by the frame check the balance covers it (a top-up in between).
-    async function changedBalance(pause: ((run: unknown, reason: string) => Promise<{ paused: boolean; blocked: boolean }>) | null) {
+    async function changedBalance(pause: (run: unknown, reason: string) => Promise<{ paused: boolean; blocked: boolean }>) {
       vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
       const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
       const all = Array.from({ length: 40 }, (_, index) => ({ frame: index + 1, text: `Page ${index + 1}` }));
       const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1,
         frames: (job) => all.slice(0, job.maxFrames),
         result: (job) => ocrResultFor(job, all.slice(0, job.maxFrames), { truncatedFrames: all.length > job.maxFrames }) });
-      const { store, calls } = spendStore(1_000_000);
-      (store as any).largestFundedCharge = async () => 5;
+      const { ledger, calls } = spendStore(h, 1_000_000);
+      ledger.largestFundedCharge = async () => 5;
       const pauses: string[] = [];
-      (store as any).pauseRunForSpend = pause ? async (run: unknown, reason: string) => { pauses.push(reason); return await pause(run, reason); } : undefined;
-      (h.state as any).store = store;
+      ledger.pauseForFunds = async (run, reason) => { pauses.push(reason); return await pause(run, reason); };
       const outcomes = () => warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("image-frames-unfunded"));
       return { h, calls, pauses, outcomes };
     }
@@ -334,7 +348,7 @@ describe("image documents are read by the OCR extractor", () => {
 
     it("fails closed (retryable, document not failed) when the run cannot be paused", async () => {
       vi.spyOn(console, "error").mockImplementation(() => undefined);
-      // The store's pause write failed (Store.pauseRunForSpend throws SpendCheckUnavailableError on pauseFailed).
+      // The pause write failed (PostgresPageBasisLedger.pauseForFunds throws SpendCheckUnavailableError on pauseFailed).
       const { h, outcomes } = await changedBalance(async () => { throw new SpendCheckUnavailableError("could not pause run"); });
       try {
         await expect(h.stage.run(h.state)).rejects.toMatchObject({ name: "SpendCheckUnavailableError" });
@@ -349,8 +363,7 @@ describe("image documents are read by the OCR extractor", () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     const frames = Array.from({ length: 40 }, (_, index) => ({ frame: index + 1, text: `Page ${index + 1}` }));
     const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1, frames: () => frames });
-    const { store, calls } = spendStore(1_000);
-    (h.state as any).store = store;
+    const { calls } = spendStore(h, 1_000);
     try {
       await h.stage.run(h.state);
       const checkpoint = h.checkpoint();
@@ -410,8 +423,8 @@ describe("image documents are read by the OCR extractor", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("no network in tests"));
     const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1, frames: () => escalatableFrames(40) });
     withVmUsage(h);
-    const { store } = spendStore(1);
-    (h.state as any).store = store;
+    // Sized while the balance covered every frame; by the frame check it holds 1 credit.
+    spendStore(h, 1).ledger.largestFundedCharge = async (_run, max) => max;
     try {
       await h.stage.run(h.state);
       expect(publicDocumentError(h.checkpoint()?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageFramesUnfunded);
@@ -430,17 +443,15 @@ describe("image documents are read by the OCR extractor", () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1, frames: () => escalatableFrames(40) });
     withVmUsage(h);
-    const { store } = spendStore(1_000);
-    // The real charge check over a client whose queries fail, but only after the pre-read check has passed.
+    const { ledger } = spendStore(h, 1_000);
+    // The Postgres adapter's charge check over a client whose queries fail, but only after the pre-read check has passed.
     let reads = 0;
     const failing = (async () => { throw Object.assign(new Error("connection terminated unexpectedly"), { name: "PostgresError", code: "08006" }); }) as any;
     const healthy = (async () => [{ funded: true, available: 1_000, project_budget_paused: false, org_budget_paused: false, project_in_org: true }]) as any;
-    (store as any).enforceSpendForCharge = async (run: any, credits: number) => {
+    ledger.checkCharge = async (run, credits) => {
       reads += 1;
-      const result = await enforceRunSpendForCharge(reads === 1 ? healthy : failing, run, credits);
-      return { paused: result.paused, blocked: result.blocked };
+      return await new PostgresPageBasisLedger(reads === 1 ? healthy : failing).checkCharge(run, credits);
     };
-    (h.state as any).store = store;
     try {
       await expect(h.stage.run(h.state)).rejects.toMatchObject({ name: "SpendCheckUnavailableError" });
       // Not a verdict on the document: its checkpoint is not failed, so the retried activity reads it again.
@@ -468,14 +479,13 @@ describe("image documents are read by the OCR extractor", () => {
       expect(vmEvents(capped)).toEqual([]);
       noCustomerCharge(capped);
     } finally { await capped.cleanup(); }
-    // A balance that cannot cover the image's Rich page: the run pauses before the VM.
+    // A balance that cannot cover the image's OCR page: the run pauses before the VM.
     const unfunded = await harness({ format: "image", filename: "fax.tiff", mimeType: "image/tiff" });
     withVmUsage(unfunded);
-    const { store, calls } = spendStore(0.1);
-    (unfunded.state as any).store = store;
+    const { calls } = spendStore(unfunded, TEST_PAGE_CREDITS.ocr / 4);
     try {
       await expect(unfunded.stage.run(unfunded.state)).rejects.toMatchObject({ name: "RunPolicyError" });
-      expect(calls.checks).toEqual([0.25]);
+      expect(calls.checks).toEqual([TEST_PAGE_CREDITS.ocr]);
       expect(unfunded.runner.run).not.toHaveBeenCalled();
       expect(vmEvents(unfunded)).toEqual([]);
       expect(unfunded.checkpoint()?.status).not.toBe("failed");
@@ -483,10 +493,8 @@ describe("image documents are read by the OCR extractor", () => {
     // A pre-read check whose database errors: retryable, no VM.
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     const broken = await harness({ format: "image" });
-    const brokenStore = spendStore(1_000).store as any;
-    brokenStore.enforceSpendForCharge = async (run: any, credits: number) =>
-      enforceRunSpendForCharge((async () => { throw new Error("connection reset"); }) as any, run, credits);
-    (broken.state as any).store = brokenStore;
+    spendStore(broken, 1_000).ledger.checkCharge = async (run, credits) =>
+      await new PostgresPageBasisLedger((async () => { throw new Error("connection reset"); }) as any).checkCharge(run, credits);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       await expect(broken.stage.run(broken.state)).rejects.toMatchObject({ name: "SpendCheckUnavailableError" });
@@ -611,7 +619,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(h.jobs).toHaveLength(1);
       expect(h.jobs[0]).toMatchObject({ kind: "pdf", pages: [2, 4] });
       expect(h.text().some((text) => text === "Native text layer page\fScanned words 2\fThird page native\fScanned words 4")).toBe(true);
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:4"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2", "ocr:run-1:doc-1:4"]);
       expect(new Set(h.richEvents().map((event) => event.metadata?.readBy))).toEqual(new Set(["page-ocr"]));
     } finally { await h.cleanup(); }
   });
@@ -632,7 +640,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(h.checkpoint()?.status).toBe("completed");
       expect(h.jobs.flatMap((job) => job.pages)).toEqual(Array.from({ length: 29 }, (_, i) => i + 2));
       expect(h.richIds()).toHaveLength(29);
-      expect(h.richIds()).toContain("rich:run-1:doc-1:30");
+      expect(h.richIds()).toContain("ocr:run-1:doc-1:30");
       const text = h.text().find((value) => value.startsWith("Cover page native text"))!;
       expect(text.split("\f")).toHaveLength(30);
       expect(text.split("\f")[29]).toBe("Scan 30");
@@ -656,7 +664,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(h.checkpoint()?.status).not.toBe("failed");
       expect([...h.objects.keys()].some(key => key.includes("/ocr-retry/"))).toBe(true);
       const firstIds = h.richIds();
-      expect(firstIds).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:3"]);
+      expect(firstIds).toEqual(["ocr:run-1:doc-1:2", "ocr:run-1:doc-1:3"]);
       // The activity's retry: the same document again, the same pages read, the same charge ids (the ledger keeps one each).
       await h.stage.run(h.state);
       expect(h.checkpoint()?.status).toBe("completed");
@@ -687,7 +695,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       const ids = h.richIds();
       expect(ids).toHaveLength(40);
       expect(new Set(ids).size).toBe(40);
-      expect(ids).not.toContain("rich:run-1:doc-1:1");
+      expect(ids).not.toContain("ocr:run-1:doc-1:1");
     } finally { await h.cleanup(); }
   });
 
@@ -696,19 +704,11 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const pageCount = 2_000;
     const scan = async () => ({ text: Array.from({ length: pageCount }, () => "").join("\f") + "\f" });
-    const store = (balance: number) => {
-      const checks: number[] = [];
-      const known: Record<string, unknown> = {
-        getCompletedPages: async () => new Set<number>(),
-        enforceSpendForCharge: async (_run: unknown, credits: number) => { checks.push(credits); return { paused: credits > balance }; },
-      };
-      return { store: new Proxy(known, { get: (target, key: string) => target[key] ?? (async () => undefined) }), checks };
-    };
-    const batchCredits = pageCredits("rich", OCR_PDF_BATCH_PAGES);
+
+    const batchCredits = pageCredits("ocr", OCR_PDF_BATCH_PAGES);
     // A 1-credit balance covers no batch: the run pauses before any VM starts, nothing is read or charged.
     const poor = await harness({ format: "pdf", pageCount, extract: scan });
-    const unfunded = store(1);
-    (poor.state as any).store = unfunded.store;
+    const unfunded = spendStore(poor, 1).ledger;
     try {
       await expect(poor.stage.run(poor.state)).rejects.toMatchObject({ name: "RunPolicyError" });
       expect(poor.jobs).toEqual([]);
@@ -717,8 +717,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
     } finally { await poor.cleanup(); }
     // A balance that funds exactly one batch: that batch is read (and stays ledgered), the second is refused before its VM.
     const one = await harness({ format: "pdf", pageCount, extract: scan });
-    const funded = store(batchCredits + 0.01);
-    (one.state as any).store = funded.store;
+    const funded = spendStore(one, batchCredits + 0.01).ledger;
     try {
       await expect(one.stage.run(one.state)).rejects.toMatchObject({ name: "RunPolicyError" });
       expect(one.jobs).toHaveLength(1);
@@ -820,7 +819,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(h.checkpoint()?.status).toBe("completed");
       // Page 3 is blank: read (no failure), no words, no Rich charge.
       expect(h.checkpoint()?.stats).toMatchObject({ ocrReadPages: 1, ocrReadSource: "scan-fill", scanFilledPages: 1, ocrFailedPages: 0 });
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2"]);
     } finally { await h.cleanup(); }
   });
 
@@ -958,5 +957,77 @@ describe("quality fast extraction is text-layer only", () => {
     } finally {
       await h.cleanup();
     }
+  });
+});
+
+describe("Smartest has no OCR step: scans and images are left for the vision model", () => {
+  const SMARTEST = { ladder: { maxRung: "intelligent" }, visionFallback: true };
+
+  it("leaves a scanned PDF's empty pages for vision: no OCR job, nothing billed as an OCR page", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "pdf", pageCount: 4, pipeline: SMARTEST,
+      extract: async () => ({ text: "Native text layer page\f\fThird page native\f\f" }),
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.jobs).toEqual([]);
+      expect(h.richEvents()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("sends an image to vision instead of the OCR extractor", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({ format: "image", pipeline: SMARTEST });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.attempted).not.toContain("ocr");
+      expect(h.jobs).toEqual([]);
+      expect(h.richEvents()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("still OCRs scans when vision cannot read the run (vision off), so no scan is left unread", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "pdf", pageCount: 2, pipeline: { ...SMARTEST, visionFallback: false },
+      extract: async () => ({ text: "Native text layer page\f\f" }),
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: `Scanned words ${frame}` })),
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.jobs).toHaveLength(1);
+      expect(h.jobs[0]).toMatchObject({ kind: "pdf", pages: [2] });
+    } finally { await h.cleanup(); }
+  });
+
+  it("still OCRs a document vision will not read (its playbook disallows vision), so its scans are not left unread", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "pdf", pageCount: 2, pipeline: SMARTEST,
+      extract: async () => ({ text: "Native text layer page\f\f" }),
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: `Scanned words ${frame}` })),
+    });
+    try {
+      h.state.artifactLedger.recordDocument("doc-1", "parser-playbook", "fast");
+      await h.stage.run(h.state);
+      expect(h.jobs).toHaveLength(1);
+      expect(h.jobs[0]).toMatchObject({ kind: "pdf", pages: [2] });
+    } finally { await h.cleanup(); }
+  });
+
+  it("Fastest (the default) reads the same scan with OCR", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "pdf", pageCount: 2,
+      extract: async () => ({ text: "Native text layer page\f\f" }),
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: `Scanned words ${frame}` })),
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.jobs[0]).toMatchObject({ kind: "pdf", pages: [2] });
+    } finally { await h.cleanup(); }
   });
 });

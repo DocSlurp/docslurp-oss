@@ -11,7 +11,7 @@ mod office;
 pub mod layout;
 mod pdf;
 pub mod cost_route;
-pub use pdf::{layout_pages, LayoutImage, LayoutPage};
+pub use pdf::{layout_pages, take_page_stats, LayoutImage, LayoutPage, PageStat};
 pub use pdf::detail::{Options as DetailOptions, Session as DetailSession};
 pub use pdf::range::{RangeSession,Request as RangeRequest};
 
@@ -152,7 +152,24 @@ pub struct PdfProfile {
     /// Structural classes: decorative, picture, scan-like, unknown.
     pub image_region_classes: [u32; 4],
     pub repeated_image_placements: u32,
+    /// How math and tables are encoded on the sampled pages (`PDF_PAGE_ENCODING_BITS`): each distinct page mask and the
+    /// sampled pages with it, by mask. A histogram, so no page order and never more entries than pages.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub page_encodings: Option<Vec<(u16, u32)>>,
+    /// Structure-tree counts over the whole document: /Formula and /Table elements, and formulas whose source is
+    /// recoverable; `tagged_truncated` when the bounded walk stopped early (the counts are then lower bounds).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tagged_formulas: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tagged_tables: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tagged_math_sources: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tagged_truncated: Option<bool>,
 }
+
+/// The per-page stat counts, in packing order (`PDF_PAGE_STAT_COUNTS` in `@docslurp/shared`).
+pub const PAGE_STAT_COUNTS: [&str; 8] = ["words", "glyphs", "mathGlyphs", "images", "pathOperations", "rules", "outlineClusters", "stripImages"];
 
 /// Facts about an Office or EPUB package.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,6 +286,10 @@ pub struct FileMeta {
     #[serde(default, rename = "type")]
     pub mime_type: Option<String>,
     pub size: u64,
+    /// Profile without loading the whole document into memory: page count only, from a bounded read. Hosts set it to
+    /// retry a file that ran the module out of memory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bounded: bool,
 }
 
 impl FileMeta {
@@ -325,12 +346,14 @@ pub struct ProbeInput<'a> {
     pub head: &'a [u8],
     /// The file's last bytes, when `head` is not the whole file.
     pub tail: Option<&'a [u8]>,
+    /// See `FileMeta::bounded`.
+    pub bounded: bool,
 }
 
 impl<'a> ProbeInput<'a> {
     /// A probe over a whole file.
     pub fn whole(name: &'a str, mime_type: Option<&'a str>, bytes: &'a [u8]) -> Self {
-        Self { name, mime_type, size: bytes.len() as u64, head: bytes, tail: None }
+        Self { name, mime_type, size: bytes.len() as u64, head: bytes, tail: None, bounded: false }
     }
 
     pub(crate) fn is_whole(&self) -> bool {
@@ -627,9 +650,9 @@ mod tests {
         let truncated = tiff(5, true, false);
         assert_eq!(probe(rules, &ProbeInput::whole("cut.tiff", None, &truncated[..truncated.len() - 6])).pages, None);
         let whole = tiff(5, true, false);
-        let partial = ProbeInput { name: "fax.tiff", mime_type: None, size: whole.len() as u64 + 10, head: &whole, tail: None };
+        let partial = ProbeInput { name: "fax.tiff", mime_type: None, size: whole.len() as u64 + 10, head: &whole, tail: None, bounded: false };
         assert_eq!(probe(rules, &partial).pages, None);
-        assert_eq!(read_plan(rules, &FileMeta { name: "fax.TIFF".into(), mime_type: None, size: 1_000 }), ReadPlan { head: 1_000, tail: 0 });
+        assert_eq!(read_plan(rules, &FileMeta { name: "fax.TIFF".into(), mime_type: None, size: 1_000, bounded: false }), ReadPlan { head: 1_000, tail: 0 });
     }
 
     #[test]

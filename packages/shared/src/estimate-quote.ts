@@ -1,13 +1,15 @@
 import { z } from "zod";
 
-import { isBillingEnforced, pipelineProfileIdSchema } from "./billing.js";
+import { isBillingEnforced, pipelineProfileIdFor, pipelineProfileIdSchema } from "./billing.js";
+import { chartTierForVisuals, visualsLevelSchema } from "./extraction-config.js";
 import { fileProfileSchema } from "./file-profile.js";
 import { CHAT_ANSWER_TIERS, pricing } from "./pricing-provider.js";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, CHART_EXPORT_FORMATS, chartExportFormatSchema, chartExportOverrideRefusal, chartExportTierSchema, defaultChartExportConfig, effectiveChartExportConfig, resolveChartExportTier, type ChartExportTier, type RunOrigin } from "./chart-export.js";
 import type { PipelineFeatures } from "./pipeline.js";
 import type { CostEstimate } from "./jobs.js";
 import type { UploadMediaEstimate } from "./media-upload-estimate.js";
-import { applyFileProfile, estimateProfileFor, type EstimateProfile, type QuoteFile } from "./upload-quote.js";
+import { applyFileProfile, capCreditsToLadderShare, estimateProfileFor, ladderShareProfile, type EstimateProfile, type QuoteFile } from "./upload-quote.js";
+import { ladderChartExportTier, pageReadingQuality } from "./auto-ladder.js";
 
 /*
  * The one estimate: `POST /v1/estimate` (anonymous or authenticated) and the authenticated upload estimate both answer
@@ -25,8 +27,15 @@ export const ESTIMATE_MAX_FILES = 1_000;
  * knobs take the project's value (authenticated, with a project) or a new project's default.
  */
 export const quoteSettingsSchema = z.strictObject({
-  /** Processing quality: fast reads text layers only, auto reads scans and complex pages, good reads every page. */
+  /**
+   * Processing quality as a pricing profile: `fastest` reads text layers and OCRs scans and images, `smartest` sends
+   * every page the text layer cannot carry to a vision model, `fast` is Fastest with Read scans off (text layers only).
+   * The deprecated `auto`/`balanced` (Fastest) and `good`/`smart` (Smartest) are still accepted. `visual` is reserved
+   * for visual indexing and set from `indexing`.
+   */
   quality: pipelineProfileIdSchema,
+  /** Fastest only: `false` quotes Fastest with Read scans off (`quality: "fast"`). Folded onto `quality` on input. */
+  readScans: z.boolean().optional(),
   /**
    * `full` indexes every page for search and chat on upload (`pipeline.indexingMode: "full"`); `on-demand` maps the
    * documents and indexes pages when a query first needs them (`"map"`); `visual` embeds every page image on upload
@@ -55,14 +64,46 @@ export const quoteSettingsSchema = z.strictObject({
    * charts with AI) is priced.
    */
   chartExport: chartExportTierSchema,
+  /**
+   * Visuals (`none` | `figures` | `charts` | `charts-ai`), replacing `chartExport`: `charts-ai` prices AI chart reads, the
+   * rest price none. Normalized onto `chartExport` (`normalizeQuoteSettingsInput`); both together must agree.
+   */
+  visuals: visualsLevelSchema.optional(),
   /** Chart export formats and diagrams the `models` tier prices with: the project's own, so the quote's charts line equals the upload's `chartExport.credits`. */
   chartFormats: z.array(chartExportFormatSchema).min(1).max(CHART_EXPORT_FORMATS.length),
   chartDiagrams: z.boolean(),
+  /**
+   * Auto ladder above-fast share (`pipeline.ladder.maxEscalationShare.aboveFast`): the largest share of each document's
+   * pages a model may read; the rest are quoted Fast. Omitted: the project's, else no cap. Only `auto` uses it.
+   */
+  aboveFastShare: z.number().finite().min(0).max(1).nullable().optional(),
 });
 export type QuoteSettings = z.infer<typeof quoteSettingsSchema>;
 
+/**
+ * Quote settings from a request with `visuals` folded onto `chartExport` (the field the pricing reads). Throws
+ * `QuoteSettingsError` (`extraction_config_conflict`) when both are given and disagree.
+ */
+export function normalizeQuoteSettingsInput<T extends Partial<QuoteSettings> | undefined>(settings: T): T {
+  if (settings && settings.readScans !== undefined) {
+    const { readScans, ...withoutReadScans } = settings;
+    const quality = pipelineProfileIdSchema.safeParse(withoutReadScans.quality ?? "fastest");
+    if (!readScans && quality.success && quality.data === "smartest") {
+      throw new QuoteSettingsError("settings.readScans false conflicts with quality 'smartest' (Smartest always reads scans)", "extraction_config_conflict");
+    }
+    const next = !readScans ? { ...withoutReadScans, quality: "fast" as const }
+      : quality.success && quality.data === "fast" ? { ...withoutReadScans, quality: "fastest" as const } : withoutReadScans;
+    return normalizeQuoteSettingsInput(next as T);
+  }
+  if (!settings || settings.visuals === undefined) return settings;
+  const { visuals, ...rest } = settings;
+  const tier = chartTierForVisuals(visuals);
+  if (rest.chartExport && rest.chartExport !== tier) throw new QuoteSettingsError(`settings.visuals '${visuals}' conflicts with settings.chartExport '${rest.chartExport}'; send visuals only`, "extraction_config_conflict");
+  return { ...rest, chartExport: tier } as T;
+}
+
 export const DEFAULT_QUOTE_SETTINGS: QuoteSettings = {
-  quality: "auto",
+  quality: "fast",
   indexing: "full",
   documentSummary: false,
   structuredFields: false,
@@ -166,14 +207,18 @@ export type ProviderEstimateArgs = {
 /** The knobs a project pipeline is set to: the base an authenticated caller's settings override. */
 export function quoteSettingsForPipeline(pipeline: PipelineFeatures): Partial<QuoteSettings> {
   const features = estimateProfileFor(pipeline, { env: {} }).documentFeatures;
+  const ladderShare = ladderShareProfile(pipeline).aboveFastShare;
+  const chartTier = ladderChartExportTier(pipeline, pipeline.chartExport?.tier);
   return {
-    quality: pipeline.quality,
+    // The pricing profile the pipeline reads with: Read scans off (the fast rung) is quoted as Fast.
+    quality: pipelineProfileIdFor(pipeline),
+    ...(ladderShare !== undefined ? { aboveFastShare: ladderShare } : {}),
     indexing: pipeline.indexingMode === "visual" ? "visual" : pipeline.indexingMode === "map" ? "on-demand" : "full",
     ...features,
     videoFrames: pipeline.mediaVideo?.enabled !== false,
     speedBoost: pipeline.speedBoost === true,
     // Only an explicit project tier; an unset one resolves per caller at quote time.
-    ...(pipeline.chartExport?.tier ? { chartExport: pipeline.chartExport.tier } : {}),
+    ...(chartTier ? { chartExport: chartTier } : {}),
     ...(pipeline.chartExport?.formats?.length ? { chartFormats: [...pipeline.chartExport.formats] } : {}),
     ...(pipeline.chartExport ? { chartDiagrams: pipeline.chartExport.diagrams !== false } : {}),
   };
@@ -185,8 +230,8 @@ export function estimateProfileForSettings(settings: QuoteSettings, options: { w
     + [settings.documentSummary, settings.structuredFields, settings.knowledgeGraph, settings.propositions].filter(Boolean).length;
   return {
     pricingVersion: pricing().version,
-    // Visual indexing embeds every page image: a model read of every page, priced as the quality that reads every page.
-    quality: settings.indexing === "visual" ? "good" : settings.quality,
+    // Visual indexing embeds every page image: a model read of every page, priced as the `visual` profile.
+    quality: settings.indexing === "visual" ? "visual" : settings.quality,
     documentFeatures: {
       documentSummary: settings.documentSummary,
       structuredFields: settings.structuredFields,
@@ -214,17 +259,54 @@ export function quoteStoredWork(args: {
   env?: Record<string, string | undefined>;
   origin?: RunOrigin;
 }): EstimateQuote {
+  args = { ...args, settings: normalizeQuoteSettingsInput(args.settings) };
   const settings = quoteSettingsSchema.parse({
     ...DEFAULT_QUOTE_SETTINGS, ...args.base, ...args.settings,
     chartExport: quoteChartTier(args.settings?.chartExport, args.base?.chartExport, args),
   });
-  if (settings.indexing === "visual" && settings.quality === "fast") throw new QuoteSettingsError("Visual indexing reads every page and cannot be combined with fast quality");
+  assertVisualIndexingQuality(settings);
   const billing = isBillingEnforced(args.env ?? process.env) ? "enforced" : "disabled";
   const files = args.files.map(({ profile: _ignored, ...file }) => file);
   const profile = estimateProfileForSettings(settings, { billing, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
-  const quote = pricing().quote({ files, settings, profile, ...(args.work ? { work: args.work } : {}) });
+  // Stage-precise work estimates already price the ladder (estimatePipelineWork); a fresh ingest quote is capped here.
+  return providerQuote({ files, settings, profile, ...(args.work ? { work: args.work } : {}) }, billing, !args.work);
+}
+
+/**
+ * The provider's quote for these settings, the ladder's above-fast share applied: the provider prices the settings
+ * without it (it never sees the knob), and a share below 1 on `auto` caps the ingest credits at Fast plus the Rich
+ * surcharge of the pages the share allows (capCreditsToLadderShare).
+ */
+function providerQuote(args: ProviderEstimateArgs, billing: "enforced" | "disabled", capIngest: boolean): EstimateQuote {
+  const { aboveFastShare, ...settings } = args.settings;
+  const quote = pricing().quote({ ...args, settings: settings as QuoteSettings });
   if (quote.kind !== "estimate" || quote.billing !== billing) throw new Error("pricing provider returned an invalid estimate");
-  return quote;
+  if (!capIngest || typeof aboveFastShare !== "number" || (args.profile.quality !== "fastest" && args.profile.quality !== "smartest") || !quote.ingest.credits) return quote;
+  const fast = pricing().quote({ ...args, settings: { ...settings, quality: "fast" } as QuoteSettings, profile: { ...args.profile, quality: "fast" } });
+  if (fast.kind !== "estimate" || !fast.ingest.credits) return quote;
+  const before = quote.ingest.credits;
+  const ingest = capCreditsToLadderShare({ credits: before, fastCredits: fast.ingest.credits, files: args.files, share: aboveFastShare });
+  const saved = { low: before.low - ingest.low, high: before.high - ingest.high };
+  const pagesPerDollar = quote.rates.pagesPerDollar && ingest.high > 0 && ingest.low > 0
+    ? { low: quote.pages.low / (ingest.high / 100), high: quote.pages.high / (ingest.low / 100) }
+    : quote.rates.pagesPerDollar;
+  return {
+    ...quote,
+    settings: { ...quote.settings, aboveFastShare },
+    ingest: { ...quote.ingest, credits: ingest },
+    lines: quote.lines.map((line) => line.id === "pages"
+      ? { ...line, credits: { low: Math.max(0, line.credits.low - saved.low), high: Math.max(0, line.credits.high - saved.high) } }
+      : line),
+    rates: { ...quote.rates, pagesPerDollar },
+    basis: `${quote.basis}; at most ${Math.round(aboveFastShare * 1000) / 10}% of each document's pages read by a model (pipeline.ladder)`,
+  };
+}
+
+/** Visual indexing reads every page image with a model, so it needs Smartest (Fastest never reads a page with one). */
+function assertVisualIndexingQuality(settings: QuoteSettings): void {
+  if (settings.indexing === "visual" && settings.quality !== "smartest" && settings.quality !== "visual") {
+    throw new QuoteSettingsError("Visual indexing reads every page with a model and needs quality 'smartest'");
+  }
 }
 
 /** Settings a project could not be configured with (a quote refuses them as the project API does). */
@@ -247,15 +329,14 @@ export function quoteEstimate(
   request: EstimateRequest,
   options: { base?: Partial<QuoteSettings>; workerSlots?: number; env?: Record<string, string | undefined>; origin?: RunOrigin } = {},
 ): EstimateQuote {
+  request = { ...request, settings: normalizeQuoteSettingsInput(request.settings) };
   const settings = quoteSettingsSchema.parse({
     ...DEFAULT_QUOTE_SETTINGS, ...options.base, ...request.settings,
     chartExport: quoteChartTier(request.settings?.chartExport, options.base?.chartExport, options),
   });
-  if (settings.indexing === "visual" && settings.quality === "fast") throw new QuoteSettingsError("Visual indexing reads every page and cannot be combined with fast quality");
+  assertVisualIndexingQuality(settings);
   const billing = isBillingEnforced(options.env ?? process.env) ? "enforced" : "disabled";
   const files = request.files.map((file) => applyFileProfile(file));
   const profile = estimateProfileForSettings(settings, { billing, ...(options.workerSlots ? { workerSlots: options.workerSlots } : {}) });
-  const quote = pricing().quote({ files, settings, profile });
-  if (quote.kind !== "estimate" || quote.billing !== billing) throw new Error("pricing provider returned an invalid estimate");
-  return quote;
+  return providerQuote({ files, settings, profile }, billing, true);
 }

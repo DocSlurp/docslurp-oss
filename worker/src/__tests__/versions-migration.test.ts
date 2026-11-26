@@ -1,11 +1,12 @@
+import { testMigrationPath } from "../test/migration-path.js";
 import { createHash } from "node:crypto";
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   createMigratedDatabase,
-  migrationJournalProblems,
-  readMigrationJournal,
+  migrationNameProblems,
+  readMigrationTags,
 } from "../test/migrated-db.js";
 
 // Reference mirror of the version-key algorithm in the global constraints.
@@ -68,8 +69,8 @@ describe("migration 0065 versions, retention and config jobs", () => {
     await db?.close();
   });
 
-  it("keeps the journal consistent", () => {
-    expect(migrationJournalProblems(readMigrationJournal())).toEqual([]);
+  it("keeps migration file names valid", () => {
+    expect(migrationNameProblems(readMigrationTags())).toEqual([]);
   });
 
   it("applies column defaults", async () => {
@@ -119,7 +120,7 @@ describe("migration 0065 versions, retention and config jobs", () => {
 
   it("backfills only chained versions into one key; unrelated same-name files stay independent", async () => {
     const m = (await import("node:fs")).readFileSync(
-      new URL("../../../server/db/migrations/0065_versions_retention_config_jobs.sql", import.meta.url), "utf8");
+      testMigrationPath("0065_versions_retention_config_jobs.sql"), "utf8");
     const doc = (id: string, name: string, status: string, day: string, prev: string | null) =>
       `('${id}','o1','u1','w','run-1','${name}','application/pdf','k-${id}','${status}',1,'2026-02-${day}',${prev ? `'${prev}'` : "null"})`;
     await db.exec(`

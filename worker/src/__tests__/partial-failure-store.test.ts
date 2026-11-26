@@ -89,7 +89,7 @@ describe("partial Document failure in the store", () => {
       const state = await loadRunState(store, "success-rollback");
       state.usageLedger.enqueue({ id: "rollback-usage", provider: "local", model: "compute", metric: "compute", amount: 1, unit: "second", costCents: 2 });
       const pending = state.usageLedger.pendingBillableCents;
-      const spy = vi.spyOn(store, "triggerWebhooks").mockRejectedValueOnce(new Error("outbox unavailable"));
+      const spy = vi.spyOn(store.notifications, "triggerWebhooks").mockRejectedValueOnce(new Error("outbox unavailable"));
       await expect(store.completeRun(state)).rejects.toThrow("outbox unavailable");
       expect(state.usageLedger.pendingBillableCents).toBe(pending);
       spy.mockRestore();
@@ -100,6 +100,28 @@ describe("partial Document failure in the store", () => {
     }
     expect((await db.query("select status from project_runs where id = 'success-rollback'")).rows).toEqual([{ status: "processing" }]);
     await withStore(async store => store.completeRun(await loadRunState(store, "success-rollback")));
+  });
+
+  it("acknowledges an operator cancellation at the active stage exactly once", async () => {
+    const runId = "cancel-during-stage";
+    await seedRun(runId);
+    await db.query("update project_runs set execution_generation='g1', control_state='cancel_requested', failure_count=2 where id=$1", [runId]);
+    await db.query("insert into project_run_stage_states(run_id, stage_name, status) values ($1, 'embed', 'processing')", [runId]);
+    const owner = { runId, orgId: "o1", projectId: "w", executionGeneration: "g1" };
+    await withStore(async store => {
+      await expect(store.failRun(runId, "parse", "workflow cancelled", { ...owner, executionGeneration: "old" })).rejects.toThrow("ownership");
+      const stale = await loadRunState(store, runId);
+      stale.stage = "format-detect";
+      await store.updateProgress(stale);
+      await expect(store.completeRun(stale, owner)).rejects.toThrow("ownership");
+      await store.failRun(runId, "parse", "workflow cancelled", owner);
+      await store.failRun(runId, "parse", "retry", owner);
+    });
+    expect((await db.query("select status, control_state, stage, error, failure_count from project_runs where id=$1", [runId])).rows)
+      .toEqual([{ status: "failed", control_state: "cancelled", stage: "embed", error: "Cancelled", failure_count: 2 }]);
+    expect((await db.query("select status from project_run_stage_states where run_id=$1", [runId])).rows).toEqual([{ status: "failed" }]);
+    expect((await db.query("select stage_name from project_run_events where run_id=$1 and event_type='run.failed'", [runId])).rows)
+      .toEqual([{ stage_name: "embed" }]);
   });
 
   it("deduplicates an acknowledged-lost commit and rejects stale or cross-tenant owners", async () => {
@@ -125,7 +147,7 @@ describe("partial Document failure in the store", () => {
     await seedRun("receipt-rollback");
     const owner = { runId: "receipt-rollback", orgId: "o1", projectId: "w" };
     await withStore(async (store) => {
-      const webhook = vi.spyOn(store, "triggerWebhooks").mockRejectedValueOnce(new Error("outbox unavailable"));
+      const webhook = vi.spyOn(store.notifications, "triggerWebhooks").mockRejectedValueOnce(new Error("outbox unavailable"));
       await expect(store.failRun(owner.runId, "embed", "failure", owner)).rejects.toThrow("outbox unavailable");
       webhook.mockRestore();
     });

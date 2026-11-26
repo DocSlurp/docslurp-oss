@@ -1,4 +1,4 @@
-import { readFile, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import path from "node:path";
 
 import type { Sql } from "postgres";
@@ -6,10 +6,10 @@ import {
   calculateAiUsageCostCents,
   DEFAULT_SERVER_MATERIALIZATION_POLICY,
   narrowMaterializationPolicy,
+  ladderAllowsOffPlanReads,
   qualityAllowsPageReading,
   resolveAllowedPipelineTextModel,
-  type MaterializationPolicy,
-} from "@docslurp/shared";
+  type MaterializationPolicy, switchDisabled } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { calibrateSegments, intToRoman, parseLabel, readPrintedPageNumber, resolvePrintedPage, segmentsFromPageLabels, type LabelSegment } from "../deferred/page-labels.js";
@@ -60,7 +60,7 @@ export function mapCoverage(nodes: MapNode[], pageCount: number): number {
 
 /** Side-effecting edges, injectable so tests need no poppler, vision model or LLM. */
 export interface DocumentMapOps {
-  readStructure(bytes: Uint8Array): Promise<PdfStructure>;
+  readStructure(sourcePath: string): Promise<PdfStructure>;
   /** Text layer for pages first..last, one string per page (a single pdftotext call). */
   extractText(sourcePath: string, first: number, last: number, signal?: AbortSignal): Promise<string[]>;
   /** OCR pages first..last of a scanned document. */
@@ -155,7 +155,7 @@ export class DocumentMapStage implements Stage {
     const sql = this.sqlFor(state);
     const source = await this.sources.get(document);
     // A corrupt or encrypted PDF degrades to text-only mapping instead of failing the stage.
-    const structure = await ops.readStructure(await readFile(source.path)).catch((error): PdfStructure => {
+    const structure = await ops.readStructure(source.path).catch((error): PdfStructure => {
       console.warn(`[document-map] structure read failed document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
       return { pageCount: Math.max(1, document.pageCount), outline: [], pageLabels: null };
     });
@@ -348,7 +348,8 @@ export class DocumentMapStage implements Stage {
     // (7) coarse visual layer: scanned pages the map does not cover get page-image vectors (cost-capped).
     // Page-image embedding costs per page, so it runs only on explicit opt-in (`visualPages.coarseFallback`).
     // Under Fast, embedPageImages refuses (stoppedBy "quality-fast"): nothing is rendered, embedded or charged.
-    if (!bornDigital && coverage < COVERAGE_THRESHOLD && state.run.pipeline.visualPages?.coarseFallback === true) {
+    // An Auto ladder limit keeps page-image embeddings off (ladderAllowsOffPlanReads): they read pages outside its plan.
+    if (!bornDigital && coverage < COVERAGE_THRESHOLD && state.run.pipeline.visualPages?.coarseFallback === true && ladderAllowsOffPlanReads(state.run.pipeline).pageEmbeddings) {
       const embedder = this.deps.pageEmbedder !== undefined
         ? this.deps.pageEmbedder
         : resolvePageImageEmbedder({ route: state.run.pipeline.visualPages?.route ?? "auto", privacyMode: state.run.pipeline.privacyMode });
@@ -387,11 +388,14 @@ export class DocumentMapStage implements Stage {
     if (!(await allowHostedCall(state, openRouterTextCall("document-map", model), [document.id]))) return null;
     const maxSiphonPages = Math.min(60, Math.ceil(0.05 * pageCount));
     if (maxSiphonPages < 1) return null;
+    // DOCSLURP_DISABLE=ai: the siphon's decisions and map OCR are model reads; none run.
+    if (switchDisabled(process.env, "ai")) return null;
     return await runSiphonLoop({
       pageCount, maxSiphonPages, seed: args.draft, initialObservations: args.initialObservations, shouldStop: () => isCostCapExceeded(state), signal: args.signal,
       readWindow: async (first, last) => {
         // Fast never reads a page with a model: the siphon sees only the text layer, and scanned pages stay unread.
-        if (args.bornDigital || !qualityAllowsPageReading(state.run.pipeline.quality)) {
+        // Nor under an Auto ladder above-fast share: the siphon's reads are outside the document's page plan.
+        if (args.bornDigital || !qualityAllowsPageReading(state.run.pipeline.quality) || !ladderAllowsOffPlanReads(state.run.pipeline).pageReads) {
           const pageTexts = await ops.extractText(args.source, first, last, args.signal);
           pageTexts.forEach((t, i) => args.text.set(first + i, t));
           return { pageTexts };
@@ -425,7 +429,7 @@ export class DocumentMapStage implements Stage {
     // Vision already stopped for the run: render nothing, call nothing.
     if (visionGuardFor(state).stop) return { pageTexts: pageNumbers.map(() => ""), costCents: 0 };
     // Fail closed: Fast never sends a page to a vision model, whoever asks.
-    if (!qualityAllowsPageReading(state.run.pipeline.quality)) return { pageTexts: pageNumbers.map(() => ""), costCents: 0 };
+    if (!qualityAllowsPageReading(state.run.pipeline.quality) || !ladderAllowsOffPlanReads(state.run.pipeline).pageReads || switchDisabled(process.env, "ai")) return { pageTexts: pageNumbers.map(() => ""), costCents: 0 };
 
     const maxLongEdgePx = visionRenderLongEdge(state.run.pipeline.vision);
     const artifacts = await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers, dpi: OCR_DPI, ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}), signal: args.signal });

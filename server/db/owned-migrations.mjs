@@ -1,5 +1,4 @@
-import { drizzle } from "drizzle-orm/node-postgres";
-import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { applyMigrationFiles } from "./migration-runner.mjs";
 import { assertGenerationRollout } from "./generation-rollout.mjs";
 import { assertMigrationOwner, reconcileRoleGrants } from "./roles.mjs";
 import { migratePostgis } from "./migrate-postgis.mjs";
@@ -8,7 +7,7 @@ import { migratePostgis } from "./migrate-postgis.mjs";
  * the pre-generation barrier must stay closed throughout this operation. */
 export async function applyOwnedMigrations(client, { migrationsFolder, env = process.env } = {}) {
   await assertMigrationOwner(client);
-  await assertGenerationRollout(client, env);
+  const generationCutover = await assertGenerationRollout(client, env);
   const { rows: [identity] } = await client.query(`select current_user as actor,
     session_user as authenticated,
     (select tableowner from pg_tables where schemaname='public' and tablename='documents') as existing_owner,
@@ -32,7 +31,18 @@ export async function applyOwnedMigrations(client, { migrationsFolder, env = pro
     // interpolation and no membership or privilege grants to runtime roles.
     await client.query(`SET ROLE "${owner}"`);
     await assertMigrationOwner(client);
-    await migrate(drizzle(client), { migrationsFolder });
+    try {
+      // The generation cutover is verified once, for this run (closed database, drained fleet). Applied file by file,
+      // a failure after 0112 would leave a database the barrier no longer recognises as pre-generation, and the next
+      // run would finish the cutover unchecked. So that one upgrade stays all or nothing.
+      await applyMigrationFiles(client, { migrationsFolder, env, atomic: generationCutover === true });
+    } catch (error) {
+      // Files before the failed one are committed: do not leave their new tables with unreconciled grants.
+      if (error?.appliedFiles?.length > 0) {
+        await reconcileRoleGrants(client).catch((grantError) => console.error(`[migrate] role grants not reconciled after a partial run: ${grantError?.message ?? grantError}`));
+      }
+      throw error;
+    }
     if (env.POSTGIS_MIGRATIONS === "1") await migratePostgis(client);
     await reconcileRoleGrants(client);
   } finally {

@@ -169,7 +169,6 @@ function base(
 }
 
 const HOSTED_SEED_MODELS = [
-  "google/gemini-2.5-flash-lite",
   "google/gemini-3.1-flash-lite",
   "google/gemini-3.5-flash-lite",
   "z-ai/glm-5.3-flash",
@@ -340,7 +339,7 @@ export function buildRoutingTargetCatalog(
       continue;
     }
     // The page router picks among admitted targets on its own: a model that is never selected automatically is never one.
-    if (idsToCheck.some(isAutomaticSelectionDenied)) {
+    if (idsToCheck.some((id) => isAutomaticSelectionDenied(id))) {
       reject(candidate.id, "automatic-selection-denied", "never selected automatically (automatic-model-selection.ts)");
       continue;
     }

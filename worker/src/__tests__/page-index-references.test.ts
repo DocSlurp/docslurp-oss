@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { normalizePipelineFeatures } from "@docslurp/shared";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
+import { pipelineFeaturesSchema } from "@docslurp/shared";
 
 import { applyPageImageReferences } from "../lib/page-image-references.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
@@ -34,7 +35,7 @@ describe("page-index: Fast page-image references", () => {
     } as unknown as ArtifactStore;
     const state = WorkflowState.create({
       id: "run", orgId: "org", userId: "user", projectId: "ws", spentCents: 0, stats: {}, artifacts: {},
-      pipeline: normalizePipelineFeatures({ quality: "fast", pageIndex: true }),
+      pipeline: pipelineFeaturesSchema.parse({ quality: "fastest" }),
     } as unknown as ProjectRun, [document]);
     state.artifactLedger.recordDocument("doc", "canonical-document", "s3://bucket/canonical/doc.json");
     state.artifactLedger.recordDocument("doc", "extraction-contract", "s3://bucket/contract/doc.json");
@@ -46,11 +47,9 @@ describe("page-index: Fast page-image references", () => {
     expect(String(objects.get(state.artifactLedger.readDocument("doc", "markdown")!.replace("s3://bucket/", "")))).toContain("images/page-0002.png");
 
     const inserted: Array<{ pageNumber: number; text: string }> = [];
-    const known: Record<string, unknown> = {
-      getCompletedPages: async () => new Set<number>(),
-      insertPages: async (rows: Array<{ pageNumber: number; text: string }>) => void inserted.push(...rows),
-    };
-    (state as unknown as { store: unknown }).store = new Proxy(known, { get: (target, key: string) => target[key] ?? (async () => undefined) });
+    const store = memoryCheckpointStore();
+    store.content.insertPages = async (_scope, rows) => void inserted.push(...rows);
+    state.store = store;
 
     await new PageIndexStage({} as CommandRunner, storage).run(state);
 

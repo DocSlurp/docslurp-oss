@@ -19,7 +19,7 @@ import { currentPerfContext } from "../lib/perf-context.js";
 import { RunPolicyError } from "../lib/document-failure.js";
 import { SourceIntegrityError } from "../sandbox/source-integrity.js";
 import {
-  countFirstPassPages, firstPassDefersPageCount, firstPassPipeline, planFirstPass, primeFirstPassResults, resetFirstPassResultsForTest, runFirstPassBatch, serveFirstPassResult,
+  countFirstPassPages, firstPassDefersPageCount, firstPassPipeline, firstPassResultGlyphs, planFirstPass, primeFirstPassResults, resetFirstPassResultsForTest, runFirstPassBatch, serveFirstPassResult,
 } from "../pipeline/first-pass.js";
 import { recordedVerdictGate, setFirstPassPublishGate } from "../pipeline/first-pass-gate.js";
 
@@ -51,9 +51,9 @@ async function seed(pipeline: Record<string, unknown> = {}) {
     update organizations set credit_balance_cents = 100000;
     insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 100000), ('o2', 'Other', 'other', 'u1', 100000) on conflict do nothing;
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'W2') on conflict do nothing;
-    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values (100, 'r1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '${JSON.stringify(pipeline)}', 3, 3),
-             (100, 'r2', 'o2', 'u1', 'w2', 'upload', 'processing', 'extract', '{}', 1, 1);
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
+      values (100, 'r1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '${JSON.stringify(pipeline)}', 3, 3, null),
+             (100, 'r2', 'o2', 'u1', 'w2', 'upload', 'processing', 'extract', '{}', 1, 1, null);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_size, parse_source_scan_version, parse_source_sha256)
       values ('d0', 'o1', 'u1', 'w', 'r1', 'a.pdf', 'application/pdf', 'u1/k0', 'processing', 1, 'assumed', 100, 1, '${SOURCE_SHA}'),
              ('d1', 'o1', 'u1', 'w', 'r1', 'b.pdf', 'application/pdf', 'u1/k1', 'processing', 1, 'assumed', 100, 1, '${SOURCE_SHA}'),
@@ -98,7 +98,7 @@ const textEvent = (index: number, pages = 1, words = 50) => ({
 });
 
 /** What each fake stage saw, in order. */
-let seen: Array<{ stage: string; documentId: string; pageCount?: number; served?: string }>;
+let seen: Array<{ stage: string; documentId: string; pageCount?: number; served?: string; glyphs?: boolean }>;
 let piiFails: Set<string>;
 let visionReplaces: Set<string>;
 /** N1: the index stage skips these documents (no checkpoint), as a stage that silently no-ops would. */
@@ -133,7 +133,7 @@ function stages(): Stage[] {
       // Not served: the ordinary route boots a VM (counted).
       if (!served) await sandboxedPdfProvider()!.run(job, {} as never);
       const text = served ? await readFile(output, "utf8") : undefined;
-      seen.push({ stage: "extract-markdown", documentId: document.id, pageCount: document.pageCount, served: text });
+      seen.push({ stage: "extract-markdown", documentId: document.id, pageCount: document.pageCount, served: text, ...(served ? { glyphs: firstPassResultGlyphs(currentPerfContext()) } : {}) });
       if (state.firstPassShard) expect(state.run.pipeline.documentExtraction.order.pdf).toEqual(["vm-pdf"]);
       state.artifactLedger.recordDocument(document.id, "markdown", `s3://t/markdown/${document.id}.json`);
       return { markdownSha256: createHash("sha256").update(text ?? "vm").digest("hex") };
@@ -147,10 +147,10 @@ function stages(): Stage[] {
       seen.push({ stage: "pii-detect", documentId: document.id });
       if (piiFails.has(document.id)) throw Object.assign(new Error("pii blocked"), {});
     }),
-    perDocument("embed", async (_state, document) => {
+    perDocument("embed", async (state, document) => {
       if (embedHold?.ids.has(document.id)) await embedHold.until;
       seen.push({ stage: "embed", documentId: document.id });
-      await store.markDocumentLexicalSearchable(document.id);
+      await store.content.markDocumentLexicalSearchable({ orgId: state.run.orgId ?? null, runId: state.run.id, documentId: document.id });
     }),
     perDocument("index", async (_state, document) => {
       seen.push({ stage: "index", documentId: document.id });
@@ -228,6 +228,26 @@ describe("first pass", () => {
   it("plans only this run's PDFs", async () => {
     const plan = await planFirstPass(store, "r1");
     expect(plan.batches.flat().sort()).toEqual(DOCS);
+  });
+
+  it("keeps batch demand through provisional stages and fences stale writes", async () => {
+    script = all3;
+    const generation = "current-execution";
+    await db.query("update project_runs set execution_generation = $1 where id = 'r1'", [generation]);
+    await expect(runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS })).rejects.toThrow("Run execution ownership");
+    expect(batchCalls).toBe(0);
+    const readDemand = async () => (await db.query<{ shard_demand: number }>(
+      "select shard_demand from project_runs where id = 'r1'",
+    )).rows[0]?.shard_demand;
+    await store.setRunShardDemand("r1", 2, generation);
+    expect(await readDemand()).toBe(2);
+    const result = await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS, executionGeneration: generation });
+    expect(result.indexed.sort()).toEqual(DOCS);
+    expect(await readDemand()).toBe(2);
+    await store.setRunShardDemand("r1", 0, "stale-generation");
+    expect(await readDemand()).toBe(2);
+    await store.setRunShardDemand("r1", 0, generation);
+    expect(await readDemand()).toBe(0);
   });
 
   it("each document is lexical_searchable as soon as its text event is handled, while later files are still pending", async () => {
@@ -329,6 +349,7 @@ describe("first pass", () => {
   });
 
   it("a document with textless pages is extracted but left to the stage loop for OCR before it is embedded", async () => {
+    await seed({ ladder: { maxRung: "ocr" } });
     script = async (_job, emit) => { await emit(textEvent(0, 2, 0)); await emit(textEvent(1)); await emit(textEvent(2)); };
     const result = await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
     expect(result.extracted).toEqual(["d0"]);
@@ -509,6 +530,26 @@ describe("first pass: council #340 regressions", () => {
     expect(singleRuns).toBe(0);
     // Same Markdown as the first pass: no second PII scan or embedding.
     expect(seen.filter((s) => s.stage === "pii-detect" || s.stage === "embed")).toEqual([]);
+  });
+
+  it("a math batch's result is served as a math run's, in memory and from the persisted result (council #467)", async () => {
+    await seed({ visionFallback: true });
+    vi.stubEnv("DOCSLURP_FIRST_PASS_MATH", "on");
+    script = all3;
+    await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
+    expect(lastJob?.options.math).toBe(true);
+    expect(seen.filter((s) => s.stage === "extract-markdown").map((s) => s.glyphs)).toEqual([true, true, true]);
+    seen = [];
+    resetFirstPassResultsForTest();
+    await loopStage("extract-markdown");
+    expect(seen.filter((s) => s.stage === "extract-markdown").map((s) => s.glyphs)).toEqual([true, true, true]);
+  });
+
+  it("a batch without math is served as a plain run", async () => {
+    script = all3;
+    await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
+    expect(lastJob?.options.math).toBe(false);
+    expect(seen.filter((s) => s.stage === "extract-markdown").map((s) => s.glyphs)).toEqual([false, false, false]);
   });
 
   it("N1: a document whose index checkpoint the index stage did not complete is never reported indexed; the loop indexes it exactly once", async () => {

@@ -9,7 +9,7 @@ internal cost.
 
 | Method | Called by |
 |---|---|
-| `pageCredits(mode, pages)`, `richPagesForOutputTokens(tokens)` | worker page charges (Fast at completion, Rich per model read) |
+| `pageCredits(mode, pages)`, `richPagesForOutputTokens(tokens)` | worker page charges: `fast` at completion, `ocr` once per page the OCR route read (flat, whatever the output), `rich` per vision-model read (its output-token units). An OCR page a vision model then reads pays `rich` minus `ocr` (`pageUpgradeCredits`). Prices must hold `fast <= ocr <= rich`; installation refuses a provider that does not |
 | `mediaRichPages(kind, seconds)` | worker media charges, media spend reserves, upload estimates |
 | `featureCredits(feature, pages)` | worker optional-feature charges (summary, structured fields, knowledge graph, propositions) |
 | `visualExportRetryCredits()`, `chartExportExpectedRetriesPerRead()` | chart & diagram export second reads: the credits for a visual's one answered repair or cut-off retry (billed as its own event, at most once per visual), and the expected share of such second reads per model-read visual (0 to 1) that estimates and quotes add; the open default charges 0 |
@@ -22,7 +22,7 @@ internal cost.
 | `chatModelTier`, `chatAnswerUnits`, `chatAnswerCredits` | chat answer charges |
 | `plans` | credit packs, the starter grant, org worker ceilings |
 | `qualityModePricing(mode)`, `publicPrices()` | the processing quality picker, `GET /v1/billing/prices` |
-| `estimateIngest(input)`, `quoteUpload(args)` | every work estimate, `POST /v1/uploads/estimate` |
+| `estimateIngest(input)`, `quoteUpload(args)` | every work estimate, `POST /v1/uploads/estimate`. Under `auto`, scanned and image pages (`mix.scanned`) are read by OCR first: a provider prices them at the OCR class and reports them as `ocrPages` / `breakdown.ocr` |
 | `internalCost.*` | internal cost of local compute, remote sandboxes and worker slots (never a customer charge) |
 | `internalCost.chartGeneratorMaxPricesUsdPerMTok()` | chart & diagram export generator selection: the highest input and output list prices (USD per 1M tokens) a generator may have; both must hold. `null` lets core derive them from `visualExportCredits` (one call at the image limit, or one answer at the output cap, costs the whole per-visual charge); with nothing charged per visual there is no ceiling of its own |
 
@@ -34,7 +34,7 @@ rules charged it.
 Without a provider, core prices with `OPEN_PRICING` (`packages/shared/src/pricing-open.ts`), one flat, published rule a
 self-hosted operator can predict:
 
-- every page costs 0.1 credit ($1 per 1,000 pages), however it was read;
+- every page costs 0.1 credit ($1 per 1,000 pages), however it was read (Fast, OCR and Rich alike);
 - an audio or video file counts one page per started minute;
 - storage, searches, chat answers, web tools and optional features cost nothing;
 - no speed boost surcharge, no output-token surcharge, every run pays its full page charge;
@@ -85,7 +85,7 @@ restores the current value); an existing key rises by at most 1000 per raise, a 
 Fail closed:
 
 - a named plugin that does not load, exports no `register`, or returns an incomplete provider is a startup error;
-- `DOCSLURP_SERVICE_PROFILE=service` (or `DOCSLURP_PRICING_REQUIRED=1`) without `DOCSLURP_PRICING_PLUGIN` is a startup
+- `DOCSLURP_PROFILE=service` (or `DOCSLURP_PRICING_REQUIRED=1`) without `DOCSLURP_PRICING_PLUGIN` is a startup
   error, and `pricing()` throws under either setting until a provider is installed, so a billing deployment never prices
   with the open default, even in a process whose startup did not load one;
 - the id `open` is reserved for the open default; a second, different provider in one process is refused.
@@ -123,12 +123,14 @@ Request (strict: unknown fields are refused):
 ```json
 {
   "files": [{ "name": "scan.pdf", "size": 812345, "type": "application/pdf", "profile": { "schema": 1, "...": "..." } }],
-  "settings": { "quality": "auto", "indexing": "full", "hostingMonths": 12, "searchesPerMonth": 0 }
+  "settings": { "quality": "fastest", "indexing": "full", "hostingMonths": 12, "searchesPerMonth": 0 }
 }
 ```
 
-Knobs (`quoteSettingsSchema`; omitted ones take a new project's defaults): `quality` (`fast`, `auto`, `good`),
-`indexing` (`full`, `on-demand`, `visual`: page images embedded on upload, a read of every page, refused with `fast`), `documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`,
+Knobs (`quoteSettingsSchema`; omitted ones take a new project's defaults): `quality` as a pricing profile (`fastest`, `smartest`, or `fast` for Fastest with `readScans: false`; deprecated
+`auto`/`balanced` and `good`/`smart` are mapped), `readScans`, `indexing` (`full`, `on-demand`, `visual`: page images
+embedded on upload, a read of every page, priced as the `visual` profile and refused unless `smartest`). The provider's
+`qualityModePricing(mode)` and `profile.quality` take the profile ids `fast` | `fastest` | `smartest` | `visual`, `documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`,
 `videoFrames`, `speedBoost`, `hostingMonths` (1–60), `searchesPerMonth`, `chatAnswersPerMonth`, `chatTier`.
 
 Response (`EstimateQuote`): `kind: "estimate"`, `pricingVersion`, `validUntil`, `billing`, the resolved `settings`,

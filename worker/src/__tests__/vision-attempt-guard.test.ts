@@ -22,7 +22,7 @@ import {
   type LegacyPageHints,
   type VisionPageSkip,
 } from "../stages/vision-extract.js";
-import { attachVisionBilledUsage, VisionOutputRejectedError } from "../tools/vision-stream.js";
+import { attachVisionBilledUsage, attachVisionModelConfig, VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { buildVisionPageFacts } from "../pipeline/page-facts.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
@@ -54,6 +54,7 @@ import { guardedVisionCall } from "../lib/guarded-vision-call.js";
 import { loadRunState } from "../pipeline/stage-execution.js";
 import { PdfRasterCache, type PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { CommandRunner } from "../tools/runner.js";
+import { PAGE_ROUTE_PLAN_SLOT } from "../routing/runtime.js";
 import type { ProjectRun } from "../models.js";
 import type { Config } from "../config.js";
 import type { Document } from "../models.js";
@@ -111,8 +112,6 @@ describe("vision guard config", () => {
       expect(Math.floor(4_000 / weight) * weight).toBeLessThanOrEqual(4_000);
       expect(weight).toBeLessThanOrEqual(costliest);
     }
-    // gpt-4.1-mini is no longer worth 2,388 default-model requests: about 1,128 of its own.
-    expect(Math.floor(4_000 / visionRequestWeightCents("gpt-4.1-mini", "remote-openai"))).toBeLessThan(1_200);
     // An uncataloged private or loopback model weighs the catalog-dominating prices, never less than the default
     // model's worst case; local runtimes 2 cents.
     expect(visionRequestWeightCents("someone/unknown-vl", "openai-compatible")).toBeGreaterThanOrEqual(worstCaseVisionRequestCents(configuredVisionModel())!);
@@ -310,6 +309,7 @@ async function pageStage(args: {
   render?: { sizeBytes: number; widthPx: number | null; heightPx: number | null };
   /** Bytes of each downloaded render (default: not a PNG). */
   file?: Buffer;
+  config?: Partial<Config>;
 }) {
   const scratch = await mkdtemp(path.join(tmpdir(), "vision-guard-test-"));
   const rasters = {
@@ -319,6 +319,8 @@ async function pageStage(args: {
     }))),
   };
   const storage = {
+    bucket: "bucket",
+    getJson: vi.fn(async (_key: string): Promise<unknown> => undefined),
     downloadToTempFile: async (key: string) => {
       const dir = await mkdtemp(path.join(scratch, "page-"));
       const file = path.join(dir, `page-${key.split("/")[1]}.png`);
@@ -341,13 +343,13 @@ async function pageStage(args: {
         route: { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter", model: MODEL, billing: "openrouter" },
     };
   });
-  const stage = new VisionExtractStage({} as never, storage as never, CFG, rasters as never);
+  const stage = new VisionExtractStage({} as never, storage as never, { ...CFG, ...args.config }, rasters as never);
   const document = { id: "doc", userId: "user-1", filename: "upload.pdf", mimeType: "application/pdf", pageCount: args.pages } as Document;
   const extract = (stage as unknown as {
     extractVisionPagesFromCache(...a: unknown[]): Promise<Array<{ pageNumber: number; text: string }>>;
   }).extractVisionPagesFromCache.bind(stage);
   return {
-    stage, document, rasters, scratch,
+    stage, document, rasters, scratch, storage,
     run: (state: WorkflowState, hints: LegacyPageHints, skips: Map<number, VisionPageSkip>) =>
       extract(state, document, VISION, Array.from({ length: args.pages }, (_, index) => index + 1), undefined, undefined,
         undefined, false, { hints, skips }),
@@ -468,6 +470,77 @@ describe("vision page loop under the guard", () => {
     expect(skips.get(1)).toEqual({ pageNumber: 1, outcome: "rejected", fallbackText: true });
   });
 
+  it.each(["classification", PAGE_ROUTE_PLAN_SLOT] as const)("refuses page selection if stored %s cannot be read", async (slot) => {
+    const harness = await pageStage({ pages: 2, answer: () => ({ text: "unexpected read" }), config: { pageRouterMode: "active" } });
+    scratch = harness.scratch;
+    const state = runState({ quality: "auto", ladder: { maxRung: "intelligent" }, pageRouter: { mode: "active", marginFloor: 0 } });
+    state.documents.push(harness.document);
+    state.artifactLedger.recordDocument(harness.document.id, slot, "s3://bucket/routing.json");
+    harness.storage.getJson.mockRejectedValueOnce(new Error("Storage unavailable"));
+
+    await expect(harness.stage.planPageTasks(state)).rejects.toThrow("Storage unavailable");
+    expect(harness.storage.getJson).toHaveBeenCalledWith("routing.json");
+    expect(visionRuntime.execute).not.toHaveBeenCalled();
+    expect(ledgerOf(state).inspect("run-1", "org-1").runAttempts).toBe(0);
+  });
+
+  // Council (encoding-read cap): a resumed shard's payload before version 2 has no purpose; the run's plan data decides.
+  it("page tasks take their read budget from the plan data, whatever the payload says (legacy, v2, mismatched)", async () => {
+    const harness = await pageStage({ pages: 5, answer: (page) => ({ text: `page ${page}` }) });
+    scratch = harness.scratch;
+    const state = runState();
+    Object.assign(state, { run: { ...state.run, id: "run-budget-plan" } });
+    state.documents.push(harness.document);
+    // The plan data: every page is an encoding-only read (encodingReadPageCap(5) = 3).
+    const budgets = vi.spyOn(harness.stage as unknown as { loadDocumentReadBudgets(): Promise<unknown> }, "loadDocumentReadBudgets")
+      .mockResolvedValue({ budgets: new Map([1, 2, 3, 4, 5].map((page) => [page, "encoding-read"])), complete: true });
+    const task = (pageNumber: number, extra: Record<string, unknown> = {}) =>
+      harness.stage.runPageTask(state, { runId: "run-budget-plan", documentId: "doc", pageNumber, pageCount: 5, vision: VISION as never, ...extra });
+    // Legacy payloads (no version, no purpose), a v2 payload that claims an ordinary read, and one with the right purpose.
+    const results = [await task(1), await task(2, { payloadVersion: 2 }), await task(3, { payloadVersion: 2, readPurpose: "encoding-read" }), await task(4), await task(5, { payloadVersion: 2 })];
+    expect(results.slice(0, 3).map((result) => (result as { text?: string }).text)).toEqual(["page 1", "page 2", "page 3"]);
+    expect(results.slice(3)).toEqual([
+      { pageNumber: 4, outcome: "document-page-limit", fallbackText: false },
+      { pageNumber: 5, outcome: "document-page-limit", fallbackText: false },
+    ]);
+    // Loaded once per run and document in this process.
+    expect(budgets).toHaveBeenCalledTimes(1);
+  });
+
+  it("an incomplete plan-data load is not reused: the next page task loads again", async () => {
+    const harness = await pageStage({ pages: 2, answer: (page) => ({ text: `page ${page}` }) });
+    scratch = harness.scratch;
+    const state = runState();
+    Object.assign(state, { run: { ...state.run, id: "run-budget-retry" } });
+    state.documents.push(harness.document);
+    const load = vi.spyOn(harness.stage as unknown as { loadDocumentReadBudgets(): Promise<unknown> }, "loadDocumentReadBudgets")
+      .mockResolvedValueOnce({ budgets: new Map(), complete: false })
+      .mockResolvedValue({ budgets: new Map(), complete: true });
+    const run = (pageNumber: number) =>
+      harness.stage.runPageTask(state, { runId: "run-budget-retry", documentId: "doc", pageNumber, pageCount: 2, vision: VISION as never });
+    await expect(run(1)).rejects.toThrow("Could not read the persisted vision budgets");
+    expect(ledgerOf(state).inspect("run-budget-retry", "org-1").runAttempts).toBe(0);
+    await run(2);
+    await run(2);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("a v2 payload's purpose only makes a read stricter: a budget the plan does not know still applies", async () => {
+    const harness = await pageStage({ pages: 6, answer: (page) => ({ text: `page ${page}` }) });
+    scratch = harness.scratch;
+    const fresh = runState();
+    Object.assign(fresh, { run: { ...fresh.run, id: "run-budget-payload" } });
+    fresh.documents.push(harness.document);
+    vi.spyOn(harness.stage as unknown as { loadDocumentReadBudgets(): Promise<unknown> }, "loadDocumentReadBudgets").mockResolvedValue({ budgets: new Map(), complete: true });
+    const task = (pageNumber: number) => harness.stage.runPageTask(fresh, {
+      runId: "run-budget-payload", documentId: "doc", pageNumber, pageCount: 6, vision: VISION as never, payloadVersion: 2, readPurpose: "encoding-read",
+    });
+    const outcomes = [];
+    for (const page of [1, 2, 3, 4]) outcomes.push(await task(page));
+    // encodingReadPageCap(6) = 3: the fourth page is refused under the payload's budget.
+    expect(outcomes.map((result) => (result as { outcome?: string }).outcome ?? "read")).toEqual(["read", "read", "read", "document-page-limit"]);
+  });
+
   it("records a rejected page once and counts both of its requests failed and uncharged", async () => {
     const harness = await pageStage({ pages: 3, answer: () => rejection(undefined, 2) });
     scratch = harness.scratch;
@@ -485,6 +558,8 @@ describe("vision page loop under the guard", () => {
         // Fails open (the page keeps its text) after the provider billed an attempt.
         const error = new Error("insufficient_quota after a billed attempt");
         attachVisionBilledUsage(error, { inputTokens: 2_000, outputTokens: 300, costCents: 0.75 });
+        // The runtime attaches the failed request's settings (vision-runtime.ts).
+        attachVisionModelConfig(error, { promptMode: "template", temperature: 0, maxTokens: 4096 });
         return error;
       },
     });
@@ -496,7 +571,8 @@ describe("vision page loop under the guard", () => {
     const failures = state.usageLedger.snapshot().filter((event) => event.metric === "page-analysis-attempt");
     expect(failures).toHaveLength(1);
     // Unbilled: 0 credits, the provider cost kept for us.
-    expect(failures[0]).toMatchObject({ costCents: 0, inputTokens: 2_000, metadata: { outcome: "failure", billable: false, providerCostCents: 0.75 } });
+    expect(failures[0]).toMatchObject({ costCents: 0, inputTokens: 2_000, metadata: { outcome: "failure", billable: false, providerCostCents: 0.75,
+      modelConfig: { promptMode: "template", temperature: 0, maxTokens: 4096 } } });
     expect(ledgerOf(state).inspect("run-1", "org-1")).toEqual({ runAttempts: 1, runFailures: 1, orgAttempts: 1, orgSettledAttempts: 1 });
   });
 
@@ -707,7 +783,7 @@ describe.skipIf(!PDFTOPPM)("padded blank PDFs", () => {
         const result = await execute(plan.binary, plan.args, { timeout: 15_000, encoding: "utf8" });
         return { stdout: result.stdout, stderr: result.stderr, exitCode: 0 } as never;
       });
-      const cache = new PdfRasterCache(runner, storage, { get: async () => ({ path: source }) } as unknown as PdfSourceCache, { engine: "pdftoppm" });
+      const cache = new PdfRasterCache(runner, storage, { acquire: async () => ({ path: source, release: async () => {} }) } as unknown as PdfSourceCache, { engine: "pdftoppm" });
       const document = { id: "doc", userId: "user-1", filename: "upload.pdf", mimeType: "application/pdf", pageCount: 1 } as Document;
       // render-images renders the page first (the normal pipeline).
       const [rendered] = await cache.renderSelectedPages({ document, runId: "run-1", pageNumbers: [1] });

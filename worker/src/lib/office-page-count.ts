@@ -5,11 +5,12 @@ import {
   pageCredits,
   speedBoostMultiplier,
   textPageCount,
+  type PageMode,
   type PipelineFeatures,
 } from "@docslurp/shared";
 
 import type { Document } from "../models.js";
-import { RunPolicyError } from "./document-failure.js";
+import type { PageBasis } from "../pipeline/page-basis.js";
 
 /**
  * Real page counts for formats whose page count the server cannot know at intake (it counts Office, EPUB and spreadsheet files
@@ -185,12 +186,12 @@ export function extraCreditsForMeasuredPages(
   intakePages: number,
   measuredPages: number,
   method?: string | null,
-  options: { features?: boolean; mode?: "fast" | "rich" } = {},
+  options: { features?: boolean; mode?: PageMode } = {},
 ): number {
   const before = Math.max(1, intakePages);
   if (!(measuredPages > before)) return 0;
   const features = estimateProfileFor(pipeline, { env: {} }).documentFeatures;
-  // Office pages bill Fast; a multi-frame image's frames are each read by OCR and bill Rich.
+  // Office pages bill Fast; a multi-frame image's frames are each read by OCR and bill OCR.
   let credits = pageCredits(options.mode ?? "fast", measuredPages - before);
   if (options.features !== false && method !== "size-estimate") {
     for (const feature of DOCUMENT_FEATURES) {
@@ -200,24 +201,15 @@ export function extraCreditsForMeasuredPages(
   return credits * speedBoostMultiplier(pipeline.speedBoost === true);
 }
 
-/** A document of the run the worker measured: intake's count, the measured one and how it was found. */
-export interface MeasuredRunDocument { pageCount: number; billingPages: number; method: string | null }
-
 /**
- * Measures the document's pages from its extractor's Markdown (measureExtractedPages) and records them as `documents.billing_pages`
- * (and on the in-memory document) before billing reads them. The page basis (`page_count`, what the text splits into) is left
- * alone: these formats' text has no page breaks, so replacing it would make the page index drop every page. When there is nothing
- * to count the document bills its intake count.
+ * Measures the document's pages from its extractor's Markdown (measureExtractedPages) and records them through the page basis
+ * (pipeline/page-basis.ts) as `documents.billing_pages`, before billing reads them; the page basis applies the floor, updates the
+ * in-memory document and re-checks the run's spend (an unfunded run is paused and the document stopped, UnfundedPagesError). The
+ * page count (`page_count`, what the text splits into) is left alone: these formats' text has no page breaks, so replacing it
+ * would make the page index drop every page. When there is nothing to count the document bills its intake count.
  */
 export async function recordMeasuredPageCount(
-  state: {
-    run: { id: string; orgId?: string | null; userId?: string; projectId?: string; pipeline?: PipelineFeatures };
-    store?: {
-      setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean>;
-      enforceSpendForCharge?(run: { id: string; orgId: string | null; projectId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
-      measuredRunDocuments?(runId: string): Promise<MeasuredRunDocument[]>;
-    } | null;
-  },
+  state: { pageBasis: Pick<PageBasis, "record"> },
   document: Document,
   format: string,
   extracted: { extractor: string; markdown: string } | PageCountResult | null,
@@ -227,37 +219,6 @@ export async function recordMeasuredPageCount(
   // A measured count is passed straight through (a deduplicated copy reuses its original's count).
   const counted = extracted === null ? null : "pages" in extracted ? extracted : measureExtractedPages(format, extracted.extractor, extracted.markdown);
   if (!counted) return { pages: null, method: null, intakePages };
-  // Never bill below the page basis: an extractor that reads less than intake counted does not lower the bill.
-  // Never bill below a page basis intake counted from the bytes; an assumed intake (these formats' one page) is no floor, so an
-  // empty file measures 0 pages.
-  const floor = document.pageCountSource === "counted" ? Math.max(1, Math.floor(intakePages) || 1) : 0;
-  const measured: PageCountResult = { pages: Math.max(counted.pages, floor), method: counted.method };
-  console.log(`[page-count] document=${document.id} format=${format} counted by ${measured.method}: ${measured.pages} pages (intake ${intakePages})`);
-  if (!state.store?.setDocumentBillingPages) throw new Error("page count measured but the store cannot persist it");
-  await state.store.setDocumentBillingPages(state.run.id, document.id, measured.pages, measured.method);
-  document.billingPages = measured.pages;
-  document.billingPagesMethod = measured.method;
-  // Admission priced the intake count (one page for these formats). When the measured count is far above it, the credits the run
-  // now owes may not fit the balance: check again here and pause the run instead of finding out when the completion fee is charged.
-  // The Fast fee on those pages is charged only when the run completes, so the balance shows no measured document's extra pages
-  // yet: the check adds the Fast extra of every document of the run measured so far, not just this one, or ten large files that each
-  // fit the balance would together overdraw it. Features are charged as their stages run (and checked at those checkpoints), so
-  // only this document's feature extra is added.
-  if (state.store.enforceSpendForCharge && state.run.pipeline && state.run.userId) {
-    const pipeline = state.run.pipeline;
-    const own = extraCreditsForMeasuredPages(pipeline, intakePages, measured.pages, measured.method);
-    if (own > 0) {
-      const ownFast = extraCreditsForMeasuredPages(pipeline, intakePages, measured.pages, measured.method, { features: false });
-      const measuredDocuments = state.store.measuredRunDocuments ? await state.store.measuredRunDocuments(state.run.id) : [];
-      const runFast = measuredDocuments.reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, row.pageCount, row.billingPages, row.method, { features: false }), 0);
-      // The run's rows include this document once it is recorded; never count less than this document alone.
-      const extra = own - ownFast + Math.max(ownFast, runFast);
-      const outcome = await state.store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId, userId: state.run.userId }, extra);
-      if (outcome.paused || outcome.blocked) {
-        console.warn(`[page-count] run=${state.run.id} document=${document.id} stopped (paused=${outcome.paused}): measured ${measured.pages} pages (intake ${intakePages}) owes ${extra.toFixed(2)} more credits than the balance holds`);
-        throw new RunPolicyError(`Credits do not cover the measured pages of document ${document.id}; run ${outcome.paused ? "paused" : "stopped"}`);
-      }
-    }
-  }
-  return { pages: measured.pages, method: measured.method, intakePages };
+  const recorded = await state.pageBasis.record(document, { kind: "billing-pages", pages: counted.pages, method: counted.method, format });
+  return { pages: recorded.billingPages, method: counted.method, intakePages };
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 import { RenderImagesStage, selectRasterPagesFromClassification } from "../stages/render-images.js";
 import { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -171,7 +172,7 @@ describe("pages Doppler left to the host's page image (--scan-pages copy)", () =
     });
     const pendingAssetLedger = new Map(options.pending ? [["doc", { level: {}, assets: options.pending }]] : []);
     const state = {
-      artifactLedger: DocumentArtifactLedger.create({}), pendingAssetLedger, store: { getCompletedPages: async () => new Set(), listHostPageImagePages },
+      artifactLedger: DocumentArtifactLedger.create({}), pendingAssetLedger, store: Object.assign(memoryCheckpointStore(), { assets: Object.assign(memoryCheckpointStore().assets, { listHostPageImagePages }) }),
       documents: [{ id: "doc", userId: "user", pageCount: 6, mimeType: options.mimeType ?? "application/pdf" }],
       docConcurrency: 1, run: { id: "run", orgId: options.orgId === undefined ? "org-a" : options.orgId, pipeline: { preserveImages: options.preserveImages ?? true, visionFallback: true } },
     } as unknown as WorkflowState;

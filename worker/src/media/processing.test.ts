@@ -35,6 +35,10 @@ describe("durable media request execution", () => {
     expect(f.provider.transcribe).toHaveBeenCalledTimes(1);
     expect(f.state.usageLedger.snapshot()).toHaveLength(1);
     expect(f.state.usageLedger.snapshot()[0]).toMatchObject({ id: "receipt-id", amount: 2, unit: "audio-seconds", costCents: 0, metadata: { providerCostCents: .01, billable: false } });
+    // The request settings, never audio or transcript text (shared model-provenance.ts).
+    expect(f.state.usageLedger.snapshot()[0]!.metadata).toMatchObject({
+      modelConfig: { operation: "transcribe", format: "wav", sampleRateHz: 16000, wordTimestamps: false, chunkSeconds: 2 },
+    });
     expect(runSpentCents(f.state)).toBe(0);
   });
   it("keeps cost reserved through a failed checkpoint and retries only persistence", async () => {

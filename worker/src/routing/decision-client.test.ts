@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PrivacyModeViolationError, setLiveModelPricesForTests } from "@docslurp/shared";
+import { PrivacyModeViolationError, setLiveModelPricesForTests, setOpenRouterProviderPolicyResolver } from "@docslurp/shared";
 
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import {
@@ -15,11 +15,12 @@ import {
   parseDecisionResponse,
   recordDecisionUsage,
   wireModelId,
+  decisionModelRegionProblem,
   type DecisionQuestion,
 } from "./decision-client.js";
 import { catalogModel } from "./routing-test-fixtures.js";
 import { inAllowingRun } from "../test/provider-scope.js";
-import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
+import { currentProviderPolicy, runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 
 const questions: Record<string, DecisionQuestion> = {
   p01_has_math: { type: "noul", instructions: "math?" },
@@ -44,16 +45,18 @@ function mockFetch(body: unknown = okBody(), status = 200) {
 
 const env = { PERPLEXITYAI_API_KEY: "pk", OPENROUTER_API_KEY: "ok", LIQUID_API_KEY: "lk" } as NodeJS.ProcessEnv;
 const retry = { maxRetries: 0 };
+/** Request-shape tests: stand in stated US evidence for every upstream (none states one today). */
+const proven = { upstreamRegion: () => ({ region: "US" }) };
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("decision client request shapes", () => {
   it("perplexity: bare model id, bearer key, image_url parts in a state array", async () => {
     const fetchImpl = mockFetch();
-    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
+    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry, ...proven });
     const model = catalogModel("perplexity/pplx-decider-v1.1-27b");
     const state = ["Page P01:", imageDataUrlPart(Buffer.from("png"))];
-    const result = await client.ask(model, state, questions);
+    const result = await inAllowingRun(() => client.ask(model, state, questions));
 
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(url).toBe(PERPLEXITY_DECISIONS_URL);
@@ -70,7 +73,7 @@ describe("decision client request shapes", () => {
 
   it("openrouter systemone: namespaced model id, text only", async () => {
     const fetchImpl = mockFetch();
-    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
+    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry, ...proven });
     const model = catalogModel("typesafe/jev-1.13");
     await inAllowingRun(() => client.ask(model, "P01: 412 words, 0 images, text layer ok", questions));
     const [url, init] = fetchImpl.mock.calls[0]!;
@@ -82,7 +85,7 @@ describe("decision client request shapes", () => {
 
   it("liquid systemone: direct endpoint, 8 image cap and 4.5 MB body cap", async () => {
     const fetchImpl = mockFetch();
-    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
+    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry, ...proven });
     const model = catalogModel("liquid/d1:direct");
     expect(wireModelId(model)).toBe("liquid/d1");
     await inAllowingRun(() => client.ask(model, [imageDataUrlPart(Buffer.from("a"))], questions));
@@ -95,9 +98,28 @@ describe("decision client request shapes", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("refuses every upstream without a stated US or EU hosting region, and any call with no provider policy, before sending", async () => {
+    const fetchImpl = mockFetch();
+    // The default region evidence: Perplexity, Liquid and the /systemone labs state none today.
+    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
+    for (const id of ["perplexity/pplx-decider-v1.1-27b", "typesafe/jev-1.13", "liquid/d1:direct", "cloudflare/clef-flash"]) {
+      await expect(inAllowingRun(() => client.ask(catalogModel(id), "s", questions))).rejects.toThrow(/states no US or EU hosting region/);
+      expect(decisionModelRegionProblem(catalogModel(id))).toMatch(/states no US or EU hosting region/);
+    }
+    // With evidence but no provider policy resolver at all (a script outside the worker): refused, never sent unchecked.
+    const evidenced = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry, ...proven });
+    setOpenRouterProviderPolicyResolver(undefined);
+    try {
+      await expect(evidenced.ask(catalogModel("perplexity/pplx-decider-v1.1-27b"), "s", questions)).rejects.toThrow(/no provider policy/);
+    } finally {
+      setOpenRouterProviderPolicyResolver(currentProviderPolicy);
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("refuses an upstream the China-provider policy does not allow, before sending anything", async () => {
     const fetchImpl = mockFetch();
-    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
+    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry, ...proven });
     const restricted = <T>(fn: () => Promise<T>) => runWithProviderRateScope({ orgId: "org", allowChinaProviders: false }, fn);
     // Typesafe (via OpenRouter /systemone) and Liquid have no known region: refused when opted out, and outside any scope.
     for (const id of ["typesafe/jev-1.13", "liquid/d1:direct"]) {
@@ -113,7 +135,7 @@ describe("decision client request shapes", () => {
 
     it("rejects more questions than the model allows and empty question sets", async () => {
     const fetchImpl = mockFetch();
-    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
+    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry, ...proven });
     const model = catalogModel("perplexity/pplx-decider-v1.1-27b");
     const many = Object.fromEntries(Array.from({ length: 129 }, (_, i) => [`q${i}`, { type: "noul" as const, instructions: "x" }]));
     await expect(client.ask(model, "s", many)).rejects.toThrow(/129 questions/);
@@ -123,10 +145,10 @@ describe("decision client request shapes", () => {
 
   it("reports missing keys as unavailable and HTTP errors with status", async () => {
     const model = catalogModel("perplexity/pplx-decider-v1.1-27b");
-    const noKey = createDecisionClient({ privacyMode: "standard", env: {}, fetchImpl: mockFetch(), retry });
+    const noKey = createDecisionClient({ privacyMode: "standard", env: {}, fetchImpl: mockFetch(), retry, ...proven });
     await expect(noKey.ask(model, "s", questions)).rejects.toBeInstanceOf(DecisionUnavailableError);
-    const failing = createDecisionClient({ privacyMode: "standard", env, fetchImpl: mockFetch({ error: "bad" }, 400), retry });
-    await expect(failing.ask(model, "s", questions)).rejects.toMatchObject({ status: 400 });
+    const failing = createDecisionClient({ privacyMode: "standard", env, fetchImpl: mockFetch({ error: "bad" }, 400), retry, ...proven });
+    await expect(inAllowingRun(() => failing.ask(model, "s", questions))).rejects.toMatchObject({ status: 400 });
   });
 });
 
@@ -196,15 +218,18 @@ describe("usage recording", () => {
       fetchImpl: mockFetch(okBody(5000)),
       retry,
       onUsage: (m, result) => seen.push(recordDecisionUsage(ledger, m, result, { documentId: "doc-1", role: "triage", pages: [1] })),
+      ...proven,
     });
-    await client.ask(model, "s", questions);
+    await inAllowingRun(() => client.ask(model, "s", questions));
     expect(seen).toHaveLength(1);
     const [event] = ledger.snapshot();
     expect(event).toMatchObject({
       model: "perplexity/pplx-decider-v1.1-27b",
       inputTokens: 5000,
-      metadata: { documentId: "doc-1", role: "triage", endpoint: "perplexity-decisions" },
+      metadata: { documentId: "doc-1", role: "triage", endpoint: "perplexity-decisions",
+        modelConfig: { operation: "page-route-decision", route: "perplexity-decisions", role: "triage", questions: Object.keys(questions).length, images: 0, pages: 1 } },
     });
+    expect(String(event!.metadata?.modelUri)).toMatch(/^llm:\/\/perplexity\/perplexity\/pplx-decider-v1\.1-27b\?images=0&operation=page-route-decision/);
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[ai-usage\] page-route-decision model=perplexity\/pplx-decider-v1\.1-27b input_tokens=5000/));
     // Provider cost is recorded for our reports; routing decisions bill no credits.
     expect(Number(event!.metadata?.providerCostCents)).toBeGreaterThan(0);

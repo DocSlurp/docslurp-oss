@@ -20,6 +20,7 @@ export declare function roleGrantStatements(options: {
   relations: readonly string[];
   sequences?: Readonly<Record<string, string>>;
   migrationsTable?: boolean;
+  migrationLedger?: boolean;
   nativeSchema?: boolean;
 }): string[];
 type QueryClient = { query(text: string, values?: unknown[]): Promise<{ rows: any[] }> };

@@ -42,6 +42,8 @@ export interface OcrPageRead {
   elapsedMs: number;
   /** Why this page should get a hosted second read, and the boundary's PNG of it; null when it should not. */
   escalation: { reason: OcrEscalationReason; imagePath: string; width: number; height: number } | null;
+  /** Set by escalation (escalation.ts) on a candidate that kept its first read: the per-document cap, or an unfunded balance. */
+  escalationHeld?: "capped" | "unfunded";
   /**
    * The boundary's PNG of the frame (signature and IHDR size checked, never decoded), when the read kept one for the page
    * reader (OcrReadInput.keepFrames). Present on escalation candidates and, with `keepFrames: "all"`, on every frame with text.
@@ -95,6 +97,8 @@ export interface OcrReadInput {
   keepFrames?: "candidates" | "all";
   /** Ask the boundary for a bounded rendition of every frame (visual indexing of uploaded images). */
   rendition?: { maxLongEdge: number; maxBytes: number };
+  /** The PDF's measured shape (SandboxedOcrJob.pdfShape), for host routing only. */
+  pdfShape?: "scanned" | "mixed";
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
 }
@@ -318,6 +322,7 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
       input: input.source,
       kind: input.kind,
       ...(input.pages?.length ? { pages: [...input.pages] } : {}),
+      ...(input.kind === "pdf" && input.pdfShape ? { pdfShape: input.pdfShape } : {}),
       output: path.join(dir, "result.json"),
       imageDir,
       recognisers: language.recognisers,

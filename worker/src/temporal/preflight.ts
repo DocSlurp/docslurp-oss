@@ -13,6 +13,8 @@
 import { sandboxedPdfConfigured } from "@docslurp/shared";
 
 import { loadExtractorPlugins } from "../extractors/plugins.js";
+import { initializeCapabilityPools } from "../lib/capability-pools.js";
+import type { CapabilityPools } from "@docslurp/shared";
 import { configureWorkerExtractorIdAliases } from "../extractors/registry.js";
 import { assertNativePdfEngineAtStartup } from "../native-pdf/loader.js";
 import { ocrLanguageSettingFromEnv } from "../ocr/languages.js";
@@ -21,6 +23,7 @@ import { pinnedOcrModels } from "../ocr/models.js";
 import { initializeParserSandbox } from "../sandbox/startup.js";
 import { assertServiceProfileRuntime, vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
+import { assertWorkerOperatorConfig } from "../lib/operator-config.js";
 
 export interface PreflightStepResult {
   step: string;
@@ -42,6 +45,7 @@ export interface WorkerPreflightDeps {
   assertOcrConfiguration: (env: NodeJS.ProcessEnv) => string;
   pinnedOcrModels: (env: NodeJS.ProcessEnv) => ReadonlyMap<string, string>;
   assertNativePdfEngineAtStartup: (env: NodeJS.ProcessEnv) => Promise<unknown>;
+  initializeCapabilityPools: (env: NodeJS.ProcessEnv, log: (line: string) => void) => CapabilityPools;
   platform: NodeJS.Platform;
 }
 
@@ -52,6 +56,7 @@ const defaultDeps: WorkerPreflightDeps = {
   assertOcrConfiguration,
   pinnedOcrModels,
   assertNativePdfEngineAtStartup,
+  initializeCapabilityPools,
   platform: process.platform,
 };
 
@@ -73,6 +78,11 @@ export async function runWorkerPreflight(env: NodeJS.ProcessEnv = process.env, d
     }
   };
 
+  // First: the operator config sets variables every later check reads (DOCSLURP_OPERATOR_CONFIG).
+  await step("operator config", () => {
+    const state = assertWorkerOperatorConfig(env);
+    return state.path ? `path=${state.path} digest=${state.digest}` : "unset (code defaults)";
+  });
   await step("runtime environment", () => {
     assertServiceProfileRuntime(env);
     assertNoUnsafeOverrides(env);
@@ -104,6 +114,12 @@ export async function runWorkerPreflight(env: NodeJS.ProcessEnv = process.env, d
   } else {
     results.push({ step: "ocr model pins", status: "skipped", detail: `mode=${mode} runs no pinned models` });
   }
+  // The same pool resolution and region checks worker startup runs (lib/capability-pools.ts): a deploy whose workers
+  // would refuse to start fails here first.
+  await step("capability pools", () => {
+    const pools = d.initializeCapabilityPools(env, () => undefined);
+    return `text=${pools.text.length} ocr=${pools.ocr.length} vision=${pools.vision.length}`;
+  });
   await step("native pdf engine", async () => {
     await d.assertNativePdfEngineAtStartup(env);
     return "ok";

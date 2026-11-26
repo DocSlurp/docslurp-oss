@@ -10,6 +10,7 @@ import {
   defaultEmbeddingConfig,
   defaultPipelineFeatures,
   normalizePipelineFeatures,
+  parseStoredPipelineFeatures,
   compilePipelinePlan,
   defaultVisionConfig,
   embeddingProfileCatalog,
@@ -77,11 +78,16 @@ describe("pipelineFeaturesSchema", () => {
   });
 
   it("preserves local vision routing and hosted fallback while enforcing endpoint isolation", () => {
-    const saved = { vision: { model: 'Qwen/Qwen2-VL-2B-Instruct', baseUrl: 'http://127.0.0.1:8000/v1', remoteFallbackModel: 'gpt-4.1-mini' } };
+    const saved = { vision: { model: 'Qwen/Qwen2-VL-2B-Instruct', baseUrl: 'http://127.0.0.1:8000/v1', remoteFallbackModel: 'z-ai/glm-5.3-flash' } };
     const result = normalizePipelineFeatures(saved as unknown as Parameters<typeof normalizePipelineFeatures>[0]);
     expect(result.vision.target).toBe('local');
     expect(new URL(result.vision.modelUri).searchParams.get('baseUrl')).toBe('http://127.0.0.1:8000/v1');
-    expect(result.vision.remoteFallbackModelUri).toBe('llm://openai/gpt-4.1-mini');
+    expect(result.vision.remoteFallbackModelUri).toBe('llm://openrouter/z-ai/glm-5.3-flash');
+    // A stored fallback naming a model refused for having no US or EU host is rejected with a clear reason (strict parse);
+    // the lenient stored-pipeline reader drops it, so the run uses no fallback.
+    expect(() => normalizePipelineFeatures({ vision: { ...saved.vision, remoteFallbackModel: 'gpt-4.1-mini' } } as unknown as Parameters<typeof normalizePipelineFeatures>[0])).toThrow(/stated US or EU hosting region/);
+    expect(parseStoredPipelineFeatures({ vision: { modelUri: 'llm://openrouter/google/gemini-2.5-flash-lite', remoteFallbackModelUri: 'llm://openai/gpt-4.1-mini' } }).vision)
+      .toMatchObject({ modelUri: 'llm://openrouter/openai/gpt-6-luna', remoteFallbackModelUri: null });
     expect(() => normalizePipelineFeatures({ vision: { ...saved.vision, baseUrl: 'http://169.254.169.254' } } as unknown as Parameters<typeof normalizePipelineFeatures>[0])).toThrow();
     expect(saved.vision.model).toBe('Qwen/Qwen2-VL-2B-Instruct');
   });
@@ -914,5 +920,31 @@ describe("projectRunSchema", () => {
   it("rejects an invalid stage value", () => {
     const result = projectRunSchema.safeParse({ ...validRun, stage: "unknown-stage" });
     expect(result.success).toBe(false);
+  });
+
+  it("leaves the progress fields absent when a server does not report them", () => {
+    const run = projectRunSchema.parse(validRun);
+    expect(run.pagesSearchable).toBeUndefined();
+    expect(run.pagesCountedAt).toBeUndefined();
+    expect(run.workerStartedAt).toBeUndefined();
+    expect("pagesSearchable" in run).toBe(false);
+  });
+
+  it("carries searchable pages, the final-count time and the worker pickup time", () => {
+    const run = projectRunSchema.parse({
+      ...validRun, status: "processing", stage: "index", pagesProcessed: 10,
+      pagesSearchable: 4, pagesCountedAt: "2026-01-01T00:00:05.000Z", workerStartedAt: "2026-01-01T00:00:02.000Z",
+    });
+    expect(run).toMatchObject({ pagesProcessed: 10, pagesSearchable: 4, pagesCountedAt: "2026-01-01T00:00:05.000Z", workerStartedAt: "2026-01-01T00:00:02.000Z" });
+  });
+
+  it("accepts null for a run that is queued, still being counted or not reported", () => {
+    const run = projectRunSchema.parse({ ...validRun, pagesSearchable: null, pagesCountedAt: null, workerStartedAt: null });
+    expect(run).toMatchObject({ pagesSearchable: null, pagesCountedAt: null, workerStartedAt: null });
+  });
+
+  it("rejects a negative or fractional searchable page count", () => {
+    expect(projectRunSchema.safeParse({ ...validRun, pagesSearchable: -1 }).success).toBe(false);
+    expect(projectRunSchema.safeParse({ ...validRun, pagesSearchable: 1.5 }).success).toBe(false);
   });
 });

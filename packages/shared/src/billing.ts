@@ -12,7 +12,8 @@ import {
   type PageMode,
 } from "./pricing-provider.js";
 import type { SearchPriceOptions } from "./pricing-provider.js";
-import { qualityModeSchema, type QualityMode } from "./quality.js";
+import { effectiveLadder, pageReadingQuality } from "./auto-ladder.js";
+import type { QualityMode } from "./quality.js";
 import type { ChartExportFormat, VisualSource } from "./chart-export.js";
 import { chartExportModelCallsPerVisual, isBillableVisualSource, type VisualExportModes } from "./chart-export-estimate.js";
 
@@ -181,7 +182,7 @@ export function pageCredits(mode: PageMode, pages: number): number {
   return pricing().pageCredits(mode, pages);
 }
 
-/** Rich pages one vision/OCR read of a page counts as, given its output tokens. Unknown token counts count as 1. */
+/** Rich pages one vision-model read of a page counts as, given its output tokens. Unknown token counts count as 1. */
 export function richPagesForOutputTokens(outputTokens: number | null | undefined): number {
   return pricing().richPagesForOutputTokens(outputTokens);
 }
@@ -255,6 +256,8 @@ export function mediaRichPages(kind: "audio" | "video", seconds: number): number
  */
 export const BILLABLE_UNIT_METRICS = {
   fastPage: "ingest-page-fast",
+  /** A page an OCR engine read: one flat OCR page per page and run (worker pipeline/usage-ledger.ts). */
+  ocrPage: "ingest-page-ocr",
   richPage: "ingest-page-rich",
   mediaMinutes: "ingest-media-minutes",
   storage: "storage-daily",
@@ -275,6 +278,46 @@ export const BILLABLE_UNIT_METRICS = {
   summaryTree: "feature-summary-tree",
 } as const;
 export type BillableUnitMetric = (typeof BILLABLE_UNIT_METRICS)[keyof typeof BILLABLE_UNIT_METRICS];
+
+/** The unit metric each page class is charged under. */
+export const PAGE_MODE_METRICS: Readonly<Record<PageMode, BillableUnitMetric>> = {
+  fast: BILLABLE_UNIT_METRICS.fastPage,
+  ocr: BILLABLE_UNIT_METRICS.ocrPage,
+  rich: BILLABLE_UNIT_METRICS.richPage,
+};
+
+/** Unit metrics of a page charged by a read (OCR or Rich), as opposed to the Fast charge at completion. */
+export const PAGE_READ_METRICS: readonly BillableUnitMetric[] = [BILLABLE_UNIT_METRICS.ocrPage, BILLABLE_UNIT_METRICS.richPage];
+
+/** Unit metrics of every page charge, Fast, OCR and Rich. */
+export const PAGE_CHARGE_METRICS: readonly BillableUnitMetric[] = [BILLABLE_UNIT_METRICS.fastPage, ...PAGE_READ_METRICS];
+
+/**
+ * Pages a run measured above what admission priced and that no charge covers yet (the database's run_measured_pages,
+ * migration 0190): Fast pages of paged documents, and frames of multi-frame images not yet charged as page reads.
+ */
+export interface RunMeasuredPages { fastPages: number; ocrFrames: number }
+
+/**
+ * Credits a run owes for its measured pages once they bill (Fast at completion, OCR as frames are read), times the speed
+ * boost. The one price both the worker's page-basis spend check and the spend-paused resume sweep weigh. Non-finite or
+ * negative counts are refused (thrown), never read as nothing owed.
+ */
+export function runMeasuredPagesCredits(pages: RunMeasuredPages, speedBoost: boolean | undefined = false): number {
+  for (const value of [pages.fastPages, pages.ocrFrames]) {
+    if (!Number.isFinite(value) || value < 0) throw new Error(`invalid measured page count ${value}`);
+  }
+  const credits = (pages.fastPages > 0 ? pageCredits("fast", pages.fastPages) : 0) + (pages.ocrFrames > 0 ? pageCredits("ocr", pages.ocrFrames) : 0);
+  return credits * speedBoostMultiplier(speedBoost);
+}
+
+/**
+ * Credits a page already charged in class `from` owes when a later read puts it in the dearer class `to`: the difference
+ * only, never negative (a read in a cheaper class than the page's charge adds nothing).
+ */
+export function pageUpgradeCredits(from: PageMode, to: PageMode, pages: number = 1): number {
+  return Math.max(0, pageCredits(to, pages) - pageCredits(from, pages));
+}
 
 /** The unit metric each optional document feature is charged under. */
 export const DOCUMENT_FEATURE_METRICS: Readonly<Record<DocumentFeature, BillableUnitMetric>> = {
@@ -383,7 +426,14 @@ export type BillingForecast = {
   searchCreditsPer30d: number;
   chatAnswersLast30d: number;
   chatCreditsPer30d: number;
+  /**
+   * Pages charged in the last 30 days by final class (Text, Scan, Vision): each page counts once per run, in the class
+   * it finally paid, so a Scan page later read by a vision model counts only under Vision. Counts are pages, not billed
+   * units (a long Vision page may bill several units), and a page charged by two runs counts in each.
+   * `ingestCreditsLast30d` is the exact sum of the ingest charges.
+   */
   fastPagesLast30d: number;
+  ocrPagesLast30d: number;
   richPagesLast30d: number;
   ingestCreditsLast30d: number;
   /** storage + searches + chat at last-30-day pace; ingest shown separately because it is lumpy. */
@@ -405,6 +455,7 @@ export function buildBillingForecast(input: {
   chatAnswersLast30d: number;
   chatCreditsLast30d: number;
   fastPagesLast30d: number;
+  ocrPagesLast30d: number;
   richPagesLast30d: number;
   ingestCreditsLast30d: number;
 }): BillingForecast {
@@ -423,6 +474,7 @@ export function buildBillingForecast(input: {
     chatAnswersLast30d: nonNegative(input.chatAnswersLast30d),
     chatCreditsPer30d,
     fastPagesLast30d: nonNegative(input.fastPagesLast30d),
+    ocrPagesLast30d: nonNegative(input.ocrPagesLast30d),
     richPagesLast30d: nonNegative(input.richPagesLast30d),
     ingestCreditsLast30d: nonNegative(input.ingestCreditsLast30d),
     recurringCreditsPerMonth: recurring,
@@ -494,12 +546,33 @@ export function priceAiUsageEvent<T extends PriceableAiEvent>(event: T): T {
 
 export const pageClassSchema = z.enum(["text", "complex", "scanned"]);
 
-/** Estimator profiles are the processing quality modes (`pipeline.quality`). */
-export const pipelineProfileIdSchema = qualityModeSchema;
-export type PipelineProfileId = QualityMode;
+/**
+ * Estimator (pricing) profiles: how a run reads its pages, which is what a page costs.
+ *
+ * - `fast`: the text layer only (Fastest with Read scans off): every page bills Text.
+ * - `fastest`: the text layer, OCR for scans and image pages (never a vision model): Text to Scan.
+ * - `smartest`: the text layer, the vision model for every page it cannot carry: Text to Vision.
+ * - `visual`: every page read by a model (visual indexing embeds every page image): Vision.
+ *
+ * The retired words are read as their profile: `auto` and `balanced` as `fastest`, `good` and `smart` as `smartest`.
+ */
+export const PIPELINE_PROFILE_IDS = ["fast", "fastest", "smartest", "visual"] as const;
+export type PipelineProfileId = (typeof PIPELINE_PROFILE_IDS)[number];
+const RETIRED_PROFILE_WORDS: Readonly<Record<string, PipelineProfileId>> = { auto: "fastest", balanced: "fastest", good: "smartest", smart: "smartest" };
+export const pipelineProfileIdSchema = z.preprocess(
+  (value) => (typeof value === "string" && value in RETIRED_PROFILE_WORDS ? RETIRED_PROFILE_WORDS[value] : value),
+  z.enum(PIPELINE_PROFILE_IDS),
+);
+
+/** The pricing profile a pipeline reads with (its stored quality and ladder). */
+export function pipelineProfileIdFor(pipeline: { quality?: QualityMode | null; ladder?: unknown }): PipelineProfileId {
+  const ladderPipeline = pipeline as Parameters<typeof pageReadingQuality>[0];
+  if (pageReadingQuality(ladderPipeline) === "fast") return "fast";
+  return effectiveLadder(ladderPipeline).maxRung === "intelligent" ? "smartest" : "fastest";
+}
 
 export type QualityModeInfo = {
-  id: QualityMode;
+  id: PipelineProfileId;
   label: string;
   /** One line for the picker. */
   description: string;
@@ -509,24 +582,30 @@ export type QualityModeInfo = {
   creditsPer1kPages: { min: number; max: number };
 };
 
-/** The public processing quality choice: what each mode does. Prices come from the pricing provider (`qualityModeInfo`). */
-export const QUALITY_MODES: Record<QualityMode, Pick<QualityModeInfo, "id" | "label" | "description">> = {
-  fast: { id: "fast", label: "Fast", description: "Text layer only. Scanned pages are kept as images, not read." },
-  auto: { id: "auto", label: "Auto", description: "Reads each page the cheapest faithful way: text layer, or a vision model for scans and complex layouts." },
-  good: { id: "good", label: "Good", description: "A vision model reads every page for the most faithful tables, figures and layout." },
+/**
+ * What each pricing profile does, in customer words. The public choice is QUALITY_MODE_ORDER (Fastest, Smartest);
+ * `fast` is Fastest with Read scans off and `visual` is visual indexing. Prices come from the pricing provider
+ * (`qualityModeInfo`).
+ */
+export const QUALITY_MODES: Record<PipelineProfileId, Pick<QualityModeInfo, "id" | "label" | "description">> = {
+  fast: { id: "fast", label: "Fastest, scans not read", description: "Native readers only. Scanned pages and images are kept as page images, not read." },
+  fastest: { id: "fastest", label: "Fastest", description: "Native readers first; only scanned pages and images are read, by OCR. No vision model." },
+  smartest: { id: "smartest", label: "Smartest", description: "Native readers first; a vision model reads scans, images and hard math, layouts or fonts." },
+  visual: { id: "visual", label: "Visual indexing", description: "A model reads every page image for visual search." },
 };
 
-export const QUALITY_MODE_ORDER: readonly QualityMode[] = qualityModeSchema.options;
+/** The public processing quality choice, in picker order. */
+export const QUALITY_MODE_ORDER: readonly PipelineProfileId[] = ["fastest", "smartest"];
 
-/** A quality mode with the active provider's price. */
-export function qualityModeInfo(mode: QualityMode): QualityModeInfo {
+/** A pricing profile with the active provider's price. */
+export function qualityModeInfo(mode: PipelineProfileId): QualityModeInfo {
   return { ...QUALITY_MODES[mode], ...pricing().qualityModePricing(mode) };
 }
 
 const formatUsdPer1k = (credits: number): string => `$${creditsToDollars(credits).toFixed(2)}`;
 
-/** "$0.05", "$0.05 to $2.50" or "$2.50" per 1,000 pages for a quality mode. */
-export function qualityModePriceRange(mode: QualityMode): string {
+/** "$0.10", "$0.10 to $1.50" or "$1.50" per 1,000 pages for a quality mode (whatever the pricing provider sets). */
+export function qualityModePriceRange(mode: PipelineProfileId): string {
   const { min, max } = qualityModeInfo(mode).creditsPer1kPages;
   return min === max ? formatUsdPer1k(min) : `${formatUsdPer1k(min)} to ${formatUsdPer1k(max)}`;
 }
@@ -571,6 +650,7 @@ export const billingForecastSchema = z.object({
   chatAnswersLast30d: z.number().nonnegative(),
   chatCreditsPer30d: z.number().nonnegative(),
   fastPagesLast30d: z.number().nonnegative(),
+  ocrPagesLast30d: z.number().nonnegative(),
   richPagesLast30d: z.number().nonnegative(),
   ingestCreditsLast30d: z.number().nonnegative(),
   recurringCreditsPerMonth: z.number().nonnegative(),

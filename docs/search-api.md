@@ -13,7 +13,7 @@ Each result has a `score` (rank-based, so the top hit is always near 1) and a `r
 
 Search only returns each document's current version; older versions are archived for reading ([versions and retention](document-versions.md)). During a re-index after a config change, documents are served from their previous index until each is rebuilt ([config-change jobs](config-change-jobs.md)).
 
-With the defaults, local reranking and parent-section retrieval are on, and graph expansion follows the project pipeline. Provider-backed steps (HyDE, compression, query rewriting and decomposition, step-back, self-query) stay off unless the request or the project owner turns them on. Embedding the query can still use a provider; that usage is logged and reported in `usage`.
+With the defaults, local reranking and parent-section retrieval are on, and graph expansion follows the project pipeline. Provider-backed steps (HyDE, query rewriting and decomposition, step-back, self-query) stay off unless the request or the project owner turns them on. Embedding the query can still use a provider; that usage is logged and reported in `usage`.
 
 When `selfQuery` is enabled, `budget tag:finance` searches for `budget` within documents tagged `finance`. Tag labels are case sensitive; quote labels containing spaces, for example `budget tag:"Finance Team"`. Explicit caller `tags` filters take precedence over labels in the query. Consumed labels are excluded from retrieval text, reranking, relevance scoring and derived model prompts; diagnostics retain the original query. Malformed labels and queries containing only tag labels return HTTP 400.
 
@@ -66,7 +66,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 
 ## Aggregate search
 
-`POST /v1/search/aggregate` searches several projects at once (`projects`: IDs, slugs or names; empty means every project the caller can search, up to `maxProjects`) and merges their citations. It needs a search scope and takes `mode` like `POST /v1/search`. It uses the same defaults as `POST /v1/search`: provider-backed steps (`hyde`, `compression`, `queryRewrite`, `queryDecompose`, `stepback`, `selfQuery`) stay off unless the request turns them on. When turned on they call a model, are billed to the project's organization and run only in `deep` mode (a `search:deep` key), as on `POST /v1/search`.
+`POST /v1/search/aggregate` searches several projects at once (`projects`: IDs, slugs or names; empty means every project the caller can search, up to `maxProjects`) and merges their citations. It needs a search scope and takes `mode` like `POST /v1/search`. It uses the same defaults as `POST /v1/search`: provider-backed steps (`hyde`, `queryRewrite`, `queryDecompose`, `stepback`, `selfQuery`) stay off unless the request turns them on. When turned on they call a model, are billed to the project's organization and run only in `deep` mode (a `search:deep` key), as on `POST /v1/search`.
 
 `generateAnswer` (default `false`) also writes one answer over the merged citations with a model, billed as a chat answer:
 
@@ -440,10 +440,11 @@ In-process caches cut repeated-query latency. Each is per server process and nev
   - **Authorization.** Authentication, key scopes, the key's project allowlist and project access are checked on every request before the cache is read, so a revoked or narrowed key, or a user removed from the project, is refused rather than served a cached answer. Entries are keyed on a hash of the organization, user, API key, resolved project and the request.
   - **Staleness.** A cached answer can be up to one TTL (30 seconds by default) old. Document deletes and moves, project setting, pipeline and privacy changes, and search-setting changes drop the project's entries in every API process through the `search_eligibility` and run-event hints, but those hints are best effort, so the TTL is the bound. Set `SEARCH_RESPONSE_CACHE_TTL_MS=0` where that is too stale.
   - **Summary tree.** A response is stored only when its `summaryTree.applied` equals `summaryTree.requested` (or it has no `summaryTree` field). One whose tree leg was skipped is never replayed, so the next identical request tries the tree again. A response that carries `summaries` (`include`) is never stored at all: a summary is re-validated against Postgres on every search, and a replayed one could outlive its document's deletion or correction for the cache's lifetime. `guide` responses, whose results are chunks only, are stored as before. A document's tree becoming ready, or ceasing to be, drops the project's entries through the same `search_eligibility` hint.
-  - **Memory.** Entries are partitioned by organization (at most 100 entries and 8 MB each, 500 entries and 32 MB in total); a response over 1 MB is not kept, and global pressure evicts from the largest organization first, so one tenant cannot push out another's entries.
+  - **Memory.** One LRU shared by every organization (500 entries and 32 MB in total); the organizations are part of the key and are checked again on read. A response over 1 MB is not kept.
 
 - **Query-embedding cache** (on by default). Keyed by organization, provider, runtime, endpoint, model, dimensions, normalization and the query text after trimming and collapsing whitespace (case is preserved). The cache stores only a hash of that key. A hit skips the provider call and records no usage event, so `usage` and `usage_events` still count only provider calls actually made. Projects in `strict-privacy` mode always call through, because that mode writes an audit row for every private embedding call; `standard` and `local-only` use the cache. Set `SEARCH_EMBEDDING_CACHE_MAX_ENTRIES` (default 1000, `0` disables) and `SEARCH_EMBEDDING_CACHE_TTL_SECONDS` (default 3600).
 - **Vector-result cache** (off by default). Keyed by organization, the project database's location and table version, the query-vector hash, document scope, `limit` and ANN tuning, so a write to a table produces a new key. Results from a partially failed search are not cached. Enable with `SEARCH_RESULT_CACHE_MAX_ENTRIES` (default 0) and tune `SEARCH_RESULT_CACHE_TTL_SECONDS` (default 30). A hit can be as stale as the LanceDB read-consistency interval (`LANCEDB_READ_CONSISTENCY_SECONDS`, default 30 s) plus the TTL.
+- Both caches are one bounded LRU shared by every organization: the organization is part of every key, so an entry is only ever served to its own organization, and any one organization can use the whole cache.
 - **Privacy and tracing.** `strict-privacy` never reads or writes the embedding or vector-result cache. The `embed.cache` and `lancedb.result_cache` spans carry `docslurp.privacy.mode`, `docslurp.cache.hit`, `docslurp.cache.bypassed` and `docslurp.cache.bypass_reason` (`strict-privacy`, or `no-org` for the embedding cache), and search timings count `embedCacheBypass` / `resultCacheBypass`.
 
 Hits and misses appear as `embedCacheHit`/`embedCacheMiss` and `resultCacheHit`/`resultCacheMiss` counters in search timings, in the session diagnostics (`embeddingCache`), as `[search-cache]` log lines, and as `embed.cache` and `lancedb.result_cache` spans (`docslurp.cache.hit`).
@@ -523,6 +524,8 @@ reads no summaries.
 - `candidateDepth`: integer from 1 to 200. Bounds each evidence adapter's contribution and the fused candidate window before the relevance floor. This window is independent of `rerank` and the returned `limit`; a depth smaller than the output limit can return fewer hits. Filtering and the relevance floor can reduce the window further; there is no automatic refill.
 - `resultOrder`: `"relevance"` keeps the selected results in ranked order; `"prompt"` places high-ranked passages at the beginning and end for prompt assembly. It changes placement of the selected passages, not membership. This does not measure generated-answer quality.
 
+The hosted reranker (deep mode) scores at most the top 50 candidates of that window; the rest keep their fused order. A search that used it is billed for the reranker's model calls as well as the search.
+
 For an equal-candidate comparison, hold `candidateDepth`, `limit`, filters and floor constant while toggling `rerank`:
 
 ```json
@@ -579,7 +582,9 @@ DocSlurp; requests that name `rerankProvider` or `rerankModel` get HTTP 400
 `model_not_allowed`. Self-hosted deployments need the operator's
 `DEEPINFRA_API_KEY`. An authorized project owner opts in through
 `PATCH /v1/projects/:projectId/search-settings` from a signed-in session or a
-server key with `projects:manage`:
+server key with `projects:manage` (or, to save it together with pipeline changes
+under revision checks, the `search` half of
+[`POST /v1/projects/:projectId/settings-publication`](config-change-jobs.md#coherent-settings-publication)):
 
 ```json
 {

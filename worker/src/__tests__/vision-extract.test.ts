@@ -46,7 +46,7 @@ describe("shouldFailOpenVisionError", () => {
     expect(price(at("nvidia/nemotron-3.5-super-vl"), tokens)).toBeCloseTo((2_000 * 0.15 + 1_000 * 0.47) / 1e4, 12);
     expect(price(at(DEFAULT_OPENROUTER_VISION_MODEL), tokens))
       .toBeCloseTo(visionListPriceCents(DEFAULT_OPENROUTER_VISION_MODEL, { inputTokens: 2_000, outputTokens: 1_000 })!, 12);
-    expect(price(at("google/gemini-3.1-flash-lite"), tokens)).toBeCloseTo((2_000 * 0.25 + 1_000 * 1.5) / 1e4, 12);
+    expect(price(at("google/gemini-3.1-flash-lite"), tokens)).toBeCloseTo((2_000 * 0.275 + 1_000 * 1.65) / 1e4, 12);
     expect(price(at("vendor/uncataloged-vlm"), tokens)).toBeCloseTo(0.05, 10);
     expect(price(at("nvidia/nemotron-3.5-super-vl", "http://127.0.0.1:8000/v1"), tokens)).toBe(0);
   });
@@ -126,7 +126,7 @@ describe("shouldFailOpenVisionError", () => {
         "doc-1:classification": "s3://bucket/classification.json",
       }),
       pendingPerformance: [],
-      run: { pipeline: { quality: "auto", vision: {} } },
+      run: { pipeline: { quality: "auto", ladder: { maxRung: "intelligent" }, vision: {} } },
     } as unknown as WorkflowState;
     const document = {
       id: "doc-1",
@@ -148,49 +148,6 @@ describe("shouldFailOpenVisionError", () => {
       needed: false,
       selectedPages: [],
       reason: "calibrated-routing-skip",
-    });
-  });
-
-  it("good quality sends every page through vision despite calibrated routing", async () => {
-    const routing = buildAdaptiveRoutingDecisionSurface({
-      documentId: "doc-1",
-      filename: "form.jpg",
-      text: "Readable parser text",
-      pageCount: 2,
-      evidence: { source: "canonical-document", artifactUri: "s3://bucket/canonical.json" },
-    });
-    const storage = {
-      bucket: "bucket",
-      getJson: async () => routing,
-    } as unknown as ArtifactStore;
-    const stage = new VisionExtractStage(
-      {} as CommandRunner,
-      storage,
-      { visionDensityThreshold: 0.25 } as Config,
-      {} as never,
-    );
-    const state = {
-      artifactLedger: DocumentArtifactLedger.create({
-        "doc-1:classification": "s3://bucket/classification.json",
-      }),
-      pendingPerformance: [],
-      run: { pipeline: { quality: "good", vision: {} } },
-    } as unknown as WorkflowState;
-
-    const result = await (
-      stage as unknown as {
-        checkNeedsVision(
-          document: Document,
-          pageCount: number,
-          state: WorkflowState,
-        ): Promise<{ needed: boolean; selectedPages: number[]; reason: string }>;
-      }
-    ).checkNeedsVision({ id: "doc-1", filename: "form.jpg" } as Document, 2, state);
-
-    expect(result).toMatchObject({
-      needed: true,
-      selectedPages: [1, 2],
-      reason: "quality-good-all-pages",
     });
   });
 

@@ -1126,7 +1126,7 @@ describe("R6-H1: the resume converts quarantine's parse source, never the upload
   });
 
   it("F1/F2: documentParseSource is org-scoped and reads only the claimed run of a completed document", async () => {
-    const { documentParseSource } = await import("../db/store.js");
+    const { documentParseSource } = await import("../db/document-records.js");
     const env = ON as NodeJS.ProcessEnv;
     expect(await documentParseSource(sql, { orgId: "org-a", documentId: "doc-a", runId: "run-a" }, env)).toMatchObject({ parseSourceDecision: "original", sourceSha256: V2_SOURCE_SHA });
     // Another organization's id for this document, or this organization for another's: nothing.

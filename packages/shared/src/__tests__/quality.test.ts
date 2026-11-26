@@ -27,7 +27,8 @@ import {
   pipelineFeaturesSchema,
   qualityAllowsPageReading,
   qualityModePriceRange,
-  qualityReadsEveryPage,
+  qualityLevelOfPipeline,
+  smartestLocksPageImages,
 } from "../index.js";
 
 describe("pipeline.quality", () => {
@@ -39,14 +40,18 @@ describe("pipeline.quality", () => {
     expect(parserPlaybookForQuality(undefined)).toBe("balanced");
   });
 
-  it("maps each mode to its internal playbook and vision behaviour", () => {
+  it("maps each mode to its internal playbook and page reading", () => {
     expect(parserPlaybookForQuality("fast")).toBe("fast");
-    expect(parserPlaybookForQuality("good")).toBe("review-grade");
-    expect(qualityReadsEveryPage("good")).toBe(true);
-    expect(qualityReadsEveryPage("auto")).toBe(false);
     expect(qualityAllowsPageReading("fast")).toBe(false);
     expect(qualityAllowsPageReading("auto")).toBe(true);
-    expect(qualityAllowsPageReading("good")).toBe(true);
+  });
+
+  it("reads the retired good as auto with the intelligent rung (Smartest)", () => {
+    const parsed = normalizePipelineFeatures({ quality: "good" } as never);
+    expect(parsed.quality).toBe("auto");
+    expect(parsed.ladder.maxRung).toBe("intelligent");
+    expect(qualityLevelOfPipeline(parsed)).toEqual({ quality: "smartest", readScans: true });
+    expect(pipelineFeaturesSchema.parse({ quality: "good" }).quality).toBe("auto");
   });
 
   it("rejects unknown modes", () => {
@@ -67,7 +72,7 @@ describe("legacy quality input", () => {
     [{ parserPlaybook: "balanced" }, "auto"],
     [{ parserPlaybook: "layout-aware" }, "auto"],
     [{ parserPlaybook: "agentic" }, "auto"],
-    // review-grade never read every page: it maps to auto, not good (which would multiply spend).
+    // review-grade never read every page: it maps to auto, not good.
     [{ parserPlaybook: "review-grade" }, "auto"],
     [{ parserPlaybook: "review-grade", vision: { forceAllPages: false } }, "auto"],
     [{ parserPlaybook: "agentic", vision: { forceAllPages: false } }, "auto"],
@@ -76,8 +81,12 @@ describe("legacy quality input", () => {
     [{ parserPlaybook: "fast", vision: { forceAllPages: true } }, "good"],
   ] as const)("maps %j to %s", (legacy, expected) => {
     expect(legacyQualityMode(legacy)).toBe(expected);
-    expect(normalizePipelineFeatures(legacy as never).quality).toBe(expected);
-    expect(parseStoredPipelineFeatures(legacy).quality).toBe(expected);
+    // The retired good is stored as auto on the intelligent rung (Smartest).
+    const stored = expected === "good" ? "auto" : expected;
+    const level = expected === "good" ? "smartest" : "fastest";
+    expect(normalizePipelineFeatures(legacy as never).quality).toBe(stored);
+    expect(parseStoredPipelineFeatures(legacy).quality).toBe(stored);
+    expect(qualityLevelOfPipeline(normalizePipelineFeatures(legacy as never)).quality).toBe(level);
   });
 
   it("treats forceAllPages: false alone as saying nothing", () => {
@@ -106,12 +115,12 @@ describe("legacy quality input", () => {
     const override = pipelineFeatureOverridesSchema.parse({ parserPlaybook: "fast" });
     expect(override).toEqual({ quality: "fast" });
     const forced = pipelineFeatureOverridesSchema.parse({ vision: { forceAllPages: true } });
-    expect(forced).toEqual({ quality: "good", vision: {} });
+    expect(forced).toEqual({ quality: "auto", ladder: { maxRung: "intelligent" }, vision: {} });
 
-    const project = normalizePipelineFeatures({ quality: "good" });
+    const project = normalizePipelineFeatures({ quality: "smartest" } as never);
     expect(mergePipelineFeatures(project, { parserPlaybook: "fast" } as never).quality).toBe("fast");
-    expect(mergePipelineFeatures(project, { vision: { forceAllPages: false } } as never).quality).toBe("good");
-    expect(mergePipelineFeatures(project, { quality: "auto" }).quality).toBe("auto");
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(project, { vision: { forceAllPages: false } } as never)).quality).toBe("smartest");
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(project, { quality: "fastest" } as never))).toEqual({ quality: "fastest", readScans: false });
   });
 
   it("keeps an in-flight review-grade run row (forceAllPages: false) on auto through normalizePipelineFeatures", () => {
@@ -125,7 +134,6 @@ describe("legacy quality input", () => {
     }));
     const pipeline = normalizePipelineFeatures(runRow);
     expect(pipeline.quality).toBe("auto");
-    expect(qualityReadsEveryPage(pipeline.quality)).toBe(false);
     expect(mergePipelineFeatures(runRow, {}).quality).toBe("auto");
   });
 
@@ -144,21 +152,59 @@ describe("legacy quality input", () => {
   });
 });
 
-describe("quality good turns vision on", () => {
-  it("normalizes { quality: good, visionFallback: false } to vision on", () => {
-    expect(normalizePipelineFeatures({ quality: "good", visionFallback: false }).visionFallback).toBe(true);
+describe("Smartest turns vision on", () => {
+  it("normalizes { quality: smartest (or good), visionFallback: false } to vision on", () => {
+    expect(normalizePipelineFeatures({ quality: "smartest", visionFallback: false } as never).visionFallback).toBe(true);
+    expect(normalizePipelineFeatures({ quality: "good", visionFallback: false } as never).visionFallback).toBe(true);
     expect(normalizePipelineFeatures({ quality: "auto", visionFallback: false }).visionFallback).toBe(false);
   });
 
-  it("enables vision when Good merges into a project with fallback disabled", () => {
+  it("enables vision when Smartest merges into a project with fallback disabled", () => {
     const project = normalizePipelineFeatures({ quality: "auto", visionFallback: false });
-    const merged = mergePipelineFeatures(project, { quality: "good" });
-    expect(merged.quality).toBe("good");
+    const merged = mergePipelineFeatures(project, { quality: "smartest" } as never);
+    expect(merged.quality).toBe("auto");
+    expect(merged.ladder.maxRung).toBe("intelligent");
     expect(merged.visionFallback).toBe(true);
-    // Switching back to Auto leaves vision on (the merged project value); turning it off stays allowed.
-    expect(mergePipelineFeatures(merged, { quality: "auto", visionFallback: false }).visionFallback).toBe(false);
+    // Switching back to Fastest leaves vision as merged; turning it off stays allowed.
+    const fastest = mergePipelineFeatures(merged, { quality: "fastest", visionFallback: false } as never);
+    expect(fastest.visionFallback).toBe(false);
+    expect(fastest.ladder.maxRung).toBe("fast");
   });
 
+  it("toggles Read scans on the project's level", () => {
+    const fastest = normalizePipelineFeatures(null);
+    const off = mergePipelineFeatures(fastest, { readScans: false } as never);
+    expect(qualityLevelOfPipeline(off)).toEqual({ quality: "fastest", readScans: false });
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(off, { readScans: true } as never))).toEqual({ quality: "fastest", readScans: true });
+    // Read scans on a Smartest project keeps Smartest; off lowers it to Fastest without scans.
+    const smartest = normalizePipelineFeatures({ quality: "smartest" } as never);
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(smartest, { readScans: true } as never)).quality).toBe("smartest");
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(smartest, { readScans: false } as never))).toEqual({ quality: "fastest", readScans: false });
+    expect(() => normalizePipelineFeatures({ quality: "smartest", readScans: false } as never)).toThrow(/Smartest always reads scans/);
+    expect(normalizePipelineFeatures({ readScans: false } as never)).not.toHaveProperty("readScans");
+  });
+
+  it("keeps Smartest when an upload override (parsed without the project) sends Read scans on", () => {
+    const smartest = normalizePipelineFeatures({ quality: "smartest" } as never);
+    const on = pipelineFeatureOverridesSchema.parse({ readScans: true });
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(smartest, on)).quality).toBe("smartest");
+    // On a text-only Fastest project it turns scans on; off still lowers to Fastest without scans.
+    const textOnly = mergePipelineFeatures(normalizePipelineFeatures(null), { readScans: false } as never);
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(textOnly, on))).toEqual({ quality: "fastest", readScans: true });
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(smartest, pipelineFeatureOverridesSchema.parse({ readScans: false })))).toEqual({ quality: "fastest", readScans: false });
+    expect(normalizePipelineFeatures(mergePipelineFeatures(smartest, on))).not.toHaveProperty("readScans");
+  });
+
+  it("keeps page images on by default and settable", () => {
+    expect(normalizePipelineFeatures(null).pageImages).toBe(true);
+    expect(mergePipelineFeatures(normalizePipelineFeatures(null), { pageImages: false }).pageImages).toBe(false);
+    expect(pipelineFeatureOverridesSchema.parse({ pageImages: false })).toEqual({ pageImages: false });
+  });
+
+  it("reads a stored row with junk in the quality fields without failing the row", () => {
+    const parsed = parseStoredPipelineFeatures({ quality: "deep", ladder: { maxRung: "vision" }, summarize: true });
+    expect(parsed.summarize).toBe(true);
+  });
 });
 
 describe("documentExtractionForQuality", () => {
@@ -172,9 +218,9 @@ describe("documentExtractionForQuality", () => {
     forceOcr: true,
   } as unknown as DocumentExtractionConfig;
 
-  it("leaves auto and good unchanged", () => {
+  it("leaves auto unchanged", () => {
     expect(documentExtractionForQuality(hostile, "auto")).toEqual({ config: hostile, removed: [] });
-    expect(documentExtractionForQuality(hostile, "good").config).toBe(hostile);
+    expect(documentExtractionForQuality(hostile, "auto").config).toBe(hostile);
   });
 
   it("restricts fast to text-layer extractors", () => {
@@ -344,18 +390,20 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
 
 describe("QUALITY_MODES", () => {
   it("prices each mode from the pricing provider (the open default here)", () => {
-    for (const mode of ["fast", "auto", "good"] as const) {
+    for (const mode of ["fast", "fastest", "smartest", "visual"] as const) {
       expect(qualityModeInfo(mode)).toMatchObject({ ...QUALITY_MODES[mode], creditsPer1kPages: { min: OPEN_CREDITS_PER_PAGE * 1000, max: OPEN_CREDITS_PER_PAGE * 1000 } });
     }
   });
 
   it("formats the price per 1,000 pages", () => {
     expect(qualityModePriceRange("fast")).toBe("$1.00");
-    expect(qualityModePriceRange("good")).toBe("$1.00");
+    expect(qualityModePriceRange("smartest")).toBe("$1.00");
   });
 
-  it("says Fast keeps scans as images", () => {
-    expect(QUALITY_MODES.fast.description).toMatch(/Scanned pages are kept as images, not read/);
+  it("says Read scans off keeps scans as images, Fastest never uses vision, Smartest does", () => {
+    expect(QUALITY_MODES.fast.description).toMatch(/kept as page images, not read/);
+    expect(QUALITY_MODES.fastest.description).toMatch(/No vision model/);
+    expect(QUALITY_MODES.smartest.description).toMatch(/vision model/);
   });
 });
 
@@ -406,4 +454,34 @@ it("accepts bounded VM PDF image options and rejects executable or out-of-range 
   for(const bad of [{binary:"custom"},{images:{enabled:true,minWidth:0}},{images:{minHeight:4097}},{pdf:{passwords:["secret"]}}]) {
     expect(()=>parseExtractorOptions("vm-pdf",bad)).toThrow();
   }
+});
+
+describe("Smartest locks page images on", () => {
+  it("keeps pageImages true on a Smartest pipeline and leaves Fastest's choice alone", () => {
+    expect(normalizePipelineFeatures({ quality: "smartest", pageImages: false } as never).pageImages).toBe(true);
+    expect(normalizePipelineFeatures({ quality: "fastest", pageImages: false } as never).pageImages).toBe(false);
+    expect(normalizePipelineFeatures({ quality: "auto", ladder: { maxRung: "intelligent" }, pageImages: false } as never).pageImages).toBe(true);
+  });
+
+  it("an override turning page images off on a Smartest project keeps them on", () => {
+    const base = normalizePipelineFeatures({ quality: "smartest" } as never);
+    expect(mergePipelineFeatures(base, { pageImages: false }).pageImages).toBe(true);
+    const fastest = normalizePipelineFeatures({ quality: "fastest" } as never);
+    expect(mergePipelineFeatures(fastest, { pageImages: false }).pageImages).toBe(false);
+  });
+
+  it("smartestLocksPageImages names only the forced combination", () => {
+    expect(smartestLocksPageImages({ quality: "auto", ladder: { maxRung: "intelligent" }, pageImages: false })).toBe(true);
+    expect(smartestLocksPageImages({ quality: "auto", ladder: { maxRung: "intelligent" }, pageImages: true })).toBe(false);
+    expect(smartestLocksPageImages({ quality: "auto", ladder: { maxRung: "ocr" }, pageImages: false })).toBe(false);
+  });
+
+  it("defaults Fastest to native text and Auto to OCR while preserving stored rungs", () => {
+    expect(qualityLevelOfPipeline(normalizePipelineFeatures({ quality: "fastest" } as never))).toEqual({ quality: "fastest", readScans: false });
+    expect(qualityLevelOfPipeline(defaultPipelineFeatures)).toEqual({ quality: "fastest", readScans: false });
+    const auto = pipelineFeatureOverridesSchema.parse({ quality: "auto" });
+    expect(mergePipelineFeatures(defaultPipelineFeatures, auto).ladder.maxRung).toBe("ocr");
+    expect(normalizePipelineFeatures({ quality: "auto", ladder: { maxRung: "intelligent" } }).ladder.maxRung).toBe("intelligent");
+    expect(normalizePipelineFeatures({ quality: "fastest", readScans: true } as never).ladder.maxRung).toBe("ocr");
+  });
 });

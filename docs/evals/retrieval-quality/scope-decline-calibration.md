@@ -1,5 +1,9 @@
 # Chat quick-decline calibration: unpromoted evidence
 
+This report records an evaluation of the former bundled API. Its runner is available in the
+[pre-retirement tree](https://github.com/DocSlurp/docslurp-oss/blob/19a28640/scripts/retrieval-quality/scope-decline-calibrate.mts).
+
+
 The default `DEFAULT_SCOPE_DECLINE_THRESHOLD` is **0 (disabled)**. The fixed chat instruction still asks the model to decline unrelated requests politely. Explicit workspace or environment thresholds remain experimental opt-ins.
 
 The previous v2 figures did not exercise the real `runSearchSession` pipeline. They do not establish a production false-decline rate and must not be used to promote a threshold. Earlier claims of 42/42 correct declines, 72% recall and zero false declines are withdrawn as production evidence.

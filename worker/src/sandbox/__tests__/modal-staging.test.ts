@@ -1,3 +1,4 @@
+import { hasTestApplication, testApplicationPath } from "../../test/application-path.js";
 import { pricing } from "@docslurp/shared";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -5,9 +6,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CommandRunner, resolveVenvBin } from "../../tools/runner.js";
+import { CommandRunner, resolveVenvBin, stageClamDefinitions } from "../../tools/runner.js";
 import { resolveScriptsDir } from "../../tools/scripts-dir.js";
-import { buildModalUsageEvent, buildScannerSnapshot, createModalProvider, modalVmIdleSeconds, modalVmsPerActivity, modalVmsPerWorker, type ModalSdk } from "../providers/modal/index.js";
+import { buildModalUsageEvent, buildScannerSnapshot, createModalProvider, modalVmIdleSeconds, modalVmParkSeconds, modalVmsPerActivity, modalVmsPerWorker, type ModalSdk } from "../providers/modal/index.js";
+import { CLAM_VOLUME_MOUNT } from "../providers/modal/clam-definition-volume.js";
 import { jobRootsChanged, modalScannerRegions, ScannerSnapshotCache } from "../providers/modal/scanner.js";
 import { SessionStaging, type RemoteFs } from "../providers/modal/staging.js";
 import { SandboxConfigError, SandboxInfrastructureError, SandboxOutputError, SandboxRunError } from "../types.js";
@@ -34,6 +36,7 @@ class MemoryRemoteFs implements RemoteFs {
     this.writes.push(p);
     this.files.set(p, { data, mtime: ++this.clock });
   }
+  async writeFromLocal(p: string, local: string) { await this.writeFile(p, readFileSync(local)); }
   async readFile(p: string) {
     this.reads.push(p);
     const file = this.files.get(p);
@@ -76,6 +79,21 @@ describe("SessionStaging", () => {
     await staging.ensureUploaded([file, file]);
     expect(remote.writes).toEqual([file]);
     expect(Buffer.from(remote.files.get(file)!.data).toString()).toBe("hello");
+  });
+
+  it("stages large inputs from private disk once and releases snapshots on errors", async () => {
+    const file = path.join(root, "long.pdf");
+    writeFileSync(file, Buffer.alloc(9 * 1024 * 1024, 65));
+    const copy = vi.spyOn(remote, "writeFromLocal");
+    await staging.ensureUploaded([file, file]);
+    expect(copy).toHaveBeenCalledTimes(1);
+    expect(existsSync(copy.mock.calls[0]![1])).toBe(false);
+    writeFileSync(file, Buffer.alloc(9 * 1024 * 1024, 66));
+    copy.mockRejectedValueOnce(new Error("transfer failed"));
+    await expect(staging.ensureUploaded([file])).rejects.toThrow("transfer failed");
+    expect(existsSync(copy.mock.calls[1]![1])).toBe(false);
+    await staging.ensureUploaded([file]);
+    expect(copy).toHaveBeenCalledTimes(3);
   });
 
   it("refreshes a reused input path when its contents change, including same-size edits", async () => {
@@ -295,6 +313,9 @@ const controlOf = (argv: string[]) => (isKill(argv) ? argv[4] : argv[5]);
 function fakeSdk(
   opts: {
     createFails?: boolean;
+    clamVolumeUnavailable?: boolean;
+    clamVolumeMountMissing?: boolean;
+    clamVolumeVerificationExit?: number;
     createGate?: Promise<void>;
     exec?: (command: string[], control: string, vm: number) => Promise<FakeProcess>;
     onKill?: (control: string) => void;
@@ -304,6 +325,8 @@ function fakeSdk(
     killFailsInVm?: number;
     /** The post-command reset finds the VM's disk or job roots unusable (exit 5) in this VM. */
     resetUnhealthyInVm?: number;
+    /** Every reset from the Nth on (1-based) reports an unusable VM (exit 5). */
+    resetFailFrom?: number;
     /** The VM-start image lock finds paths the parser user can write (exit 6). */
     lockFails?: boolean;
     /** The post-command reset exec throws: Modal's exec deadline (a wipe of millions of files) or a transport error. */
@@ -366,6 +389,8 @@ function fakeSdk(
     assetWritesInFlight: 0,
     maxAssetWritesInFlight: 0,
     orphanTerminates: [] as string[],
+    /** Sandboxes reattached by id (a parked VM adopted by another session). */
+    reattached: [] as string[],
     resets: [] as Array<{ vm: number; roots: string[] }>,
     rootWrites: [] as string[],
     events: [] as string[],
@@ -437,6 +462,7 @@ function fakeSdk(
     },
     exec: async (argv: string[], params?: { timeoutMs?: number }, vm = 1) => {
       if (argv[0] === "/bin/sh" && argv[2]?.includes("protected_hardlinks")) { state.hardened++; return finished("", opts.hardeningFails ? 3 : 0); }
+      if (argv[0] === "python3" && argv[3]?.startsWith("# docslurp-clam-volume")) return finished("", opts.clamVolumeVerificationExit ?? 0);
       // Scanner snapshot build (root): job-root listings, daemon setup, start, version, self-test.
       if (argv[0] === "python3" && argv[3]?.includes("out.append('absent '")) {
         state.jobRootListings++;
@@ -484,6 +510,7 @@ function fakeSdk(
         state.events.push("reset");
         if (opts.resetThrows === "deadline") throw new Error("Deadline exceeded while waiting for the exec");
         if (opts.resetThrows === "transport") throw new Error("stream reset by peer");
+        if (opts.resetFailFrom !== undefined && state.resets.length >= opts.resetFailFrom) return finished("", 5);
         return finished("", opts.resetUnhealthyInVm === vm ? 5 : 0);
       }
       // The root leftover kill (KILL_PARSER_USER_ARGV): kill(-1) as the parser user, verified.
@@ -520,6 +547,10 @@ function fakeSdk(
     ModalClient: class {
       apps = { fromName: async () => { if (opts.lookupDelayMs) await new Promise((resolve) => setTimeout(resolve, opts.lookupDelayMs)); return {}; } };
       images = { fromRegistry: (tag: string, secret?: unknown) => void state.images.push([tag, secret]) };
+      volumes = { fromName: async (name: string) => {
+        if (opts.clamVolumeUnavailable) throw new ModalNotFound(`no volume named ${name}`);
+        return { withMountOptions: (mount: unknown) => ({ name, mount }) };
+      } };
       secrets = { fromName: async (name: string) => ({ secret: name }) };
       sandboxes = {
         fromName: async (_app: string, name: string) => {
@@ -527,9 +558,21 @@ function fakeSdk(
           if (!opts.orphanOnFailedCreate) throw new ModalNotFound(`no sandbox named ${name}`);
           return { terminate: async () => { state.orphanTerminates.push(name); } };
         },
+        fromId: async (id: string) => {
+          state.reattached.push(id);
+          const vm = Number(id.slice(3));
+          return {
+            ...sandbox, sandboxId: id,
+            terminate: async () => { await sandbox.terminate(); state.terminatedAt[vm - 1] = Date.now(); },
+            exec: (argv: string[], params?: { timeoutMs?: number }) => sandbox.exec(argv, params, vm),
+          };
+        },
         create: async (_app: unknown, _image: unknown, options: unknown) => {
           state.createOptions.push(options);
           await opts.createGate;
+          if (opts.clamVolumeMountMissing && Object.keys((options as { volumes?: object }).volumes ?? {}).length) {
+            throw new ModalNotFound("no signature generation");
+          }
           if (opts.createFails) throw new Error("no capacity");
           const vm = state.createOptions.length;
           if (opts.createFailsFrom !== undefined && vm >= opts.createFailsFrom) throw new Error("no capacity");
@@ -780,6 +823,62 @@ describe("modal provider session lifecycle", () => {
     await opened.close();
   });
 
+  it.each(["verified", "mismatch", "unavailable", "mount-missing", "writable"] as const)(
+    "uses only confirmed read-only matching ClamAV definitions (%s)",
+    async (condition) => {
+      const source = await mkdtemp(path.join(tmpdir(), "docslurp-clam-volume-test-"));
+      await writeFile(path.join(source, "daily.cvd"), "defs");
+      vi.stubEnv("DOCSLURP_CLAMAV_DB_DIR", source);
+      const definitions = await stageClamDefinitions(source);
+      try {
+        const { sdk, state } = fakeSdk({
+          clamVolumeUnavailable: condition === "unavailable",
+          clamVolumeMountMissing: condition === "mount-missing",
+          clamVolumeVerificationExit: condition === "writable" ? 2 : condition === "mismatch" ? 1 : 0,
+        });
+        const provider = createModalProvider(async () => sdk);
+        const opening = provider.openSession({ ...config, clamDefinitionsVolume: "clam-reference" }, { activityId: "a" });
+        if (condition === "writable") {
+          await expect(opening).rejects.toThrow(/ClamAV volume is not confirmed read-only/);
+          expect(state.commands).toHaveLength(0);
+          expect(state.terminate).toBe(1);
+          return;
+        }
+
+        const session = await opening;
+        try {
+          const file = definitions.files[0]!;
+          await expect(session.run!({
+            ...command, args: ["--database", file], inputPaths: [file], readOnlyAssetDir: definitions.dir,
+          })).resolves.toMatchObject({ exitCode: 0 });
+          const mounted = condition !== "unavailable";
+          expect(state.createOptions[0]).toMatchObject({
+            includeOidcIdentityToken: false, env: {}, secrets: [], cloudBucketMounts: {}, blockNetwork: true,
+            volumes: mounted ? {
+              [CLAM_VOLUME_MOUNT]: { name: "clam-reference", mount: { readOnly: true, subPath: `/${definitions.hash}` } },
+            } : {},
+          });
+          if (condition === "mount-missing") {
+            expect(state.createOptions).toHaveLength(2);
+            expect(state.createOptions[1]).toMatchObject({ volumes: {} });
+          }
+          const expected = condition === "verified" ? CLAM_VOLUME_MOUNT : `/opt/docslurp-assets/${path.basename(definitions.dir)}`;
+          expect(state.commands.at(-1)).toEqual(["/usr/bin/true", "--database", `${expected}/daily.cvd`]);
+          expect(state.rootWrites.filter((file) => file.endsWith("/daily.cvd"))).toEqual(
+            condition === "verified" ? [] : [`${expected}/daily.cvd`],
+          );
+        } finally {
+          await session.close();
+        }
+      } finally {
+        vi.unstubAllEnvs();
+        await definitions.release();
+        await rm(definitions.dir, { recursive: true, force: true });
+        await rm(source, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("a stuck asset write times out, strikes no one and frees the worker's staging slot (council X #5)", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "docslurp-x5-"));
     try {
@@ -844,7 +943,7 @@ describe("modal provider session lifecycle", () => {
       const big = path.join(dir, "big.bin");
       await writeFile(big, "");
       const { truncate } = await import("node:fs/promises");
-      await truncate(big, 512 * 1024 * 1024 + 1);
+      await truncate(big, 1024 * 1024 * 1024 + 1);
       const small = path.join(dir, "in.pdf");
       await writeFile(small, "%PDF");
       // Oversize: B's verdict (a document failure), nothing blamed on A.
@@ -1533,6 +1632,10 @@ describe("modal provider session lifecycle", () => {
       expect(modalVmIdleSeconds({})).toBe(20);
       expect(modalVmIdleSeconds({ DOCSLURP_MODAL_VM_IDLE_SECONDS: "0" })).toBe(20);
       expect(modalVmIdleSeconds({ DOCSLURP_MODAL_VM_IDLE_SECONDS: "45" })).toBe(45);
+      expect(modalVmParkSeconds({})).toBe(30);
+      expect(modalVmParkSeconds({ DOCSLURP_MODAL_VM_PARK_SECONDS: "0" })).toBe(0);
+      expect(modalVmParkSeconds({ DOCSLURP_MODAL_VM_PARK_SECONDS: "120" })).toBe(120);
+      expect(modalVmParkSeconds({ DOCSLURP_MODAL_VM_PARK_SECONDS: "999" })).toBe(30);
     });
   });
 
@@ -1893,6 +1996,125 @@ describe("modal provider session lifecycle", () => {
     expect(result.exitCode).toBeNull();
     expect(result.stderr).toContain("time limit");
   });
+
+  describe("parked VMs across sessions (compute reuse across activities, runs and organizations)", () => {
+    const parkConfig = { ...config, vmParkSeconds: 30, sessionTimeoutSeconds: 900 };
+
+    it("parks a closed session's idle VM; the next session (another organization) adopts it warm and wipes the job tree before staging", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished("own-output") });
+      const provider = createModalProvider(async () => sdk);
+      const dir = await mkdtemp(path.join(tmpdir(), "docslurp-park-"));
+      try {
+        const inputA = path.join(dir, "a.pdf");
+        const inputB = path.join(dir, "b.pdf");
+        await writeFile(inputA, "org a bytes");
+        await writeFile(inputB, "org b bytes");
+        const a = await provider.openSession(parkConfig, { activityId: "a" });
+        await a.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-a", inputPaths: [inputA] });
+        await a.close();
+        expect(state.createOptions).toHaveLength(1);
+        expect(state.terminate).toBe(0);
+        const before = state.events.length;
+        const resetsBefore = state.resets.length;
+        const b = await provider.openSession(parkConfig, { activityId: "b" });
+        // Adopted: no create, no hardening again.
+        expect(state.createOptions).toHaveLength(1);
+        expect(state.reattached).toEqual(["sb-1"]);
+        expect(state.hardened).toBe(1);
+        const result = await b.run!({ ...command, tenantKey: "org-b", affinityKey: "doc-b", inputPaths: [inputB] });
+        expect(result.stdout).toBe("own-output");
+        // The adopting session's first act on the VM is a full wipe (no input kept), before its own command runs.
+        const events = state.events.slice(before);
+        expect(events[0]).toBe("reset");
+        expect(events.findIndex((event) => event.startsWith("exec:"))).toBeGreaterThan(0);
+        expect(state.resets[resetsBefore]!.roots).not.toContain("--keep");
+        expect(state.commandVms).toEqual([1, 1]);
+        await b.close();
+        await provider.drain!();
+        expect(state.terminate).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("terminates a parked VM after its park window, and a later session creates a fresh one", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const a = await provider.openSession({ ...parkConfig, vmParkSeconds: 0.05 }, { activityId: "a" });
+      await a.run!({ ...command, affinityKey: "doc-a" });
+      await a.close();
+      expect(state.terminate).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(state.terminate).toBe(1);
+      const b = await provider.openSession(parkConfig, { activityId: "b" });
+      expect(state.createOptions).toHaveLength(2);
+      await b.close();
+      await provider.drain!();
+    });
+
+    it("at the worker's VM cap, a new session adopts the parked VM instead of waiting for capacity", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const capped = { ...parkConfig, vmsPerWorker: 1, vmsPerActivity: 1 };
+      const a = await provider.openSession(capped, { activityId: "a" });
+      await a.run!({ ...command, affinityKey: "doc-a" });
+      await a.settle!();
+      const b = await provider.openSession(capped, { activityId: "b" });
+      await b.run!({ ...command, affinityKey: "doc-b" });
+      expect(state.createOptions).toHaveLength(1);
+      expect(state.commandVms).toEqual([1, 1]);
+      await b.close();
+      await a.close();
+      await provider.drain!();
+      expect(state.terminate).toBe(1);
+    });
+
+    it("a parked VM whose wipe fails is stopped, and the adopting session starts a fresh VM (no token leaked)", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished(), resetFailFrom: 2 });
+      const provider = createModalProvider(async () => sdk);
+      const capped = { ...parkConfig, vmsPerWorker: 1, vmsPerActivity: 1 };
+      const a = await provider.openSession(capped, { activityId: "a" });
+      await a.run!({ ...command, affinityKey: "doc-a" });
+      await a.close();
+      expect(state.terminate).toBe(0);
+      // The adoption wipe (reset 2) fails: the parked VM is stopped and its capacity goes to a fresh VM.
+      const b = await provider.openSession({ ...capped, vmParkSeconds: 0 }, { activityId: "b" });
+      expect(state.reattached).toEqual(["sb-1"]);
+      expect(state.terminate).toBe(1);
+      expect(state.createOptions).toHaveLength(2);
+      await b.close();
+    });
+
+    it("parks nothing once the provider drained (worker shutdown)", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const a = await provider.openSession(parkConfig, { activityId: "a" });
+      await a.run!({ ...command, affinityKey: "doc-a" });
+      await provider.drain!();
+      await a.close();
+      expect(state.terminate).toBe(1);
+    });
+
+    it("never parks an unmetered session's VM, nor a VM with too little lifetime left", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const probe = await provider.openSession(parkConfig, { activityId: "probe", unmetered: true });
+      await probe.run!(command);
+      await probe.close();
+      expect(state.terminate).toBe(1);
+      // A 0.3 s lifetime: parked with about 0.3 s left, but adoption needs two thirds of it, so it is stopped instead.
+      const short = { ...parkConfig, sessionTimeoutSeconds: 0.3 };
+      const a = await provider.openSession(short, { activityId: "a" });
+      await a.run!(command);
+      await a.close();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const b = await provider.openSession(short, { activityId: "b" });
+      expect(state.createOptions).toHaveLength(3);
+      expect(state.reattached).toEqual([]);
+      await b.close();
+      await provider.drain!();
+    });
+  });
 });
 
 describe("CommandRunner through the modal provider", () => {
@@ -1961,11 +2183,11 @@ describe("modal usage event", () => {
 });
 
 describe("modal usage amount is not provider cost (real-Modal run)", () => {
-  it("the loss alert and spend attribution read providerCostCents, and amount only for billable metrics", async () => {
+  it.skipIf(!hasTestApplication())("the loss alert and spend attribution read providerCostCents, and amount only for billable metrics", async () => {
     const { readFileSync } = await import("node:fs");
-    const attribution = readFileSync(new URL("../../../../server/src/services/usage-attribution.ts", import.meta.url), "utf8");
+    const attribution = readFileSync(testApplicationPath("src/services/usage-attribution.ts"), "utf8");
     // The provider-cost loss query takes provider cost from metadata.providerCostCents, never from amount.
-    const loss = attribution.slice(attribution.indexOf("const lossItems"), attribution.indexOf("const lossItems") + 2_000);
+    const loss = attribution.slice(attribution.indexOf("function settledUsageItems"), attribution.indexOf("function settledUsageItems") + 2_500);
     expect(loss).toMatch(/metadata -> 'providerCostCents'/);
     expect(loss).not.toMatch(/\bamount\b/);
     // amount is summed per metric, and only billable unit metrics are read from that sum.
@@ -2044,8 +2266,8 @@ describe("modal scanner sessions (quarantine Q1)", () => {
   function open(opts: Parameters<typeof fakeSdk>[0] = {}) {
     const { sdk, state } = fakeSdk({ exec: async () => finished(""), ...opts });
     const provider = createModalProvider(async () => sdk);
-    const spec = (tenantKey = "org-a", signatureSetHash = hash) => ({ tenantKey, definitionsDir: sigDir, signatureSetHash, expectedVersion: 28180 });
-    return { state, provider, scanner: (tenantKey?: string, signatureSetHash?: string) => provider.openSession(lifecycleConfig, { activityId: "q", scanner: spec(tenantKey, signatureSetHash) }) };
+    const spec = (signatureSetHash = hash) => ({ definitionsDir: sigDir, signatureSetHash, expectedVersion: 28180 });
+    return { state, provider, scanner: (signatureSetHash?: string) => provider.openSession(lifecycleConfig, { activityId: "q", scanner: spec(signatureSetHash) }) };
   }
 
   it("takes the snapshot before any job input exists: the build VM runs no job command and is terminated; jobs run only in restored VMs", async () => {
@@ -2082,7 +2304,7 @@ describe("modal scanner sessions (quarantine Q1)", () => {
     }
     expect(state.snapshots).toBe(1);
     expect(state.restores).toBe(3);
-    const updated = await scanner("org-a", "b".repeat(64));
+    const updated = await scanner("b".repeat(64));
     await updated.close();
     expect(state.snapshots).toBe(2);
     // Every restored VM was terminated with its session.
@@ -2090,14 +2312,13 @@ describe("modal scanner sessions (quarantine Q1)", () => {
     for (const vm of restored) expect(state.scannerEvents).toContain(`terminate:${vm}`);
   });
 
-  it("refuses a command of another organization, or of none, before it reaches a VM (cross-tenant)", async () => {
+  it("a scanner session runs commands of any organization and document (no per-organization compute binding)", async () => {
     const { state, scanner } = open();
-    const session = await scanner("org-a");
-    await expect(session.run!({ ...command, tenantKey: "org-b" })).rejects.toThrow(/another organization/);
-    await expect(session.run!({ ...command })).rejects.toThrow(/another organization/);
-    expect(state.commands).toHaveLength(0);
-    await session.run!({ ...command, tenantKey: "org-a" });
-    expect(state.commands).toHaveLength(1);
+    const session = await scanner();
+    await session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-1" });
+    await session.run!({ ...command, tenantKey: "org-b", affinityKey: "doc-2" });
+    await session.run!({ ...command });
+    expect(state.commands).toHaveLength(3);
     await session.close();
   });
 
@@ -2108,10 +2329,10 @@ describe("modal scanner sessions (quarantine Q1)", () => {
     await session.close();
   });
 
-  it("refuses a scanner session without an organization or with a malformed signature set", async () => {
+  it("refuses a scanner session with a malformed signature set or version", async () => {
     const { provider } = open();
-    await expect(provider.openSession(lifecycleConfig, { activityId: "q", scanner: { tenantKey: "", definitionsDir: sigDir, signatureSetHash: hash, expectedVersion: 1 } })).rejects.toThrow(/organization/);
-    await expect(provider.openSession(lifecycleConfig, { activityId: "q", scanner: { tenantKey: "org-a", definitionsDir: sigDir, signatureSetHash: "zz", expectedVersion: 1 } })).rejects.toThrow(/signature set/);
+    await expect(provider.openSession(lifecycleConfig, { activityId: "q", scanner: { definitionsDir: sigDir, signatureSetHash: "zz", expectedVersion: 1 } })).rejects.toThrow(/signature set/);
+    await expect(provider.openSession(lifecycleConfig, { activityId: "q", scanner: { definitionsDir: sigDir, signatureSetHash: hash, expectedVersion: 0 } })).rejects.toThrow(/signature set/);
   });
 
   it.each([
@@ -2147,31 +2368,9 @@ describe("scanner session council fixes (PR #339)", () => {
   function scanner(opts: Parameters<typeof fakeSdk>[0] = {}) {
     const { sdk, state } = fakeSdk({ exec: async () => finished(""), ...opts });
     const provider = createModalProvider(async () => sdk);
-    const open = () => provider.openSession(lifecycleConfig, { activityId: "q", scanner: { tenantKey: "org-a", definitionsDir: sigDir, signatureSetHash: "c".repeat(64), expectedVersion: 28180 } });
+    const open = () => provider.openSession(lifecycleConfig, { activityId: "q", scanner: { definitionsDir: sigDir, signatureSetHash: "c".repeat(64), expectedVersion: 28180 } });
     return { state, open };
   }
-
-  it("M1: a scanner session serves one document; a second document's command never reaches a VM the first touched", async () => {
-    const { state, open } = scanner();
-    const session = await open();
-    await session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-1" });
-    await session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-1" });
-    const ran = state.commands.length;
-    await expect(session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-2" })).rejects.toThrow(/one document/);
-    await expect(session.run!({ ...command, tenantKey: "org-a" })).rejects.toThrow(/without a document/);
-    expect(state.commands).toHaveLength(ran);
-    await session.close();
-    // The next document gets its own session, and with it a VM freshly restored from the snapshot.
-    const next = await open();
-    await next.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-2" });
-    await next.close();
-    const vms = state.scannerEvents.filter((event) => event.startsWith("command:")).map((event) => event.split(":")[1]);
-    const doc1Vm = vms[0]!;
-    expect(vms.at(-1)).not.toBe(doc1Vm);
-    expect(state.scannerEvents).toContain(`terminate:${doc1Vm}`);
-    expect(state.scannerEvents.indexOf(`terminate:${doc1Vm}`)).toBeLessThan(state.scannerEvents.lastIndexOf(`command:${vms.at(-1)}`));
-    expect(state.restores).toBe(2);
-  });
 
   it("L1: a restored VM that can reach the internet is refused before it runs anything", async () => {
     const { state, open } = scanner({ egressOpen: true });
@@ -2214,7 +2413,7 @@ describe("scanner session council fixes (PR #339)", () => {
     const usage: unknown[] = [];
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const outcome = buildScannerSnapshot({} as ModalSdk, client as never, { ...lifecycleConfig, imageId: "im-test" } as never,
-      { tenantKey: "org-a", definitionsDir: sigDir, signatureSetHash: "a".repeat(64), expectedVersion: 1 }, (event) => usage.push(event)).catch((error: Error) => error);
+      { definitionsDir: sigDir, signatureSetHash: "a".repeat(64), expectedVersion: 1 }, (event) => usage.push(event)).catch((error: Error) => error);
     // Real file I/O (the signature read) runs before create; setImmediate is not faked. Bounded by real time, not turns.
     const waitUntil = performance.now() + 10_000;
     while (!create.mock.calls.length && performance.now() < waitUntil) await new Promise((resolve) => setImmediate(resolve));

@@ -1,10 +1,11 @@
 import { ApplicationFailure } from "@temporalio/common";
+import { runWithPerfContext } from "../lib/perf-context.js";
 import { createHash } from "node:crypto";
 import type { RenderDocumentPageInput } from "@docslurp/shared";
-import { isPageWithheld, pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, piiWithholding, isBillingEnforced } from "@docslurp/shared";
+import { isPageWithheld, pageImagesOnSql, pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, piiWithholding, isBillingEnforced } from "@docslurp/shared";
 import type { Store } from "../db/store.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
-import { spendBlockCode } from "../db/spend-check.js";
+import { orgSpendBlock } from "../db/spend-check.js";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { buildAllocatedResourceObservation, buildLocalComputeUsageEvent, resolveWorkerDeploymentProfile } from "../pipeline/local-compute-cost.js";
@@ -30,7 +31,7 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   const quality = input.quality ?? "reader";
   if (quality !== "reader" && quality !== "export") throw new Error("Invalid page quality");
   const sql = store.stageSql;
-  const document = await store.loadDocument(input.documentId);
+  const document = await store.loadDocument(input.documentId, { runId: input.runId });
   if (document.runId !== input.runId || document.status !== "completed" || document.mimeType !== "application/pdf" || !Number.isInteger(input.pageNumber) || input.pageNumber < 1 || input.pageNumber > document.pageCount) throw new Error("Document page is not renderable");
   // Fail closed (council R7-H1): a document with no parse decision from this build's quarantine (one quarantined before it)
   // is never rasterized from its upload. Final: a retry cannot decide it; a reprocess re-quarantines it.
@@ -39,15 +40,18 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   } catch (error) {
     throw ApplicationFailure.nonRetryable("Document page needs a fresh scan: reprocess the document", "ParseSourceUnscanned", error instanceof Error ? error.name : "refused");
   }
-  const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; status: string | null; metadata: unknown; low: string | null; high: string | null }[]>`
+  const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; status: string | null; metadata: unknown; page_images: boolean; low: string | null; high: string | null }[]>`
     select d.org_id, d.project_id, d.status, d.metadata,
       coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'), 0) > 0 as withheld,
+      ${sql.unsafe(pageImagesOnSql("p"))} as page_images,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 120)} as low,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 250)} as high
-    from documents d join project_runs r on r.id=d.run_id
+    from documents d join project_runs r on r.id=d.run_id left join projects p on p.id=d.project_id
     where d.id=${document.id} and r.id=${input.runId}
   `;
   if (!row || pageRenderWithheld(row, input.pageNumber)) throw new Error("Document page is unavailable");
+  // Page images off for the project (pipeline.pageImages: false): no viewer page image is rendered (fail closed).
+  if (row.page_images === false) throw ApplicationFailure.nonRetryable("Page images are turned off for this project", "PageImagesDisabled");
   const dpi = input.dpi ?? pageRenderDpi(quality);
   if ((dpi !== 120 && dpi !== 250) || (dpi === 250 && quality !== "export")) throw ApplicationFailure.nonRetryable("Page render policy changed; request again", "PageRenderPolicyChanged");
   const slot = pageRenderSlot(input.documentId, input.pageNumber, quality, dpi);
@@ -56,13 +60,15 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
     return;
   }
   if (isBillingEnforced()) {
-    const [budget] = await sql<{ funded: boolean; available: number; project_budget_paused: boolean; org_budget_paused: boolean; project_in_org: boolean }[]>`select * from org_spend_status(${row.org_id}, ${row.project_id}::text, 0)`;
-    if (spendBlockCode(budget ? { ...budget, org_id: row.org_id } : undefined)) throw new Error("Page rendering spend is blocked");
+    if (await orgSpendBlock(sql, { orgId: row.org_id, projectId: row.project_id })) throw new Error("Page rendering spend is blocked");
   }
   const started = Date.now();
   const sources = new PdfSourceCache(deps.storage);
   const cache = new PdfRasterCache(deps.runner, deps.storage, sources);
-  const [page] = await cache.renderSelectedPages({ document, runId: input.runId, pageNumbers: [input.pageNumber], dpi, signal }).finally(() => sources.clear());
+  // The render's parser commands carry this organization's run (one pooled VM for its commands, usage in its ledger).
+  const [page] = await runWithPerfContext({ runId: input.runId, orgId: row.org_id, projectId: row.project_id, documentId: document.id,
+    scope: "document", stageName: "page-render", pushPerformance: () => {} },
+  () => cache.renderSelectedPages({ document, runId: input.runId, pageNumbers: [input.pageNumber], dpi, signal })).finally(() => sources.clear());
   if (!page) throw new Error("Requested page was not rendered");
   const ledger = new PipelineUsageEventLedger();
   const profile = resolveWorkerDeploymentProfile();

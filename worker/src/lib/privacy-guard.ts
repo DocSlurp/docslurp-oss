@@ -6,6 +6,7 @@ import {
   startPrivateEndpointHealthProbe,
   textModelCallDescriptor,
   validatePrivateModelEndpointsAtStartup,
+  validatePrivateModelModeAtStartup,
   type PrivateCallAuditScope,
   buildBlockedPrivacyAuditEntry,
   formatPrivacyBlockLog,
@@ -35,7 +36,7 @@ export async function allowHostedCall(
 
   console.warn(`${formatPrivacyBlockLog(mode, call)} run=${state.run.id}`);
   // A document shard's stage is blocked again by the unsharded pass, which audits every document once.
-  if (privacyModeAuditsBlockedCalls(mode) && state.store?.recordPrivacyAudit && !state.shard) {
+  if (privacyModeAuditsBlockedCalls(mode) && state.store && !state.shard) {
     const targets: Array<string | null> = documentIds.length > 0 ? [...documentIds] : [null];
     try {
       await state.store.recordPrivacyAudit(
@@ -86,11 +87,15 @@ export function currentPrivacyAuditScope(): PrivateCallAuditScope | undefined {
 }
 
 /**
- * Worker startup: validates DOCSLURP_PRIVATE_MODEL_ENDPOINTS (throws on invalid
- * config), registers the audit writer, and starts a non-blocking /models probe.
+ * Worker startup: validates DOCSLURP_PRIVATE_MODEL_ENDPOINTS and the model mode
+ * and service map (throws on invalid config), registers the audit writer, and starts a non-blocking /models probe.
  */
 export function initializePrivateModelEndpoints(write: (entries: readonly PrivacyAuditEntry[]) => Promise<void>): void {
   for (const line of validatePrivateModelEndpointsAtStartup()) console.log(line);
+  // DOCSLURP_MODEL_MODE and the DOCSLURP_PRIVATE_*_MODEL service map: an invalid value refuses to start.
+  const modelMode = validatePrivateModelModeAtStartup();
+  for (const line of modelMode.info) console.log(line);
+  for (const line of modelMode.warnings) console.warn(line);
   configurePrivateCallAudit({ write, currentScope: currentPrivacyAuditScope });
   if (getPrivateModelEndpointRegistry().endpoints.length > 0) startPrivateEndpointHealthProbe();
 }

@@ -30,7 +30,7 @@ import { artifactExportPath } from "../exports/build-document-export.js";
 import type { Document, ProjectRun } from "../models.js";
 import { runUsageEventStatements } from "../db/usage-event-store.js";
 import { runSpentCents } from "../pipeline/checkpoints.js";
-import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { createStages } from "../stages/index.js";
 import {
@@ -47,6 +47,7 @@ import type { SummaryTreeModelRequest } from "../summary-tree/index.js";
 import { WORKFLOW_STAGE_ORDER } from "../temporal/workflow-stage-order.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 
 /**
  * The `summary-tree` stage as the pipeline runs it: where it sits, when it runs, what it records in the run's
@@ -170,13 +171,13 @@ async function seed(storage: MemoryStorage, pipeline: PipelineFeatures, document
       artifactUri: storage.uri(`u1/run-1/embeddings/${document.id}.json`), stats: { chunks: document.leaves },
     } as unknown as Parameters<WorkflowState["setDocumentStage"]>[0]);
   }
-  const store = {
+  const store = memoryCheckpointStore({
     startDocumentStage: vi.fn(async () => undefined), completeDocumentStage: vi.fn(async () => undefined), failDocumentStage: vi.fn(async () => undefined),
     updateProgress: vi.fn(async () => undefined), startRunStage: vi.fn(async () => undefined), completeRunStage: vi.fn(async () => undefined),
     failRunStage: vi.fn(async () => undefined), appendEvent: vi.fn(async () => undefined), setPageStageComplete: vi.fn(async () => undefined),
     getCompletedPages: vi.fn(async () => new Set<number>()),
-  } satisfies CheckpointStore;
-  state.store = store;
+  });
+  state.bindStore(store);
   return { state, store };
 }
 

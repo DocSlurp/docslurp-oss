@@ -94,21 +94,13 @@ export function percentiles(gray: Uint8Array, qs: number[]): number[] {
 
 export type TextLayerStatusValue = "ok" | "suspect" | "absent" | "unknown" | "ocr-layer";
 
-/** ok | suspect | absent | unknown, from free facts only. */
-export function textLayerStatus(
-  chars: number, words: number, unmappedRatio: number, garbled: boolean, imageCoverage: number,
-): Exclude<TextLayerStatusValue, "ocr-layer"> {
-  if (chars === 0) return imageCoverage >= 0.3 ? "unknown" : "absent";
-  if (garbled || unmappedRatio > 0.03) return "suspect";
-  if (words < 20 && imageCoverage >= 0.3) return "suspect";
-  return "ok";
-}
+/** The probe's text-layer rules are page evidence's (lib/page-evidence.ts): one rule for the probe and for Doppler facts. */
+export { isOcrLayer, textLayerStatus } from "../../lib/page-evidence.js";
 
 export const OCR_FONT_RE = /glyphless|invisible|\bocr|hocr|tesseract/i;
 export const OCR_PRODUCER_RE =
   /tesseract|ocrmypdf|ocr|abbyy|finereader|paddle|textract|readiris|omnipage|paper ?capture|document ?ai/i;
 export const IMAGE_HOST_COVERAGE = 0.25;
-export const OCR_LAYER_OVER_IMAGE = 0.5;
 
 const COMMON = new Set(
   ("the of and to in is that it for as with was on be by this are at from or an have not but they which you " +
@@ -125,10 +117,6 @@ export function commonWordRatio(text: string): number {
 
 export function tokens(s: string, minLen = 2): string[] {
   return (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((t) => t.length >= minLen);
-}
-
-export function isOcrLayer(textOverImageRatio: number, words: number): boolean {
-  return words >= 3 && textOverImageRatio >= OCR_LAYER_OVER_IMAGE;
 }
 
 export function round(value: number, digits: number): number {

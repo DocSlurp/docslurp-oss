@@ -28,6 +28,13 @@ export interface ProjectRun {
   pagesTotal: number;
   pagesProcessed: number;
   /**
+   * Pages of the run's documents that finished indexing (`project_runs.pages_searchable`), as last read from the run
+   * row. Null: nothing reported yet. Undefined: the database predates the column, so checkpoints leave it and
+   * `pages_counted_at` alone. Stages never set it: an indexed document adds its pages to
+   * `WorkflowState.pendingSearchablePages` and the next checkpoint adds that to the row.
+   */
+  pagesSearchable?: number | null;
+  /**
    * Committed billed spend of the run (`project_runs.spent_cents`): the sum
    * of cost_cents of every usage event persisted for it, kept by a trigger on
    * usage_events (migration 0056) and refreshed by each progress checkpoint.
@@ -82,7 +89,7 @@ export interface Document {
   pageCountSource?: "counted" | "assumed" | null;
   /**
    * The page count admission priced (documents.intake_page_count, migration 0130): set at insert, never rewritten. Measured
-   * pages above it are authorized against the balance on every attempt (lib/measured-page-authorization.ts). Null on rows
+   * pages above it are authorized against the balance on every attempt (pipeline/page-basis.ts PageBasis.authorize). Null on rows
    * from before 0130, read as pageCount.
    */
   intakePageCount?: number | null;

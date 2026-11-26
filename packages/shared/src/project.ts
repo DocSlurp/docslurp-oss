@@ -1,6 +1,7 @@
 import { CHAT_TIERS } from "./project-chat-models.js";
 import { geoPredicateSchema } from "./geo.js";
-import { CHART_EXPORT_SWITCH_VALUES, chartExportTierSchema } from "./chart-export.js";
+import { CHART_EXPORT_SWITCH_VALUES, chartExportTierSchema, type ChartExportTier } from "./chart-export.js";
+import { chartTierForVisuals, normalizeQualityLevel, qualityLevelSchema, qualityPresetSchema, visualsLevelSchema, type VisualsLevel } from "./extraction-config.js";
 import { projectSettingsProposalSchema } from "./project-settings-proposal.js";
 import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
@@ -133,6 +134,26 @@ export const projectSchema = z.object({
     freeAvailable: z.boolean(),
     ceiling: z.enum(CHART_EXPORT_SWITCH_VALUES),
   }).optional(),
+  /**
+   * The project's extraction settings in the current names: `quality` (`fastest` | `smartest`), `readScans` (Fastest
+   * only: false keeps scans as page images) and `visuals` (`none` | `figures` | `charts` | `charts-ai`, null = the run
+   * origin's default). Read from the stored pipeline (`pipeline.quality` plus `pipeline.ladder.maxRung`, `figures`,
+   * `chartExport.tier`).
+   */
+  extraction: z.object({ quality: qualityLevelSchema, readScans: z.boolean().default(true), visuals: visualsLevelSchema.nullable() }).optional(),
+  /**
+   * Replaces `chartExportDefaults`: the visuals each run origin gets on a project with none (`app` for the DocSlurp
+   * app, `machine` for API, MCP, SDK and CLI) and the rungs a caller may choose on this deployment (privacy still
+   * narrows them per project).
+   */
+  visualsDefaults: z.object({ app: visualsLevelSchema, machine: visualsLevelSchema, available: z.array(visualsLevelSchema) }).optional(),
+  /**
+   * The `quality` and `visuals` this caller may ask for on an upload, URL ingest or extract into this project, from the
+   * caller's origin: a `smart` or `charts-ai` raise above the project's own needs an editor (or an editor's key with
+   * `pipeline:billed-features`), and privacy, the vision profile's locality and the deployment's switches remove rungs.
+   * Present on project reads for the caller; clients offer only these. The server still checks every request.
+   */
+  extractionChoices: z.object({ quality: z.array(qualityLevelSchema), visuals: z.array(visualsLevelSchema) }).optional(),
   /** Retained versions per document for this project; null inherits the organization's setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
   /**
@@ -140,7 +161,10 @@ export const projectSchema = z.object({
    * `allowChinaProviders`: requests use those providers only when both are true (docs/provider-regions.md).
    */
   allowChinaProviders: z.boolean().default(true),
-  /** Skip the confirm dialog for re-index-queuing changes; recommended changes re-index when `apply` is omitted. */
+  /**
+   * Skip the confirm dialog for recommended re-indexes; they re-index when `apply` is omitted. Never confirms an
+   * index-identity change (`INDEX_IDENTITY_SETTINGS`), which needs the reindex command or `apply: "reindex"`.
+   */
   autoConfirmReindex: z.boolean().default(false),
   runCount: z.number().int().nonnegative().default(0),
   searchSessionCount: z.number().int().nonnegative().default(0),
@@ -157,6 +181,24 @@ export const projectSchema = z.object({
    * defaults, SPEED_BOOST_CHAT_TIERS).
    */
   chatSpeedBoostTiers: z.array(z.enum(CHAT_TIERS)).optional(),
+  /**
+   * Stored settings that no longer validated and were reset on read (present only when there are some). `pipeline`
+   * already holds the value in use: the product default, or for privacy, egress and spend settings the strictest one.
+   * The next settings save writes the reset values back, which clears this list. Clients can say "some saved
+   * settings were reset" and name the settings.
+   */
+  settingsRepairs: z.array(z.object({
+    /** `pipeline.<setting>`, or `pipeline` when the whole stored value was unreadable. */
+    path: z.string(),
+    /** `retired`: named something no longer offered; `invalid`: no longer valid; `restricted`: set to its strictest value. */
+    reason: z.enum(["retired", "invalid", "restricted"]),
+  })).optional(),
+  /**
+   * True when the stored settings cannot be read by this version (written by a newer one): `pipeline` shows every
+   * privacy, egress and spend setting at its strictest, uploads run with those, and settings saves are refused with
+   * 409 `project_settings_unreadable` rather than overwrite the stored settings.
+   */
+  settingsUnreadable: z.boolean().optional(),
   lastActivityAt: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -554,7 +596,6 @@ export const projectSearchRetrievalDefaultsSchema = z.object({
   resultCount: z.number().int().min(1).max(50).default(8),
   useHyDE: z.boolean().default(false),
   useRerank: z.boolean().default(true),
-  useContextualCompression: z.boolean().default(false),
   useMmr: z.boolean().default(false),
   mmrLambda: z.number().min(0).max(1).default(0.4),
   queryRewrite: z.boolean().default(false),
@@ -682,7 +723,6 @@ export const updateProjectSearchRetrievalDefaultsSchema = z.object({
   resultCount: z.number().int().min(1).max(50).optional(),
   useHyDE: z.boolean().optional(),
   useRerank: z.boolean().optional(),
-  useContextualCompression: z.boolean().optional(),
   useMmr: z.boolean().optional(),
   mmrLambda: z.number().min(0).max(1).optional(),
   queryRewrite: z.boolean().optional(),
@@ -733,7 +773,6 @@ export const projectSearchSettingsSchema = z.object({
     resultCount: 8,
     useHyDE: false,
     useRerank: true,
-    useContextualCompression: false,
     useMmr: false,
     mmrLambda: 0.4,
     queryRewrite: false,
@@ -916,6 +955,14 @@ export type ChartExportOverride = z.infer<typeof chartExportOverrideSchema>;
 export const CHART_EXPORT_OVERRIDE_DESCRIPTION =
   "Chart and diagram export for this request: { tier: \"off\" | \"free\" | \"models\" }. Omit for the project's setting; a project with no setting uses the deployment's default for the caller (see the project record's chartExportDefaults; API, MCP, SDK and CLI calls default to off). free exports charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no charge; models also reads other charts with AI, billed per chart read. Each tier is available only where the deployment turns it on: a tier it does not offer is refused with 400 chart_export_tier_unavailable, never silently lowered. models on a project whose tier is not models (unset included) needs project editor rights (or an API key with the pipeline:billed-features scope).";
 
+/** One description for a per-request `quality` on every machine surface (MCP tools, SDK and CLI docs). No prices: estimates quote them. */
+export const QUALITY_OVERRIDE_DESCRIPTION =
+  "Processing quality for this request: fastest (the default) reads native text. auto also OCRs scanned pages and images, with vision disabled. smartest uses vision for scans, images and hard pages. Omit for the project's setting. balanced, smart, fast and good are deprecated aliases. smartest above the project's quality needs project editor rights (or an API key with the pipeline:billed-features scope); a quality the project's privacy mode or the deployment rules out is refused with 400 quality_unavailable.";
+
+/** One description for a per-request `visuals` on every machine surface. */
+export const VISUALS_OVERRIDE_DESCRIPTION =
+  "Figures and charts for this request: none; figures (PDF figures as files, referenced from the Markdown); charts (also chart data from files that carry it, no model, no charge); charts-ai (also reads other charts with AI, billed per chart read). Omit for the project's setting, else the deployment's default for the caller (the project record's visualsDefaults). Replaces chartExport.tier and figures. charts-ai above the project's setting needs project editor rights (or an API key with the pipeline:billed-features scope); a rung the deployment or the project's privacy mode does not offer is refused with 400 visuals_unavailable, never silently lowered.";
+
 /** The chart export override description with the deployment's actual defaults, for tool and prompt text built at runtime. */
 export function chartExportOverrideDescriptionFor(defaults: { app: string; machine: string; modelsAvailable: boolean; freeAvailable: boolean }): string {
   const offered = ["off", ...(defaults.freeAvailable ? ["free"] : []), ...(defaults.modelsAvailable ? ["models"] : [])].join(", ");
@@ -925,6 +972,15 @@ export function chartExportOverrideDescriptionFor(defaults: { app: string; machi
 export const reprocessRunSchema = z
   .object({
     speedBoost: z.boolean().optional(),
+    /**
+     * Quality for this reprocess (`fastest` | `auto` | `smartest`; `balanced` / `smart` deprecated). Omitted: the source run's
+     * quality, capped at the project's now. `smartest` above the project's quality needs editor rights (or an API key
+     * with pipeline:billed-features).
+     */
+    quality: z.preprocess((value) => value === "balanced" ? "auto" : normalizeQualityLevel(value) ?? value, qualityPresetSchema).optional(),
+    /** Visuals for this reprocess (`none` | `figures` | `charts` | `charts-ai`); replaces the deprecated `chartExport`. */
+    visuals: visualsLevelSchema.optional(),
+    /** @deprecated Use `visuals`. */
     chartExport: chartExportOverrideSchema.optional(),
     stages: z.array(pipelineRunStageSchema).min(1).optional(),
     stageFrom: pipelineRunStageSchema.optional(),
@@ -932,7 +988,17 @@ export const reprocessRunSchema = z
   .refine((value) => !(value.stages && value.stageFrom), {
     message: "Use either stages or stageFrom, not both",
     path: ["stages"],
+  })
+  .refine((value) => !(value.visuals && value.chartExport && chartTierForVisuals(value.visuals) !== value.chartExport.tier), {
+    message: "visuals conflicts with chartExport.tier; send visuals only",
+    path: ["visuals"],
   });
+
+/** The chart tier a reprocess request asks for: `visuals`, else the deprecated `chartExport.tier`, else null (inherit). */
+export function reprocessRequestedTier(body: { visuals?: VisualsLevel | null; chartExport?: { tier: ChartExportTier } | null } | null | undefined): ChartExportTier | null {
+  if (body?.visuals) return chartTierForVisuals(body.visuals);
+  return body?.chartExport?.tier ?? null;
+}
 export type ReprocessRunInput = z.infer<typeof reprocessRunSchema>;
 
 /** The name a project carries until DocSlurp titles it from its files, summaries or first chat question. */
@@ -979,12 +1045,23 @@ export const updateProjectSchema = z.object({
   /** Null (or 0) keeps runs indefinitely. */
   runRetentionDays: z.number().int().min(0).max(3650).nullable().optional(),
   /**
-   * What to do with existing documents when the change affects them. A required re-index always queues;
-   * a recommended one re-indexes on "reindex" (or when omitted and `autoConfirmReindex` is on).
+   * What to do with existing documents when the change affects them. "reindex" is the explicit confirmation: it applies
+   * the change and re-indexes, exactly like `POST /v1/projects/:id/reindex`. Once a project has ingested documents, a
+   * change to an index-identity setting (`INDEX_IDENTITY_SETTINGS`: embedding, chunking, vector backends) without it is
+   * refused with 409 `reindex_required` and nothing is saved. Other required re-indexes (a stricter PII or privacy
+   * policy) always queue; a recommended one re-indexes on "reindex" (or when omitted and `autoConfirmReindex` is on).
    */
   apply: z.enum(["new-uploads", "reindex"]).optional(),
-  /** Skip the confirm dialog for re-index-queuing changes; also the default `apply` for recommended changes. */
+  /**
+   * The project default for `apply` on recommended re-indexes (new extraction features, higher quality). It never
+   * confirms an index-identity change: those always need `apply: "reindex"` or the reindex command.
+   */
   autoConfirmReindex: z.boolean().optional(),
+  /**
+   * With `apply: "reindex"`: the `signature` an estimate (or a `reindex_required` refusal) returned. The update is
+   * refused with 409 `estimate_stale`, and nothing saved, when the re-index work or its price changed since.
+   */
+  confirmEstimate: z.string().regex(/^[a-f0-9]{64}$/, "confirmEstimate must be the signature an estimate returned").optional(),
   /** Versions kept per document chain; null inherits the organization setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().optional(),
   /** False keeps China-based model providers out of this project's requests; true cannot widen an org opt-out. */
@@ -995,7 +1072,8 @@ export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
 /** Walk the installed contract shape without injecting defaults into a sparse publication. Records stay open. */
 function rejectUnknownPatchKeys(value: unknown, schema: z.ZodType, ctx: z.RefinementCtx, path: (string | number)[] = []): void {
   if (!value || typeof value !== "object") return;
-  if (schema instanceof z.ZodPipe) return rejectUnknownPatchKeys(value, schema.in as z.ZodType, ctx, path);
+  // A preprocess pipe (pipelineFeaturesSchema) has a transform as its input: descend into its output schema.
+  if (schema instanceof z.ZodPipe) return rejectUnknownPatchKeys(value, (schema.in instanceof z.ZodTransform ? schema.out : schema.in) as z.ZodType, ctx, path);
   if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable || schema instanceof z.ZodDefault) return rejectUnknownPatchKeys(value, schema.unwrap() as z.ZodType, ctx, path);
   if (schema instanceof z.ZodArray && Array.isArray(value)) {
     value.forEach((entry, index) => rejectUnknownPatchKeys(entry, schema.element as z.ZodType, ctx, [...path, index]));
@@ -1060,6 +1138,36 @@ const projectTemplateLockedSettingPaths: Record<
   embedding: ["embedding"],
   inferenceLane: ["inferenceLane"],
 };
+
+/**
+ * Fields a lock holds beyond its own path. `quality` is the one extraction knob (extraction-config.ts): locking it also
+ * locks `visionFallback`, which R0 still stores beside it, so an upload or patch cannot turn a locked template's
+ * rescue reads off (or on) under its quality. The `visionFallback` lock itself is deprecated; templates lock `quality`.
+ */
+const projectTemplateCoLockedPaths: Partial<Record<ProjectTemplateLockedSetting, string[][]>> = {
+  quality: [["visionFallback"]],
+};
+
+/**
+ * Templates whose `quality` lock co-locks `visionFallback`: exactly those that locked `visionFallback` before the lock
+ * moved under `quality`. Other templates leave a project's own `visionFallback` alone (R0 never turns rescue reads on
+ * that a project turned off; R1's migration maps them, design Q1).
+ */
+const TEMPLATES_WITH_QUALITY_CO_LOCKS: ReadonlySet<string> = new Set(["medical-records", "meeting-notes"]);
+
+function coLockedPaths(template: Pick<ProjectTemplate, "key">, setting: ProjectTemplateLockedSetting): string[][] {
+  return TEMPLATES_WITH_QUALITY_CO_LOCKS.has(template.key) ? projectTemplateCoLockedPaths[setting] ?? [] : [];
+}
+
+/** Every dotted pipeline path a template's locks hold (its locked settings plus the paths they co-lock). */
+export function projectTemplateLockedPaths(template: Pick<ProjectTemplate, "key" | "lockedSettings">): string[] {
+  const paths = new Set<string>();
+  for (const setting of template.lockedSettings) {
+    paths.add(projectTemplateLockedSettingPaths[setting].join("."));
+    for (const extra of coLockedPaths(template, setting)) paths.add(extra.join("."));
+  }
+  return [...paths];
+}
 
 function readNestedValue(source: unknown, path: string[]): unknown {
   let current = source;
@@ -1134,10 +1242,11 @@ export function applyProjectTemplateLocks(
   >;
 
   for (const lockedSetting of template.lockedSettings) {
-    const path = projectTemplateLockedSettingPaths[lockedSetting];
-    const lockedValue = readNestedValue(template.pipeline, path);
-    if (lockedValue !== undefined) {
-      writeNestedValue(nextPipeline, path, lockedValue);
+    for (const path of [projectTemplateLockedSettingPaths[lockedSetting], ...coLockedPaths(template, lockedSetting)]) {
+      const lockedValue = readNestedValue(template.pipeline, path);
+      if (lockedValue !== undefined) {
+        writeNestedValue(nextPipeline, path, lockedValue);
+      }
     }
   }
 
@@ -1235,7 +1344,6 @@ export const projectTemplates: ProjectTemplate[] = [
     }),
     lockedSettings: [
       "quality",
-      "visionFallback",
       "vision.benchmarkProfile",
       "preserveTables",
       "pageIndex",
@@ -1317,7 +1425,6 @@ export const projectTemplates: ProjectTemplate[] = [
     }),
     lockedSettings: [
       "quality",
-      "visionFallback",
       "summarize",
       "propositionIndex",
       "inferenceLane",

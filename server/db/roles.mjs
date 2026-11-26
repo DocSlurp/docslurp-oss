@@ -49,6 +49,7 @@ export const WORKER_TABLES = Object.freeze({
   document_extraction_levels: { privileges: DML, evidence: "worker/src/db/document-asset-ledger.ts writeDocumentAssetLedger and listResumableDocuments" },
   document_extraction_shards: { privileges: DML, evidence: "worker/src/db/document-asset-ledger.ts writeDocumentAssetLedger (per-shard records) and listResumableDocuments" },
   document_maps: { privileges: DML, evidence: "worker/src/deferred/backfill-adoption.ts; document map stage" },
+  document_page_extracts: { privileges: ["select", "insert", "update"], evidence: "worker/src/pipeline/page-extracts.ts checkpoint upsert, supersession and tag merge (org-scoped)" },
   document_page_facts: { privileges: DML, evidence: "worker/src/db/store.ts page facts" },
   document_page_renders: { privileges: DML, evidence: "packages/shared/src/worker-autoscale.ts; page render stages" },
   document_page_states: { privileges: DML, evidence: "worker/src/db/page-base-fee.ts; deferred indexing" },
@@ -73,6 +74,7 @@ export const WORKER_TABLES = Object.freeze({
   notification_deliveries: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts notification emails" },
   notification_prefs: { privileges: ["select"], evidence: "worker/src/db/store.ts run/cost emails" },
   organizations: { privileges: ["select", "update"], evidence: "worker/src/db/store.ts budget alerts; superseded-purge.ts retention_swept_at; debit_org_credits()" },
+  org_quarantined_sources: { privileges: ["select", "insert", "update"], evidence: "worker/src/sandbox/source-quarantine.ts per-organization quarantine (find; insert ... on conflict do update returning; noteRefusal update); operators delete rows" },
   org_teardown_failures: { privileges: ["select", "insert"], evidence: "worker/src/sandbox/source-quarantine.ts (recordOrgFailure insert ... returning; orgFailures count); operators delete rows" },
   page_stage_states: { privileges: DML, evidence: "worker/src/db/store.ts page stage state" },
   page_work_tasks: { privileges: DML, evidence: "worker/src/db/page-task-store.ts" },
@@ -81,7 +83,7 @@ export const WORKER_TABLES = Object.freeze({
   performance_log: { privileges: DML, evidence: "worker/src/db/store.ts perf log and pruning" },
   pii_detections: { privileges: DML, evidence: "worker/src/stages/pii-detect.ts" },
   privacy_audit_log: { privileges: ["insert"], evidence: "worker/src/lib/privacy-guard.ts" },
-  quarantined_sources: { privileges: ["select", "insert", "update"], evidence: "worker/src/sandbox/source-quarantine.ts (find; insert ... on conflict do update returning; noteRefusal update); operators delete rows" },
+  quarantined_sources: { privileges: ["select", "insert", "update"], evidence: "release N-1 workers until the contract migration drops it (superseded by org_quarantined_sources, 0184)" },
   remote_capacity_leases: { privileges: DML, evidence: "worker/src/media/capacity, journal.ts" },
   remote_capacity_watchdog: { privileges: DML, evidence: "worker/src/media/capacity/store.ts" },
   remote_media_jobs: { privileges: DML, evidence: "worker/src/media/journal.ts, reconcile.ts" },
@@ -131,6 +133,10 @@ export const WORKER_TABLES = Object.freeze({
   // Route tiers (0136): the worker reads current observations to rank vision hosts and records served latency.
   provider_endpoint_observations: { privileges: ["select", "insert"], evidence: "server/src/services/provider-observations.ts recordServedLatency (traffic rows); tier selection" },
   provider_endpoint_current: { privileges: ["select"], evidence: "server/src/services/provider-observations.ts readProviderObservations (view)" },
+  compute_fleets: { privileges: ["select"], columns: { update: ["id"] }, evidence: "operator-owned caps; UPDATE(id) permits a policy row lock, while the identity trigger forbids renaming" },
+  compute_allocation_reservations: { privileges: ["select", "insert", "update"], evidence: "worker/src/db/compute-fleet-store.ts durable allocation admission; SQL trigger enforces capacity" },
+  compute_job_fleets: { privileges: ["select"], columns: { update: ["id"] }, evidence: "operator-owned job caps; UPDATE(id) permits a policy row lock, while the identity trigger forbids renaming" },
+  compute_job_tickets: { privileges: ["select", "insert", "update", "delete"], evidence: "worker/src/db/compute-job-store.ts fleet-wide fair job admission; expired tickets are deleted" },
   compute_price_observations: { privileges: ["select"], evidence: "operator-owned compute prices; runtime lookup only" },
   compute_calibration_observations: { privileges: ["select", "insert"], evidence: "append-only operational compute measurements" },
 });
@@ -241,11 +247,13 @@ export function quoteIdent(name) {
  * The statements that bring grants in schema public to the declared state, for
  * the roles in `present` (role names that exist). Pure: `relations` are the
  * public relation names that exist, `sequences` maps a sequence name to the
- * table that owns it. `migrationsTable` says drizzle.__drizzle_migrations exists.
+ * table that owns it. `migrationsTable` says drizzle.__drizzle_migrations exists
+ * (kept current for the previous release); `migrationLedger` says
+ * docslurp_migrations.applied (migration-runner.mjs) exists.
  * `columns` (table -> column names), when given, drops worker column grants for
  * columns that do not exist yet.
  */
-export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, relations, sequences = {}, migrationsTable = false, nativeSchema = false, columns: existingColumns = null }) {
+export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, relations, sequences = {}, migrationsTable = false, migrationLedger = false, nativeSchema = false, columns: existingColumns = null }) {
   const statements = [];
   const has = (role) => present.includes(role);
   const ownerIdent = quoteIdent(owner);
@@ -269,6 +277,11 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       const target = `public.${quoteIdent(table)}`;
       statements.push(`revoke all on ${target} from ${app}`, `grant select on ${target} to ${app}`);
       if (table === "compute_calibration_observations") statements.push(`grant insert on ${target} to ${app}`);
+    }
+  }
+  if (has(roles.app)) {
+    for (const table of ["compute_fleets", "compute_allocation_reservations", "compute_job_fleets", "compute_job_tickets"]) {
+      if (relations.includes(table)) statements.push(`revoke all on public.${quoteIdent(table)} from ${quoteIdent(roles.app)}`);
     }
   }
   if (has(roles.worker)) {
@@ -299,13 +312,20 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       }
     }
     if (migrationsTable) {
-      // worker/src/db/worker-capabilities.ts reports the newest applied
-      // migration (schema_applied_when) so the API can gate on schema skew.
+      // Workers of the previous release read the Drizzle ledger for schema_applied_when; keep the grant until
+      // none remain. Current workers read docslurp_migrations.applied (below).
       statements.push(
         `grant usage on schema drizzle to ${worker}`,
         `grant select on drizzle.__drizzle_migrations to ${worker}`,
       );
     }
+  }
+  if (relations.includes("compute_job_tickets")) {
+    // Fair job admission runs as the worker (SECURITY INVOKER); the API has no use for it.
+    const signature = "public.compute_job_admit(text,uuid,integer)";
+    statements.push(`revoke all on function ${signature} from public`);
+    if (has(roles.app)) statements.push(`revoke all on function ${signature} from ${quoteIdent(roles.app)}`);
+    if (has(roles.worker)) statements.push(`grant execute on function ${signature} to ${quoteIdent(roles.worker)}`);
   }
   if (existingColumns?.project_runs?.includes("compute_input_manifest_hash")) {
     const signature = "public.authorize_compute_cohort(text,text,text,text,text)";
@@ -339,6 +359,20 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       statements.push(`revoke all on public.pricing_provider_state from ${quoteIdent(role)}`,
         `grant select on public.pricing_provider_state to ${quoteIdent(role)}`,
         `revoke all on function public.pricing_state_raise(text, bigint) from ${quoteIdent(role)}`);
+    }
+  }
+  if (migrationLedger) {
+    // The applied-migration ledger: file names and hashes, no tenant data. The API reads it for readiness and the
+    // migrations alert, the worker for schema skew. Read-only for both: only the owner records a migration.
+    statements.push("revoke all on schema docslurp_migrations from public",
+      "revoke all on all tables in schema docslurp_migrations from public");
+    for (const role of [roles.app, roles.worker].filter(has)) {
+      statements.push(
+        `revoke all on schema docslurp_migrations from ${quoteIdent(role)}`,
+        `revoke all on all tables in schema docslurp_migrations from ${quoteIdent(role)}`,
+        `grant usage on schema docslurp_migrations to ${quoteIdent(role)}`,
+        `grant select on docslurp_migrations.applied to ${quoteIdent(role)}`,
+      );
     }
   }
   if (nativeSchema) {
@@ -407,11 +441,13 @@ export async function reconcileRoleGrants(client, { roles = DEFAULT_DB_ROLES, lo
       and not (p.oid = any (array(select to_regprocedure(a) from unnest($1::text[]) a where to_regprocedure(a) is not null)))`,
     [RUNTIME_SECURITY_DEFINER_ALLOWLIST]);
   const { rows: [{ migrations }] } = await client.query("select to_regclass('drizzle.__drizzle_migrations') is not null as migrations");
+  const { rows: [{ ledger }] } = await client.query("select to_regclass('docslurp_migrations.applied') is not null as ledger");
   const { rows: [{ native }] } = await client.query("select to_regnamespace('docslurp_mastra') is not null as native");
   const statements = roleGrantStatements({
     nativeSchema: native === true,
     owner,
     migrationsTable: migrations === true,
+    migrationLedger: ledger === true,
     roles,
     present,
     relations: relationRows.map((row) => row.relname),

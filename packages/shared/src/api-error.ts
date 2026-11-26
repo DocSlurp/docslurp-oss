@@ -54,9 +54,14 @@ export const API_ERROR_CODES = [
   "conflict",
   "index_rebuild_required",
   "settings_stale",
+  "project_settings_unreadable",
   "policy_publication_unavailable",
   "settings_idempotency_conflict",
   "settings_reprocess_consent_required",
+  "reindex_required",
+  "estimate_stale",
+  "privacy_mode_violation",
+  "uploads_in_progress",
   "payload_too_large",
   "rate_limited",
   "spend_limit_exceeded",
@@ -69,9 +74,13 @@ export const API_ERROR_CODES = [
   "idempotency_in_flight",
   "idempotency_key_reused",
   "upload_session_closed",
+  "upload_session_busy",
+  "upload_object_missing",
+  "upload_parts_incomplete",
   "file_too_large",
   "unreadable_source",
   "quarantine_rescan_required",
+  "upload_storage_unavailable",
   "payment_required",
   "credit_exhausted",
   "project_budget_paused",
@@ -87,6 +96,10 @@ export const API_ERROR_CODES = [
   "speed_boost_unavailable",
   "chart_export_tier_unavailable",
   "chart_export_models_forbidden",
+  "quality_unavailable",
+  "visuals_unavailable",
+  "quality_smart_forbidden",
+  "extraction_config_conflict",
   "summary_tree_unavailable",
   "summary_tree_requires_vectors",
   "summary_tree_summarize_locked",
@@ -173,8 +186,13 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   index_rebuild_required: "Vector retrieval requires rebuilding legacy indexes whose normalization is unknown. Open project settings to estimate an authorized rebuild.",
   policy_publication_unavailable: "Tightening privacy or PII policy over existing documents requires artifact fencing that this publication surface does not yet support. No settings or jobs were saved.",
   settings_stale: "Project or search settings changed. Reload settings before saving.",
+  project_settings_unreadable: "This project's settings were saved by a newer version and cannot be changed here. Try again shortly.",
   settings_idempotency_conflict: "This settings request ID was already used with different parameters. Reuse the original request, or start a new intentional publication.",
   settings_reprocess_consent_required: "This change queues existing-document work. Estimate it and explicitly confirm reprocessing before saving.",
+  reindex_required: "This change alters how the project's search index is built, and the project already has indexed documents. Nothing was saved. Apply it with the reindex command (POST /v1/projects/{projectId}/reindex) or resend it with apply: \"reindex\" to re-index the existing documents.",
+  uploads_in_progress: "Uploads are still processing in this project. Wait for them to finish, then apply this change (it re-indexes them with the rest).",
+  privacy_mode_violation: "This project's privacy mode doesn't allow that setting. A restricted privacy mode needs local models (a local embedding profile).",
+  estimate_stale: "The re-index work or its price changed since the estimate. Nothing was saved. Estimate again (POST /v1/projects/{projectId}/reindex/estimate or /estimate) and retry with the new signature.",
   payload_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
   rate_limited: PUBLIC_ERROR_MESSAGES.rateLimit,
   spend_limit_exceeded: PUBLIC_ERROR_MESSAGES.spendLimit,
@@ -187,9 +205,13 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   idempotency_in_flight: "A request with this Idempotency-Key is still being processed. Retry shortly with the same key.",
   idempotency_key_reused: "This Idempotency-Key was already used for a different request or credential. Use a new key for a different request.",
   upload_session_closed: "The upload session for this Idempotency-Key can no longer take files (failed or aborted). Create a new session with a new Idempotency-Key.",
+  upload_session_busy: "Uploads are busy. Retry the same request shortly.",
+  upload_object_missing: "No stored object was found for this file. Upload its bytes to the file's upload target, then complete it again.",
+  upload_parts_incomplete: "This file's uploaded parts are missing or have the wrong size. Upload the missing parts, then complete it again.",
   file_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
   unreadable_source: PUBLIC_ERROR_MESSAGES.unreadableSource,
   quarantine_rescan_required: PARSE_SOURCE_RESCAN_MESSAGE,
+  upload_storage_unavailable: "Upload storage is temporarily unavailable. Retry the same request shortly.",
   payment_required: PUBLIC_ERROR_MESSAGES.creditExhausted,
   credit_exhausted: PUBLIC_ERROR_MESSAGES.creditExhausted,
   project_budget_paused: PUBLIC_ERROR_MESSAGES.budgetPaused,
@@ -205,6 +227,10 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   speed_boost_unavailable: SPEED_BOOST_UNAVAILABLE_MESSAGE,
   chart_export_tier_unavailable: "That chart export tier isn’t available on this deployment. Leave the tier unset to use the deployment’s default, or turn chart export off.",
   chart_export_models_forbidden: "This project’s chart export tier is set below reading charts with AI. Ask a project editor to change it, or use an API key with the pipeline:billed-features scope.",
+  quality_unavailable: "That quality isn’t available for this project on this deployment (its privacy mode, vision profile or a deployment switch rules it out). Choose balanced or fastest, or leave quality unset.",
+  visuals_unavailable: "That visuals setting isn’t available for this project on this deployment (its privacy mode or a deployment switch rules it out). Choose a lower rung, or leave visuals unset for the default.",
+  quality_smart_forbidden: "This project’s quality is set below smart. Ask a project editor to change it, or use an API key with the pipeline:billed-features scope.",
+  extraction_config_conflict: "The request sets visuals and a deprecated chart or figures field to different values. Send visuals only.",
   summary_tree_unavailable: "The summary tree isn’t available on this deployment.",
   summary_tree_requires_vectors: SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE,
   summary_tree_summarize_locked: SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE,
@@ -277,10 +303,46 @@ export function publicApiErrorLinks(value: unknown): ApiErrorLinks | undefined {
  * errors at buying credits and auto top-up, budget errors at billing, API key limits at the key settings. Without links (self-hosted, or
  * no billing) it is the reviewed copy alone.
  */
+/** Reviewed 415 copy for a request body of the wrong media type, keyed by the `details.policy` the server sets. */
+const REQUEST_BODY_MEDIA_TYPE_COPY = {
+  "request_body:json": "Send the request body as application/json.",
+  "request_body:multipart": "Send the request body as multipart/form-data.",
+  "request_body:form": "Send the request body as application/x-www-form-urlencoded.",
+} as const;
+
+/** The most documents one bulk document request (`POST /v1/documents/bulk`) may name. */
+export const BULK_DOCUMENTS_MAX = 500;
+
 export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDetails): string {
   const base = API_ERROR_PUBLIC_MESSAGES[code];
+  // A request body of a media type the endpoint does not read (details.policy names the one it does).
+  if (code === "unsupported_type" && typeof details?.policy === "string" && details.policy in REQUEST_BODY_MEDIA_TYPE_COPY) {
+    return REQUEST_BODY_MEDIA_TYPE_COPY[details.policy as keyof typeof REQUEST_BODY_MEDIA_TYPE_COPY];
+  }
+  // A caller canonical ID in a namespace the server reserves.
+  // A bulk document request over the per-request limit (BULK_DOCUMENTS_MAX).
+  if (code === "invalid_request" && details?.policy === "bulk_documents_limit") {
+    return `A bulk document request can name at most ${BULK_DOCUMENTS_MAX} documents. Split larger batches into requests of ${BULK_DOCUMENTS_MAX} or fewer.`;
+  }
+  // A bulk delete that stopped part-way: details.deletedDocumentIds were deleted, details.remainingDocumentIds were not.
+  if (details?.policy === "bulk_delete_partial") {
+    return "Some of the documents were deleted before the request stopped; details lists which were deleted and which remain. Retry with the remaining documents.";
+  }
+  if (code === "invalid_request" && details?.policy === "canonical_id_reserved") {
+    return "canonicalId values that start with docslurp:, that look like url: followed by a 64-character hex hash, or that are the version key of an earlier URL import in this project, are reserved for DocSlurp. Choose another canonicalId, or omit it.";
+  }
+  // A bulk upload body that did not arrive in time (slow links included): point at the direct-upload path.
+  if (code === "invalid_request" && details?.directUpload) {
+    return "The upload did not arrive in time. Upload large files, or files over slow connections, with a direct upload session (POST /v1/uploads/direct/sessions); the SDK and CLI do this automatically.";
+  }
   if (code === "project_not_found" && typeof details?.projectSlug === "string") {
     return `No project matching "${details.projectSlug}" was found. Pass a project ID, slug or name from this organization, or omit project to use the default project.`;
+  }
+  if (code === "reindex_required") {
+    const reindex = publicReindexRequiredDetails(details?.reindex);
+    if (!reindex) return base;
+    const work = reindex.documents > 0 ? ` It re-indexes ${reindex.documents} document${reindex.documents === 1 ? "" : "s"} (${reindex.pages} page${reindex.pages === 1 ? "" : "s"})${reindex.credits ? `, about ${formatCreditRange(reindex.credits)} credits` : ""}.` : "";
+    return `Locked index settings changed: ${reindex.lockedSettings.join(", ")}. ${base}${work}`;
   }
   const links = publicApiErrorLinks(details?.links);
   if (!links) return base;
@@ -359,6 +421,8 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
   }
   const links = publicApiErrorLinks(source.links);
   if (links) safe.links = links;
+  const reindex = publicReindexRequiredDetails(source.reindex);
+  if (reindex) safe.reindex = reindex;
   const usage = publicChatTurnUsage(source.usage);
   if (usage) safe.usage = usage;
   const direct = source.directUpload;
@@ -369,6 +433,50 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
     }
   }
   return Object.keys(safe).length ? safe : undefined;
+}
+
+/** Lockable settings (`REINDEX_SETTINGS` in config-change.ts; repeated here so this module stays leaf-level). */
+const LOCKED_INDEX_SETTINGS: ReadonlySet<string> = new Set(["embedding", "chunkOverlap", "contextualChunkPreambles", "vectorBackends", "embed", "indexVectors"]);
+
+/**
+ * A `reindex_required` refusal's `details.reindex`: the locked settings the change altered, the re-index work it
+ * needs (documents, pages, credit range or null when billing is off), the estimate `signature` to confirm and the
+ * reindex command's path. Server-computed; dropped unless every field has the expected shape.
+ */
+export type ReindexRequiredDetails = {
+  lockedSettings: string[];
+  documents: number;
+  pages: number;
+  credits: { low: number; high: number } | null;
+  signature: string;
+  reindexUrl: string;
+};
+
+function publicReindexRequiredDetails(value: unknown): ReindexRequiredDetails | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const settings = source.lockedSettings;
+  if (!Array.isArray(settings) || settings.length === 0 || !settings.every((name) => typeof name === "string" && LOCKED_INDEX_SETTINGS.has(name))) return undefined;
+  const count = (n: unknown) => typeof n === "number" && Number.isFinite(n) && n >= 0;
+  if (!count(source.documents) || !count(source.pages)) return undefined;
+  const credits = source.credits as { low?: unknown; high?: unknown } | null | undefined;
+  if (credits !== null && !(credits && count(credits.low) && count(credits.high))) return undefined;
+  if (typeof source.signature !== "string" || !/^[a-f0-9]{64}$/.test(source.signature)) return undefined;
+  if (typeof source.reindexUrl !== "string" || !/^\/v1\/projects\/[\w.-]{1,120}\/reindex$/.test(source.reindexUrl)) return undefined;
+  return {
+    lockedSettings: [...settings] as string[],
+    documents: source.documents as number,
+    pages: source.pages as number,
+    credits: credits ? { low: credits.low as number, high: credits.high as number } : null,
+    signature: source.signature,
+    reindexUrl: source.reindexUrl,
+  };
+}
+
+function formatCreditRange(credits: { low: number; high: number }): string {
+  const round = (n: number) => (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10);
+  const [low, high] = [round(credits.low), round(credits.high)];
+  return low === high ? String(low) : `${low}-${high}`;
 }
 
 const CHAT_TURN_USAGE_NUMBERS = ["providerCostCents", "creditCents", "refundedCreditCents", "chargedCreditCents"] as const;

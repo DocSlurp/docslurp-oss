@@ -43,7 +43,8 @@ beforeEach(async () => {
 
 const DIMS = 768;
 const document = { id: "d1", userId: "u1", runId: "run-1", filename: "a.pdf", mimeType: "application/pdf", pageCount: 6 } as Document;
-const run = { id: "run-1", orgId: "o1", projectId: "w" };
+// Page-image embeddings read every page with a model: Smartest without a share cap only.
+const run = { id: "run-1", orgId: "o1", projectId: "w", pipeline: { quality: "auto", ladder: { maxRung: "intelligent" } } } as { id: string; orgId: string; projectId: string; pipeline: { quality: "auto" } };
 
 function fixture() {
   const objects = new Map<string, Buffer>();
@@ -111,10 +112,21 @@ describe("embedPageImages", () => {
     const states = await db.query<{ embedded_at: unknown; embedding_model: string }>(`select embedded_at, embedding_model from document_page_states`);
     expect(states.rows).toHaveLength(6);
     expect(states.rows.every((s) => s.embedded_at && s.embedding_model === "test-embed")).toBe(true);
+    // The exact space beside the bare id (migration 0192), on the vectors and on the page ledger.
+    const space = `llm://test/test-embed?dimensions=${DIMS}`;
+    const uris = await db.query<{ model_uri: string }>(`select distinct model_uri from document_page_vectors`);
+    expect(uris.rows).toEqual([{ model_uri: space }]);
+    const stateUris = await db.query<{ embedding_model_uri: string }>(`select distinct embedding_model_uri from document_page_states`);
+    expect(stateUris.rows).toEqual([{ embedding_model_uri: space }]);
 
     const events = usage.snapshot();
     const embedEvents = events.filter((e) => e.metric === "page-image-embedding");
     expect(embedEvents.map((e) => e.inputTokens)).toEqual([4 * 258, 2 * 258]);
+    expect(embedEvents[0]!.metadata).toMatchObject({
+      modelUri: `llm://test/test-embed?batchSize=4&dimensions=${DIMS}&inputType=image&renderDpi=96`,
+      modelConfig: { inputType: "image", dimensions: DIMS, batchSize: 4, renderDpi: 96 },
+      modelClass: { visualPagesRoute: "auto" },
+    });
     // Each page embedded as an image bills one Rich page; the embedding tokens bill nothing.
     const rich = events.filter((e) => e.metric === "ingest-page-rich");
     expect(rich).toHaveLength(6);

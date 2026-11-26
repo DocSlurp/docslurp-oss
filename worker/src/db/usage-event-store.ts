@@ -1,4 +1,5 @@
 import { applySpeedBoostUnitCharge } from "@docslurp/shared";
+import { withModelProvenance } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import type { JSONValue, PendingQuery, Sql } from "postgres";
@@ -32,7 +33,10 @@ function batchedRows<T>(rows: T[], batchSize = BULK_WRITE_BATCH_SIZE): T[][] {
  * its cost as `providerCostCents` (our cost, for internal reports) and is
  * marked `billable: false`, because it is written at 0 credits.
  */
-function persistedMetadata(usage: UsageEvent): Record<string, unknown> {
+function persistedMetadata(raw: UsageEvent): Record<string, unknown> {
+  // Every persisted model call names what ran, including the writers that do not go through the pipeline ledger
+  // (graph rebuild, summary-tree backfill). Idempotent for events the ledger already stamped.
+  const usage = withModelProvenance(raw);
   if (billableCents(usage) > 0 || usage.metadata?.unitCharge === true) return { ...usage.metadata };
   const stored = usage.metadata?.providerCostCents;
   return {
@@ -59,9 +63,24 @@ export function runUsageScope(state: RunUsageState): {
   };
 }
 
+/**
+ * Events in (document, page) order, stable within a page (an OCR charge stays before the Rich charge read after it), so
+ * every writer meets a run's page charges in one order. Events without a page keep their place relative to each other.
+ */
+function inPageOrder(usageEvents: UsageEvent[]): UsageEvent[] {
+  const key = (event: UsageEvent) => {
+    const documentId = event.metadata?.documentId;
+    const pageNumber = event.metadata?.pageNumber;
+    return { documentId: typeof documentId === "string" ? documentId : "", pageNumber: typeof pageNumber === "number" && Number.isFinite(pageNumber) ? pageNumber : 0 };
+  };
+  return usageEvents.map((event, index) => ({ event, index, ...key(event) }))
+    .sort((a, b) => (a.documentId < b.documentId ? -1 : a.documentId > b.documentId ? 1 : a.pageNumber - b.pageNumber || a.index - b.index))
+    .map((entry) => entry.event);
+}
+
 function runUsageRows(client: Sql<Record<string, unknown>>, state: RunUsageState, usageEvents: UsageEvent[]) {
   const scope = runUsageScope(state);
-  return usageEvents.map((event) => {
+  return inPageOrder(usageEvents).map((event) => {
     const usage = applySpeedBoostUnitCharge(event, state.usageLedger.speedBoost);
     return ({
     id: usage.id ?? randomUUID(),
@@ -139,7 +158,14 @@ export async function persistRunUsageEvents(args: {
   const orgId = runUsageScope(state).orgId;
   if (charged.tickets.length > 0 && orgId) {
     const insertedIds = new Set(inserted.map((row) => row.id));
-    const tickets = charged.tickets.filter((_, index) => insertedIds.has(charged.eventIds[index]!));
+    // An OCR charge the database skipped because the run already charged the page Rich (migration 0185): the read is
+    // covered by that charge, so its request is a charged one too.
+    const skippedOcr = charged.eventIds.filter((id) => id.startsWith("ocr:") && !insertedIds.has(id));
+    const covered = new Set(skippedOcr.length === 0 ? [] : (await client<{ id: string }[]>`
+      select t.id from unnest(${client.array(skippedOcr)}::text[]) as t(id)
+      where exists (select 1 from usage_events e where e.id = 'rich:' || substr(t.id, 5) and e.run_id = ${state.run.id})
+    `).map((row) => row.id));
+    const tickets = charged.tickets.filter((_, index) => insertedIds.has(charged.eventIds[index]!) || covered.has(charged.eventIds[index]!));
     if (tickets.length > 0) {
       await client`delete from vision_org_attempts where org_id = ${orgId} and id = any(${client.array(tickets)}::text[])`;
     }
@@ -184,7 +210,10 @@ export function runUsageEventStatements(args: {
       released as (
         delete from vision_org_attempts a
         using unnest(${client.array(charged.eventIds)}::text[], ${client.array(charged.tickets)}::text[]) as t(event_id, ticket)
-        where a.org_id = ${orgId} and a.id = t.ticket and t.event_id in (select id from inserted)
+        where a.org_id = ${orgId} and a.id = t.ticket and (t.event_id in (select id from inserted)
+          -- An OCR charge skipped because the run already charged the page Rich (migration 0185) is covered by that charge.
+          or (t.event_id like 'ocr:%' and t.event_id not in (select id from inserted)
+            and exists (select 1 from usage_events e where e.id = 'rich:' || substr(t.event_id, 5) and e.run_id = ${state.run.id})))
         returning a.id
       )
       select id, cost_cents, (select count(*) from debit) as debits from inserted`

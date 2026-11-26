@@ -1,4 +1,4 @@
-import { resolveAllowedPipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { embeddingRequestConfig, resolveAllowedPipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { generateOpenRouterText } from "../lib/ai.js";
@@ -88,6 +88,8 @@ export class PropositionIndexStage implements Stage {
             let actualOutputTokens = 0;
             let cachedInputTokens = 0;
             let cacheWriteInputTokens = 0;
+            // The settings the generation calls ran with (every batch uses the same ones), for the usage row.
+            let generationConfig: Record<string, unknown> | undefined;
 
             // Batch paragraphs to reduce API calls (up to ~3000 chars per batch)
             const batches = batchParagraphs(paragraphs, 3000);
@@ -102,11 +104,13 @@ export class PropositionIndexStage implements Stage {
                   outputTokens: batchOut,
                   cachedInputTokens: batchCached,
                   cacheWriteInputTokens: batchWritten,
+                  modelConfig: batchModelConfig,
                 } = await this.atomizeParagraphs(batch, model, state.run.pipeline.privacyMode, signal, state.run.pipeline.textGeneration);
                 actualInputTokens += batchIn;
                 actualOutputTokens += batchOut;
                 cachedInputTokens += batchCached;
                 cacheWriteInputTokens += batchWritten;
+                generationConfig ??= batchModelConfig;
                 for (let i = 0; i < batch.length; i++) {
                   const paragraph = batch[i]!;
                   const props = propositionTexts[i] ?? [];
@@ -164,12 +168,9 @@ export class PropositionIndexStage implements Stage {
               tokenEstimate: estimateTokens(prop.text),
             }));
 
-            if (state.store && "insertPropositions" in state.store) {
-              await (
-                state.store as {
-                  insertPropositions: (props: typeof rows) => Promise<void>;
-                }
-              ).insertPropositions(rows);
+            // Unbound states (unit tests) persist no rows; every stage activity's state is bound (loadRunState).
+            if (state.store) {
+              await state.store.content.insertPropositions({ orgId: state.run.orgId ?? null, runId: state.run.id, documentId: document.id }, rows);
             }
 
             const key = `${runArtifactRoot(state.run, document.userId)}/propositions/${document.id}.json`;
@@ -205,7 +206,8 @@ export class PropositionIndexStage implements Stage {
                 outputTokens: actualOutputTokens,
                 cachedInputTokens,
                 cacheWriteInputTokens,
-                metadata: { ...generationCost.metadata, documentId: document.id },
+                metadata: { ...generationCost.metadata, documentId: document.id,
+                  modelConfig: { ...generationConfig, operation: "proposition-extraction", maxOutputTokens: generationConfig?.maxOutputTokens ?? 4096, paragraphBatchChars: 3000 } },
               },
             );
             // Pricing provider: the propositions feature charge, once per document per run.
@@ -226,7 +228,7 @@ export class PropositionIndexStage implements Stage {
                 unit: "token",
                 costCents,
                 inputTokens: embeddingTokens,
-                metadata: { documentId: document.id },
+                metadata: { documentId: document.id, modelConfig: embeddingRequestConfig(profile), modelClass: { embeddingProfile: profile.profile } },
               },
             );
 
@@ -256,6 +258,7 @@ export class PropositionIndexStage implements Stage {
     outputTokens: number;
     cachedInputTokens: number;
     cacheWriteInputTokens: number;
+    modelConfig?: Record<string, unknown>;
   }> {
     const combined = paragraphs
       .map((p, i) => `[PARAGRAPH ${i + 1}]\n${p}`)
@@ -313,7 +316,11 @@ export class PropositionIndexStage implements Stage {
       const value = result.usage.metadata?.[key];
       return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
     };
-    return { groups, inputTokens, outputTokens, cachedInputTokens: cache("cachedInputTokens"), cacheWriteInputTokens: cache("cacheWriteInputTokens") };
+    const modelConfig = result.usage.metadata?.modelConfig;
+    return {
+      groups, inputTokens, outputTokens, cachedInputTokens: cache("cachedInputTokens"), cacheWriteInputTokens: cache("cacheWriteInputTokens"),
+      ...(modelConfig && typeof modelConfig === "object" ? { modelConfig: modelConfig as Record<string, unknown> } : {}),
+    };
   }
 }
 

@@ -218,7 +218,7 @@ describe("PII-blocked documents in the run lifecycle", () => {
       expect(await marker()).toBe(true);
       await store.startDocumentStage(state, "d-early", "pii-detect");
       expect(await marker()).toBe(false);
-      await store.markDocumentLexicalSearchable("d-early");
+      await store.content.markDocumentLexicalSearchable({ orgId: "o1", runId: "run-1", documentId: "d-early" });
       expect(await marker()).toBe(true);
     });
   });

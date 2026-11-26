@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
 import { setVmIsolatedPageRangeStagesForTest } from "../pipeline/page-ranges.js";
 import { defaultPipelineFeatures, pricingVersion } from "@docslurp/shared";
 
@@ -35,6 +36,7 @@ function makeDocument(): Document {
 
 /** In-memory store implementing only the narrow Stage Execution interface. */
 class FakeStore implements StageExecutionStore {
+  pageBasisLedger = new MemoryPageBasisLedger();
   run = makeRun();
   documents = [makeDocument()];
   checkpoints: StageState[] = [];
@@ -44,7 +46,7 @@ class FakeStore implements StageExecutionStore {
   stageStatus = new Map<string, string>();
   runStatus = "queued";
   failures: Array<{ stage: string; message: string }> = [];
-  notifications: string[] = [];
+  notices: string[] = [];
   failWebhooks = false;
 
   readonly pageTasks = { completed: async () => this.completedPages } as unknown as StageExecutionStore["pageTasks"];
@@ -56,6 +58,8 @@ class FakeStore implements StageExecutionStore {
     for (const checkpoint of this.checkpoints) state.setRunStage(checkpoint);
   }
   async renewHeartbeat() { this.calls.push("renewHeartbeat"); }
+  async markRunMilestone() { return null; }
+  async fleetAdvertises() { return false; }
   async startRunStage(_state: WorkflowState, stage: string) { this.stageStatus.set(stage, "processing"); }
   async completeRunStage(_state: WorkflowState, stage: string) { this.stageStatus.set(stage, "completed"); }
   shardsFinished: string[][] = [];
@@ -78,11 +82,9 @@ class FakeStore implements StageExecutionStore {
     this.seeded.push({ runId, reusedStages });
     return { seededDocuments: this.documents.length, unavailable: [] };
   }
-  async triggerRunEmails(_runId: string, event: string) { this.notifications.push(`email:${event}`); }
-  async triggerWebhooks(_runId: string, event: string) {
-    if (this.failWebhooks) throw new Error("webhook down");
-    this.notifications.push(`webhook:${event}`);
-  }
+  readonly notifications = {
+    triggerRunEmails: async (_runId: string, event: string) => { this.notices.push(`email:${event}`); },
+  };
 }
 
 function stage(name: string, run: Stage["run"]): Stage {
@@ -220,7 +222,7 @@ describe("Stage Execution", () => {
     const output = await execution.startRun({ runId: "run-1", totalStages: 3 });
 
     expect(store.runStatus).toBe("processing");
-    expect(output).toEqual({ documentIds: ["doc-1"], artifacts: { "doc-1:parse": "s3://db/parse", "run:vision-routing-version": "v3", "run:page-billing-rules": pricingVersion() }, documentPages: [2], documentMimeTypes: ["application/pdf"] });
+    expect(output).toEqual({ documentIds: ["doc-1"], artifacts: { "doc-1:parse": "s3://db/parse", "run:vision-routing-version": "v3", "run:page-billing-rules": pricingVersion(), "run:page-billing-ocr": "0" }, documentPages: [2], documentMimeTypes: ["application/pdf"] });
     expect(store.events.map((event) => event.eventType)).toEqual(["run.started"]);
   });
 
@@ -325,7 +327,7 @@ describe("Stage Execution", () => {
     expect(store.runStatus).toBe("completed");
     expect(store.calls.find((call) => call.startsWith("completeRun:"))).not.toBe("completeRun:0");
     expect(store.events).toEqual([]); // The store owns the transactional completion event.
-    expect(store.notifications).toEqual(["email:run.completed"]);
+    expect(store.notices).toEqual(["email:run.completed"]);
   });
 
   it("fails a Run through the store and notifies", async () => {
@@ -336,7 +338,7 @@ describe("Stage Execution", () => {
 
     expect(store.runStatus).toBe("failed");
     expect(store.failures).toEqual([{ stage: "parse", message: "parser crashed" }]);
-    expect(store.notifications).toEqual(["email:run.failed"]);
+    expect(store.notices).toEqual(["email:run.failed"]);
   });
 
   it("records the group stage that was running when a stage group fails", async () => {

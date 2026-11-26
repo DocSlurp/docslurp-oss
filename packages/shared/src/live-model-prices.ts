@@ -42,7 +42,7 @@ function cacheRates(value: Record<string, unknown>): Pick<LiveTokenRates, "cache
   return { ...(cacheRead !== null ? { cacheRead } : {}), ...(cacheWrite !== null ? { cacheWrite } : {}) };
 }
 
-interface LivePriceOverride extends LiveTokenRates {
+export interface LivePriceOverride extends LiveTokenRates {
   minPromptTokens?: number;
   utcDays?: readonly string[];
   /** HHMM, inclusive. */
@@ -82,7 +82,8 @@ function count(value: unknown): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-function parseOverride(raw: unknown): LivePriceOverride | null {
+/** One listed price override (`pricing.overrides[]`), or null when malformed or unconditional. */
+export function parseOverride(raw: unknown): LivePriceOverride | null {
   if (!raw || typeof raw !== "object") return null;
   const value = raw as Record<string, unknown>;
   const input = rate(value.prompt), output = rate(value.completion);
@@ -119,7 +120,8 @@ export function parseOpenRouterCatalog(payload: unknown): Map<string, LiveModelP
 
 const DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 
-function overrideApplies(override: LivePriceOverride, promptTokens: number | undefined, at: Date): boolean {
+/** Whether a listed override applies to a call of `promptTokens` at `at` (UTC days and HHMM windows). */
+export function overrideApplies(override: LivePriceOverride, promptTokens: number | undefined, at: Date): boolean {
   if (override.minPromptTokens !== undefined) {
     if (promptTokens === undefined || promptTokens <= override.minPromptTokens) return false;
   }
@@ -255,6 +257,10 @@ let timer: ReturnType<typeof setInterval> | null = null;
 
 /** LIVE_MODEL_PRICES=off: price receipt-less usage from the hardcoded tables only. */
 export function liveModelPricesDisabled(env: Record<string, string | undefined> = process.env): boolean {
+  // Private model mode (DOCSLURP_MODEL_MODE, private-model-mode.ts: any value but unset or `hosted` reads as private)
+  // calls no hosted provider, so nothing fetches their price lists either.
+  const mode = env.DOCSLURP_MODEL_MODE?.trim().toLowerCase();
+  if (mode && mode !== "hosted") return true;
   return ["0", "false", "off", "no"].includes(env.LIVE_MODEL_PRICES?.trim().toLowerCase() ?? "");
 }
 

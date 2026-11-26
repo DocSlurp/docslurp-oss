@@ -1,10 +1,11 @@
+import { recordPoolFailover } from "../lib/capability-pools.js";
 import type postgres from "postgres";
 import sharp from "../tools/isolated-image.js";
-import { l2Normalize, packSignBits, pageCredits, qualityAllowsPageReading, quantizeInt8 } from "@docslurp/shared";
+import { embeddingSpaceUri, l2Normalize, packSignBits, pageCredits, ladderAllowsOffPlanReads, qualityAllowsPageReading, quantizeInt8 } from "@docslurp/shared";
 
 import { ensurePageRows, markPagesEmbedded } from "../deferred/page-ledger.js";
 import {
-  resolvePageImageEmbedder,
+  resolvePageImageEmbedderWithReason,
   type PageImageEmbedder,
 } from "../deferred/page-image-embedders.js";
 import type { Document, ProjectRun } from "../models.js";
@@ -32,6 +33,8 @@ export interface PageEmbedDeps {
   storage: Pick<ArtifactStore, "getBytes" | "deleteKeys">;
   embedder: PageImageEmbedder;
   usage: PipelineUsageEventLedger;
+  /** The project's visual-pages route (the level that chose the embedder), for the usage record. */
+  route?: string;
 }
 
 export interface EmbedPageImagesResult {
@@ -104,6 +107,13 @@ export async function embedPageImages(
   // indexing; this is the backstop, so nothing is rendered, embedded or charged.
   if (!qualityAllowsPageReading(run.pipeline?.quality)) {
     console.error(`[page-embed] refused under quality fast run=${run.id} document=${document.id} pages=${pages.length}`);
+    result.stoppedBy = "quality-fast";
+    return result;
+  }
+  // An Auto ladder limit (pipeline.ladder) plans every model read of a page; embeddings read pages outside that plan. The
+  // server refuses visual mode with a limit; this is the backstop (nothing rendered, embedded or charged).
+  if (!ladderAllowsOffPlanReads(run.pipeline as never).pageEmbeddings) {
+    console.error(`[page-embed] refused under an Auto ladder limit run=${run.id} document=${document.id} pages=${pages.length}`);
     result.stoppedBy = "quality-fast";
     return result;
   }
@@ -192,7 +202,11 @@ export async function embedPageImages(
         unit: "token",
         inputTokens: embedded.inputTokens,
         costCents: embedded.costCents,
-        metadata: { documentId: document.id, pages: currentWindow.pages.length, dims: deps.embedder.dims, tokenSource: "api" },
+        metadata: {
+          documentId: document.id, pages: currentWindow.pages.length, dims: deps.embedder.dims, tokenSource: "api",
+          modelConfig: { inputType: "image", dimensions: deps.embedder.dims, batchSize: currentWindow.pages.length, renderDpi: RENDER_DPI },
+          modelClass: { visualPagesRoute: deps.route ?? "auto" },
+        },
       }
     );
     for (const pageNumber of currentWindow.pages) {
@@ -201,12 +215,14 @@ export async function embedPageImages(
 
     const rows = currentWindow.pages.map((pageNumber, i) => {
       const unit = l2Normalize(embedded.vectors[i]!);
+      const modelUri = embeddingSpaceUri({ provider: deps.embedder.provider, model: deps.embedder.model, dimensions: unit.length });
       const bits = packSignBits(unit);
       const q = quantizeInt8(unit);
       return {
         document_id: document.id,
         page_number: pageNumber,
         model: deps.embedder.model,
+        model_uri: modelUri,
         dims: unit.length,
         bits: Buffer.from(bits),
         int8: Buffer.from(q.values.buffer, q.values.byteOffset, q.values.byteLength),
@@ -218,9 +234,9 @@ export async function embedPageImages(
     await deps.sql`
       insert into document_page_vectors ${deps.sql(rows)}
       on conflict (document_id, page_number, model) do update
-      set dims = excluded.dims, bits = excluded.bits, int8 = excluded.int8, scale = excluded.scale
+      set dims = excluded.dims, bits = excluded.bits, int8 = excluded.int8, scale = excluded.scale, model_uri = excluded.model_uri
     `;
-    await markPagesEmbedded(deps.sql, document.id, currentWindow.pages, deps.embedder.model);
+    await markPagesEmbedded(deps.sql, document.id, currentWindow.pages, deps.embedder.model, rows[0]?.model_uri ?? null);
     result.embeddedPages.push(...currentWindow.pages);
     result.inputTokens += embedded.inputTokens;
     result.costCents += embedded.costCents;
@@ -256,18 +272,20 @@ export class PageEmbedStage implements Stage {
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     const pipeline = state.run.pipeline;
     // Fast reads no page (no Rich charge): skip visual embedding entirely; text indexing still runs.
-    if (!qualityAllowsPageReading(pipeline.quality)) {
-      console.error(`[page-embed] skipped: quality fast does not embed page images run=${state.run.id} documents=${state.documents.length}`);
+    if (!qualityAllowsPageReading(pipeline.quality) || !ladderAllowsOffPlanReads(pipeline).pageEmbeddings) {
+      console.error(`[page-embed] skipped: ${qualityAllowsPageReading(pipeline.quality) ? "an Auto ladder limit" : "quality fast"} does not embed page images run=${state.run.id} documents=${state.documents.length}`);
       return;
     }
-    const embedder =
-      this.embedderOverride ??
-      resolvePageImageEmbedder({ route: pipeline.visualPages?.route ?? "auto", privacyMode: pipeline.privacyMode });
+    const resolved = this.embedderOverride
+      ? { embedder: this.embedderOverride, reason: null }
+      : resolvePageImageEmbedderWithReason({ route: pipeline.visualPages?.route ?? "auto", privacyMode: pipeline.privacyMode });
+    const embedder = resolved.embedder;
     if (!embedder) {
-      throw new Error(
-        "Visual indexing needs a page-image embedder: register a Jina v5 omni nano private endpoint " +
-          "(DOCSLURP_PRIVATE_MODEL_ENDPOINTS) or set GOOGLE_GENERATIVE_AI_API_KEY (not allowed in strict privacy modes)",
-      );
+      // Fail closed without failing the run: no embedder with a stated US or EU region, so no page image leaves the
+      // worker. Text indexing still runs; the reason is recorded (log and telemetry).
+      console.error(`[page-embed] skipped: page-image embedding is unavailable (${resolved.reason}); register a Jina v5 omni nano private endpoint attesting a US or EU region (DOCSLURP_PRIVATE_MODEL_ENDPOINTS) run=${state.run.id} documents=${state.documents.length}`);
+      recordPoolFailover("vision", "page-embed", null, "region");
+      return;
     }
     const deps: PageEmbedDeps = {
       sql: this.sql(),
@@ -275,6 +293,7 @@ export class PageEmbedStage implements Stage {
       storage: this.storage,
       embedder,
       usage: state.usageLedger,
+      route: pipeline.visualPages?.route ?? "auto",
     };
     await runDocuments(state.documents, state.docConcurrency, async (document) => {
       await runDocumentStage(

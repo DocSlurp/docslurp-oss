@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createDocSlurpClient } from "../dist/index.js";
+import { BULK_DOCUMENTS_MAX, createDocSlurpClient, DocSlurpBulkDocumentsPartialError } from "../dist/index.js";
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const estimate = { pages: 3, documents: 1, billing: "disabled", credits: null, seconds: { low: 1, high: 2 }, basis: "test" };
@@ -178,4 +178,96 @@ test("content updates hit their routes and reprocessRun returns one shape for st
     ["POST", "/v1/projects/ws1/ingest-report/reprocess", { recommendationId: "vision-all-pages" }],
     ["POST", "/v1/projects/other/ingest-report/apply", { recommendationId: "preserve-tables", runId: "r1" }],
   ]);
+});
+
+test("reindexProject and its estimate hit the reindex routes; a locked update surfaces the re-index details", async () => {
+  const signature = "b".repeat(64);
+  const { calls, client } = recorder((call) => call.url.endsWith("/reindex")
+    ? json({ project: { id: "ws1" }, changedSettings: ["embedding"], impact: { kind: "reindex-required", stages: ["embed"], reasons: [], documents: 1, pages: 3 }, estimate, runIds: ["r1"], job })
+    : call.method === "PATCH"
+      ? json({ error: { code: "reindex_required", message: "Locked index settings changed: embedding.", details: { reindex: { lockedSettings: ["embedding"], documents: 1, pages: 3, credits: null, signature, reindexUrl: "/v1/projects/ws1/reindex" } }, requestId: "q1" } }, 409)
+      : json({ estimate, billing: "disabled", lockedSettings: ["embedding"], signature }));
+  const priced = await client.reindexProjectEstimate(undefined, { pipeline: { embedding: { profile: "fastest-local" } } });
+  assert.equal(priced.signature, signature);
+  const result = await client.reindexProject(undefined, { pipeline: { embedding: { profile: "fastest-local" } }, confirmEstimate: signature });
+  assert.deepEqual(result.runIds, ["r1"]);
+  await client.reindexProject("other");
+  assert.deepEqual(calls.map((c) => [c.method, c.url]), [
+    ["POST", "/v1/projects/ws1/reindex/estimate"], ["POST", "/v1/projects/ws1/reindex"], ["POST", "/v1/projects/other/reindex"],
+  ]);
+  assert.deepEqual(calls[1].body, { pipeline: { embedding: { profile: "fastest-local" } }, confirmEstimate: signature });
+  assert.deepEqual(calls[2].body, {});
+  await assert.rejects(client.updateProject(undefined, { pipeline: { embedding: { profile: "fastest-local" } } }), (error) => {
+    assert.equal(error.code, "reindex_required");
+    assert.deepEqual(error.reindex?.lockedSettings, ["embedding"]);
+    assert.equal(error.reindex?.signature, signature);
+    return true;
+  });
+});
+
+test("bulkDocuments splits deletes and tag changes into requests of at most 500 and merges them; reprocess over 500 is refused", async () => {
+  const ids = Array.from({ length: 1_050 }, (_, i) => `d${i}`);
+  const { calls, client } = recorder((call) => json({ deleted: call.body.documentIds.length, documentIds: call.body.documentIds }));
+  assert.equal(BULK_DOCUMENTS_MAX, 500);
+  assert.deepEqual(await client.bulkDocuments({ action: "delete", documentIds: ids }), { deleted: 1_050, documentIds: ids });
+  assert.deepEqual(calls.map((call) => call.body.documentIds.length), [500, 500, 50]);
+  // Up to the limit, one request as before.
+  calls.length = 0;
+  await client.bulkDocuments({ action: "delete", documentIds: ids.slice(0, 500) });
+  assert.equal(calls.length, 1);
+  // Reprocess and export cannot be merged across requests: refused before anything is sent.
+  calls.length = 0;
+  await assert.rejects(client.bulkDocuments({ action: "reprocess", documentIds: ids.slice(0, 501) }), RangeError);
+  assert.equal(calls.length, 0);
+});
+
+test("a bulkDocuments request failing part-way reports what completed and what remains", async () => {
+  const ids = Array.from({ length: 1_200 }, (_, i) => `d${i}`);
+  let sent = 0;
+  const { client } = recorder((call) => (sent++ === 1
+    ? json({ error: { code: "unavailable", message: "busy", requestId: "q" } }, 503)
+    : json({ updated: call.body.documentIds.length, documentIds: call.body.documentIds })));
+  await assert.rejects(client.bulkDocuments({ action: "apply-tags", documentIds: ids, tags: ["t"] }), (error) => {
+    assert.ok(error instanceof DocSlurpBulkDocumentsPartialError);
+    assert.deepEqual(error.completed, { updated: 500, documentIds: ids.slice(0, 500) });
+    assert.deepEqual(error.remainingDocumentIds, ids.slice(500));
+    return true;
+  });
+});
+
+test("a server-side partial delete in a later request counts its deleted ids, and a retry with remainingDocumentIds succeeds", async () => {
+  const ids = Array.from({ length: 1_100 }, (_, i) => `d${i}`);
+  const gone = new Set();
+  let requests = 0;
+  const { calls, client } = recorder((call) => {
+    requests++;
+    const asked = call.body.documentIds;
+    // The second request deletes its first 200 documents, then stops (the server's bulk_delete_partial).
+    if (requests === 2) {
+      const deletedDocumentIds = asked.slice(0, 200);
+      deletedDocumentIds.forEach((id) => gone.add(id));
+      return json({ error: { code: "unavailable", message: "stopped", requestId: "q", details: {
+        policy: "bulk_delete_partial", deleted: 200, deletedDocumentIds, remainingDocumentIds: asked.slice(200),
+      } } }, 503);
+    }
+    // The server refuses any id it has already deleted (404), as the route does.
+    if (asked.some((id) => gone.has(id))) return json({ error: { code: "not_found", message: "Document not found", requestId: "q" } }, 404);
+    asked.forEach((id) => gone.add(id));
+    return json({ deleted: asked.length, documentIds: asked });
+  });
+  let partial;
+  await assert.rejects(client.bulkDocuments({ action: "delete", documentIds: ids }), (error) => {
+    assert.ok(error instanceof DocSlurpBulkDocumentsPartialError);
+    partial = error;
+    return true;
+  });
+  // Done: the first request's 500 and the 200 the server reported; remaining: the server's 300 and the unsent 100.
+  assert.equal(partial.completed.deleted, 700);
+  assert.deepEqual(partial.completed.documentIds, [...ids.slice(0, 500), ...ids.slice(500, 700)]);
+  assert.deepEqual(partial.remainingDocumentIds, ids.slice(700));
+  assert.equal(calls.length, 2);
+  // Retrying exactly the remaining ids deletes the rest; nothing already deleted is named again.
+  const retried = await client.bulkDocuments({ action: "delete", documentIds: partial.remainingDocumentIds });
+  assert.equal(retried.deleted, 400);
+  assert.equal(gone.size, 1_100);
 });

@@ -189,5 +189,5 @@ export function chargeChartExports(
  */
 export function chartExportCanSpend(state: WorkflowState): boolean {
   if (isCostCapExceeded(state)) return false;
-  return !(state.store?.creditLeaseWouldExhaust?.(state) ?? false);
+  return !(state.store?.creditLeaseWouldExhaust(state) ?? false);
 }

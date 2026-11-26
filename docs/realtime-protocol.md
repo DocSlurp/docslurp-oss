@@ -130,6 +130,12 @@ A resource error evicts that subscription's data (including removed runs/project
 Collection snapshots replace missing members. Dashboard snapshots may skip revisions;
 only append-only operation output uses durable replay sequence semantics.
 
+ProjectRun also carries optional `pagesSearchable` (pages of documents that finished indexing; null when not
+reported), `pagesCountedAt` (when `pagesTotal` became final; null while counting) and `workerStartedAt` (first worker
+pickup; null while waiting). They add at most three scalars per run to a frame. Clients treat a missing or null value as
+unknown, never as zero. Completed document stage rows carry `stats.documentPages` (about 22 bytes each), which
+`completedPagesByStage` in `@docslurp/shared` rolls up per stage.
+
 
 ## Consistency, reconciliation and operational limits
 

@@ -90,8 +90,10 @@ describe("chart export billing (billing enforced)", () => {
 
     // The estimate from the recorded stats prices those three first reads plus the provider's expected share of a
     // second read each (test pricing: 0.5 x 0.07); these three reads needed none, so they settled below the estimate.
-    const features = { ...normalizePipelineFeatures(defaultPipelineFeatures), chartExport: config } as PipelineFeatures;
-    const base = normalizePipelineFeatures(defaultPipelineFeatures);
+    // Smartest: AI chart reads (tier models) run only there; Fastest prices charts at the free tier.
+    const smartest = { ...defaultPipelineFeatures, ladder: { maxRung: "intelligent" as const } };
+    const features = { ...normalizePipelineFeatures(smartest), chartExport: config } as PipelineFeatures;
+    const base = normalizePipelineFeatures(smartest);
     const env = { STRIPE_SECRET_KEY: "sk_test", DOCSLURP_CHART_EXPORT: "on" };
     const stages = compilePipelinePlan(base).stageOrder;
     const stats = session.stats();

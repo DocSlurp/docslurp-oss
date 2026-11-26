@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { assertParseSourceDecided } from "../lib/parse-source.js";
 import { createReadStream } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -23,7 +23,23 @@ import { pushPerfMetric } from "../lib/perf-context.js";
 import { isCommandTeardownError } from "../sandbox/teardown.js";
 import { SourceIntegrityError, verifyStagedSource } from "../sandbox/source-integrity.js";
 import { registerReadOnlySource, unregisterReadOnlySource } from "../sandbox/paths.js";
+import { readPngFileFacts } from "../lib/page-image-evidence.js";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
+
+import {
+  pageSizeBinding,
+  pageSizeBlocks,
+  pageSizesArtifactKey,
+  pageSizesArtifactMaxBytes,
+  parsePageSizesArtifact,
+  pdfPageSizeMemo,
+  readPageSizeReuse,
+  serializePageSizes,
+  sharedBlockMeasurement,
+  type PageSizeBinding,
+  type PdfPageSize,
+  type PdfPageSizeMemo,
+} from "./pdf-page-sizes.js";
 
 export type RasterEngineName = "pdftoppm" | "native-pdf";
 
@@ -48,6 +64,10 @@ export interface RasterCacheOptions {
   pdftoppmConcurrency?: number;
   /** Process-wide limiter for sandboxed raster commands (default `sandboxedRasterSlots()`). */
   rasterSlots?: Semaphore;
+  /** Overrides the process-wide memo for measured pdfinfo sizes. */
+  pageSizeMemo?: PdfPageSizeMemo;
+  /** Overrides DOCSLURP_RASTER_PAGE_SIZE_REUSE. */
+  pageSizeReuse?: boolean;
 }
 
 /** Hard ceiling for `PDF_PDFTOPPM_CONCURRENCY`: each lane is a sandboxed process holding a full-page bitmap. */
@@ -169,10 +189,26 @@ interface SourceEntry {
   path: string;
   sha256: string;
   sizeBytes: number;
+}
+
+interface SourceCacheEntry {
+  source: Promise<SourceEntry>;
   lastAccess: number;
+  borrowers: number;
+  retired: boolean;
 }
 
 type SourceStorage = Pick<ArtifactStore, "downloadToTempFile">;
+
+/**
+ * Organization isolation: a cached source serves only its own run (a run belongs to exactly one organization). The storage
+ * key alone is never trusted to separate tenants; the run and its requester are part of the cache key, so no other
+ * organization's (or run's) stage can be handed this file.
+ */
+function sourceCacheKey(document: Pick<Document, "userId" | "runId" | "sourceKey">): string {
+  if (!document.runId || !document.userId || !document.sourceKey) throw new Error("PDF source cache needs a run-scoped document");
+  return JSON.stringify([document.runId, document.userId, document.sourceKey]);
+}
 
 /**
  * Process-local source cache shared by Temporal activities. The Interface owns
@@ -180,7 +216,7 @@ type SourceStorage = Pick<ArtifactStore, "downloadToTempFile">;
  * the same source independently inside one worker process.
  */
 export class PdfSourceCache {
-  private readonly entries = new Map<string, Promise<SourceEntry>>();
+  private readonly entries = new Map<string, SourceCacheEntry>();
 
   constructor(
     private readonly storage: SourceStorage,
@@ -192,67 +228,79 @@ export class PdfSourceCache {
    * may serve another document or version with the same key). On a mismatch the entry is dropped and
    * the document refused (SourceIntegrityError). The file is a read-only source for every command
    * (sandbox/paths.ts registerReadOnlySource): activities sharing it can neither write it nor share
-   * its directory.
+   * its directory. Use acquire() when the caller needs the path to survive concurrent eviction.
    */
   async get(document: Document): Promise<CachedPdfSource> {
-    // No parse decision from this build's quarantine: refused before a byte is fetched (lib/parse-source.ts).
+    const { release, ...source } = await this.borrow(document);
+    await release(false);
+    return source;
+  }
+
+  /** Keep a staged source registered and on disk until the last in-flight reader releases it. */
+  async acquire(document: Document): Promise<CachedPdfSource & { release: () => Promise<void> }> {
+    return this.borrow(document);
+  }
+
+  private async borrow(document: Document): Promise<CachedPdfSource & { release: (trim?: boolean) => Promise<void> }> {
     assertParseSourceDecided(document);
-    const { entry, cacheHit } = await this.entry(document);
+    const key = sourceCacheKey(document);
+    let entry = this.entries.get(key);
+    const cacheHit = entry !== undefined;
+    if (!entry) {
+      const evicted = this.evictIdle(1);
+      entry = { source: evicted.then(() => this.download(document)), lastAccess: Date.now(), borrowers: 0, retired: false };
+      this.entries.set(key, entry);
+    }
+    entry.lastAccess = Date.now();
+    entry.borrowers += 1;
+    const held = entry;
+    let released = false;
+    const release = async (trim = true) => {
+      if (released) return;
+      released = true;
+      held.borrowers -= 1;
+      if (held.retired) {
+        if (held.borrowers === 0) await this.cleanup(held);
+      } else if (trim) {
+        await this.evictIdle();
+      }
+    };
     try {
-      verifyStagedSource(document, entry.sha256);
+      const source = await held.source.catch((error: unknown) => {
+        if (this.entries.get(key) === held) this.entries.delete(key);
+        throw error;
+      });
+      verifyStagedSource(document, source.sha256);
+      await this.evictIdle();
+      return { ...source, cacheHit, release };
     } catch (error) {
-      if (error instanceof SourceIntegrityError) await this.drop(document.sourceKey);
+      if (error instanceof SourceIntegrityError && this.entries.get(key) === held) {
+        this.entries.delete(key);
+        held.retired = true;
+      }
+      await release();
       throw error;
-    }
-    return { ...entry, cacheHit };
-  }
-
-  private async entry(document: Document): Promise<{ entry: SourceEntry; cacheHit: boolean }> {
-    const existing = this.entries.get(document.sourceKey);
-    if (existing) {
-      const entry = await existing;
-      entry.lastAccess = Date.now();
-      return { entry, cacheHit: true };
-    }
-
-    await this.evictIfNeeded();
-    const raced = this.entries.get(document.sourceKey);
-    if (raced) {
-      const entry = await raced;
-      entry.lastAccess = Date.now();
-      return { entry, cacheHit: true };
-    }
-    const pending = this.download(document);
-    this.entries.set(document.sourceKey, pending);
-    try {
-      return { entry: await pending, cacheHit: false };
-    } catch (error) {
-      this.entries.delete(document.sourceKey);
-      throw error;
-    }
-  }
-
-  private async drop(sourceKey: string): Promise<void> {
-    const pending = this.entries.get(sourceKey);
-    if (!pending) return;
-    this.entries.delete(sourceKey);
-    const entry = await pending.catch(() => null);
-    if (entry) {
-      unregisterReadOnlySource(entry.path);
-      await cleanupTempFile(entry.path);
     }
   }
 
   async clear(): Promise<void> {
     const entries = [...this.entries.values()];
     this.entries.clear();
-    await Promise.all(entries.map(async (pending) => {
-      const entry = await pending.catch(() => null);
-      if (entry) {
-        unregisterReadOnlySource(entry.path);
-        await cleanupTempFile(entry.path);
-      }
+    await Promise.all(entries.map(async (entry) => {
+      entry.retired = true;
+      if (entry.borrowers === 0) await this.cleanup(entry);
     }));
+  }
+
+  private async cleanup(entry: SourceCacheEntry): Promise<void> {
+    const source = await entry.source.catch(() => null);
+    if (!source) return;
+    try {
+      await cleanupTempFile(source.path);
+      unregisterReadOnlySource(source.path);
+    } catch {
+      console.warn("[pdf-source-cache] failed to remove staged source");
+    }
   }
 
   private async download(document: Document): Promise<SourceEntry> {
@@ -260,24 +308,26 @@ export class PdfSourceCache {
       document.sourceKey,
       trustedTempDownloadPattern("docslurp-source-cache-", document),
     );
-    const [sha256, fileStat] = await Promise.all([hashFile(filePath), stat(filePath)]);
-    registerReadOnlySource(filePath);
-    return { path: filePath, sha256, sizeBytes: fileStat.size, lastAccess: Date.now() };
+    try {
+      const [sha256, fileStat] = await Promise.all([hashFile(filePath), stat(filePath)]);
+      registerReadOnlySource(filePath);
+      return { path: filePath, sha256, sizeBytes: fileStat.size };
+    } catch (error) {
+      await cleanupTempFile(filePath).catch(() => console.warn("[pdf-source-cache] failed to remove incomplete staged source"));
+      throw error;
+    }
   }
 
-  private async evictIfNeeded(): Promise<void> {
-    if (this.entries.size < Math.max(1, this.maxEntries)) return;
-    const resolved = await Promise.all([...this.entries.entries()].map(async ([key, pending]) => ({
-      key,
-      entry: await pending.catch(() => null),
-    })));
-    const oldest = resolved
-      .filter((candidate): candidate is { key: string; entry: SourceEntry } => candidate.entry !== null)
-      .sort((left, right) => left.entry.lastAccess - right.entry.lastAccess)[0];
-    if (!oldest) return;
-    this.entries.delete(oldest.key);
-    unregisterReadOnlySource(oldest.entry.path);
-    await cleanupTempFile(oldest.entry.path);
+  private async evictIdle(incoming = 0): Promise<void> {
+    // Active readers can temporarily exceed the idle cache budget.
+    const excess = this.entries.size + incoming - Math.max(1, this.maxEntries);
+    if (excess <= 0) return;
+    const idle = [...this.entries]
+      .filter(([, entry]) => entry.borrowers === 0)
+      .sort(([, left], [, right]) => left.lastAccess - right.lastAccess)
+      .slice(0, excess);
+    for (const [key] of idle) this.entries.delete(key);
+    await Promise.all(idle.map(([, entry]) => this.cleanup(entry)));
   }
 }
 
@@ -301,7 +351,7 @@ export interface RasterPageArtifact {
   customerOriginal?: boolean;
 }
 
-type RasterStorage = Pick<ArtifactStore, "objectSize" | "putBytes" | "uri">;
+type RasterStorage = Pick<ArtifactStore, "objectSize" | "putBytes" | "uri"> & Partial<Pick<ArtifactStore, "getBytes">>;
 type RasterRunner = Pick<CommandRunner, "renderPdfPageRange" | "pdfPageSizes" | "run">;
 
 /**
@@ -358,13 +408,17 @@ export class PdfRasterCache {
     if (name !== "native-pdf" || !engine) return null;
     const dpi = clampDpi(args.dpi);
     try {
-      const source = await this.sources.get(args.document);
-      const clip = await renderClipNative(engine, source.path, args.pageNumber, args.clip, {
-        dpi,
-        maxEdgePx: args.maxEdgePx,
-        signal: args.signal,
-      });
-      return { bytes: clip.bytes, widthPx: clip.widthPx, heightPx: clip.heightPx, mimeType: clip.mimeType, engine: name, dpi };
+      const source = await this.sources.acquire(args.document);
+      try {
+        const clip = await renderClipNative(engine, source.path, args.pageNumber, args.clip, {
+          dpi,
+          maxEdgePx: args.maxEdgePx,
+          signal: args.signal,
+        });
+        return { bytes: clip.bytes, widthPx: clip.widthPx, heightPx: clip.heightPx, mimeType: clip.mimeType, engine: name, dpi };
+      } finally {
+        await source.release();
+      }
     } catch (error) {
       if (args.signal?.aborted) throw error;
       logNativePdfFallback(`raster-clip page=${args.pageNumber}`, error, "full-page render and crop");
@@ -393,6 +447,124 @@ export class PdfRasterCache {
 
   private get rasterSlots(): Semaphore {
     return this.options.rasterSlots ?? sandboxedRasterSlots();
+  }
+
+  /**
+   * Sizes of `pages` of `source`: the process memo, then the run's stored pdfinfo sizes, then one sandboxed pdfinfo
+   * per aligned block of the pages still unknown. Reuse binds the run, document and staged source hash. Missing
+   * measurements and disabled reuse fall back to pdfinfo over the selected ranges. The returned callback persists
+   * measurements after authorization and successful rendering.
+   */
+  private async measurePageSizes(
+    document: Document,
+    runId: string,
+    source: CachedPdfSource,
+    pages: number[],
+    lanes: number,
+    signal: AbortSignal | undefined,
+  ): Promise<{ sizes: Map<number, PdfPageSize>; store: () => Promise<void> }> {
+    const sizes = new Map<number, PdfPageSize>();
+    let store = async () => {};
+    if (pages.length === 0) return { sizes, store };
+    const reuse = this.options.pageSizeReuse ?? readPageSizeReuse();
+    const binding = reuse && pages.every((page) => page <= document.pageCount) ? pageSizeBinding(document, runId, source.sha256) : null;
+    const memo = this.options.pageSizeMemo ?? pdfPageSizeMemo();
+    const counts = { memo: 0, artifact: 0, pdfinfo: 0, calls: 0 };
+    const missing = () => pages.filter((page) => !sizes.has(page));
+    const take = (found: ReadonlyMap<number, PdfPageSize>, counter: "memo" | "artifact") => {
+      for (const [page, size] of found) {
+        if (sizes.has(page)) continue;
+        sizes.set(page, size);
+        counts[counter] += 1;
+      }
+    };
+    if (binding) {
+      take(memo.get(binding, pages), "memo");
+      const wanted = missing();
+      if (wanted.length > 0) {
+        const stored = await this.readStoredPageSizes(document.id, binding);
+        if (stored) {
+          memo.set(binding, stored);
+          take(memo.get(binding, wanted), "artifact");
+        }
+      }
+    }
+    const unmeasured = missing();
+    if (unmeasured.length > 0) {
+      // With a binding, whole aligned blocks: a later stage's pages are then usually already known.
+      const measured = new Map<number, PdfPageSize>();
+      if (binding) {
+        await runLanes(pageSizeBlocks(unmeasured, binding.pageCount), lanes, signal, async (range, laneSignal) => {
+          try {
+            const result = await sharedBlockMeasurement(binding, range, laneSignal, () => {
+              counts.calls += 1;
+              return this.pdfPageSizes(source.path, range.first, range.last, laneSignal);
+            });
+            for (const [page, size] of result) measured.set(page, size);
+          } catch (error) {
+            if (laneSignal.aborted || isCommandTeardownError(error)) throw error;
+            // A larger probe can fail where the original selected range succeeds.
+          }
+        });
+      }
+      const remaining = unmeasured.filter((page) => !measured.has(page));
+      await runLanes(contiguousPageRanges(remaining), lanes, signal, async (range, laneSignal) => {
+        counts.calls += 1;
+        for (const [page, size] of await this.pdfPageSizes(source.path, range.first, range.last, laneSignal)) measured.set(page, size);
+      });
+      for (const page of unmeasured) {
+        const size = measured.get(page);
+        if (size) {
+          sizes.set(page, size);
+          counts.pdfinfo += 1;
+        }
+      }
+      if (binding && counts.calls > 0) {
+        memo.set(binding, measured);
+        store = () => this.writeStoredPageSizes(document.id, binding, memo.all(binding));
+      }
+    }
+    console.log(
+      `[raster-page-sizes] document=${document.id} pages=${pages.length} memo=${counts.memo} artifact=${counts.artifact} ` +
+        `pdfinfo=${counts.pdfinfo} pdfinfo_calls=${counts.calls} reuse=${binding ? "on" : "off"}`,
+    );
+    pushPerfMetric({ metric: "raster-page-size-pdfinfo-calls", value: counts.calls, unit: "count", tags: ["raster", "page-sizes"] });
+    return { sizes, store };
+  }
+
+  /** The run's stored sizes for this exact source, or null (absent, unreadable or refused). */
+  private async readStoredPageSizes(documentId: string, binding: PageSizeBinding): Promise<Map<number, PdfPageSize> | null> {
+    if (!this.storage.getBytes) return null;
+    const key = pageSizesArtifactKey(binding);
+    let bytes: Buffer;
+    try {
+      bytes = await this.storage.getBytes(key, { maxBytes: pageSizesArtifactMaxBytes(binding.pageCount) });
+    } catch (error) {
+      if (isCommandTeardownError(error)) throw error;
+      const name = error instanceof Error ? error.name : "unknown";
+      const status = (error as { $metadata?: { httpStatusCode?: number } } | null)?.$metadata?.httpStatusCode;
+      if (name !== "NoSuchKey" && name !== "NotFound" && status !== 404) {
+        console.warn(`[raster-page-sizes] document=${documentId} source=pdfinfo status=read-failed error=${name}`);
+      }
+      return null;
+    }
+    const parsed = parsePageSizesArtifact(bytes, binding);
+    if (!parsed.ok) {
+      console.warn(`[raster-page-sizes] document=${documentId} source=pdfinfo status=refused reason=${parsed.reason}`);
+      return null;
+    }
+    return parsed.sizes;
+  }
+
+  /** Store every pdfinfo size known for this source (best effort: a failed write only costs a later pdfinfo). */
+  private async writeStoredPageSizes(documentId: string, binding: PageSizeBinding, sizes: ReadonlyMap<number, PdfPageSize>): Promise<void> {
+    if (sizes.size === 0 || !this.storage.getBytes) return;
+    try {
+      await this.storage.putBytes(pageSizesArtifactKey(binding), serializePageSizes(binding, sizes), "application/json");
+    } catch (error) {
+      if (isCommandTeardownError(error)) throw error;
+      console.warn(`[raster-page-sizes] document=${documentId} source=pdfinfo status=store-failed error=${error instanceof Error ? error.name : "unknown"}`);
+    }
   }
 
   async renderSelectedPages(args: {
@@ -441,109 +613,138 @@ export class PdfRasterCache {
     // recorded and authorized (recordRenderedPageAreas) before the page's bytes are cached, so a cache hit was authorized.
 
     if (missing.length > 0) {
-      const source = await this.sources.get(args.document);
-      if (!isPdf) {
-        const bytes = await readFile(source.path);
-        await this.storage.putBytes(keys.get(1)!, bytes, outputMimeType);
-        generated.set(1, { sizeBytes: bytes.byteLength, widthPx: null, heightPx: null });
-      }
-      let nativeDone = false;
-      if (isPdf && resolved.engine) {
-        let rendered: Awaited<ReturnType<typeof renderPagesNative>> | null = null;
-        try {
-          rendered = await renderPagesNative(resolved.engine, source.path, missing, {
-            dpi,
-            ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}),
-            concurrency: this.options.concurrency,
-            signal: args.signal,
-          });
-        } catch (error) {
-          if (args.signal?.aborted) throw error;
-          logNativePdfFallback("raster-render", error, "pdftoppm");
-        }
-        if (rendered && missing.every((pageNumber) => rendered.has(pageNumber))) {
-          const areas: PageEquivalentRow[] = [];
-          for (const [pageNumber, page] of rendered) {
-            // Billed from the page's point size, as the pdftoppm path is: a DPI lowered by the pixel bounds or a long-edge
-            // cap changes the pixels, never the page.
-            if (page.widthPt && page.heightPt) areas.push({ pageNumber, area: pageAreaEquivalentsPt(page.widthPt, page.heightPt) });
-            else if (page.widthPx && page.heightPx) areas.push({ pageNumber, area: pageAreaEquivalents(page.widthPx, page.heightPx, page.dpi) });
-          }
-          // Measured and authorized before any page is cached, outside the engine fallback: a refusal (an unfunded run is
-          // paused) or a failed record stops here and leaves nothing a retry would skip.
-          await recordRenderedPageAreas(args.runId, args.document, areas);
-          for (const [pageNumber, page] of rendered) {
-            await this.storage.putBytes(keys.get(pageNumber)!, page.bytes, "image/png");
-            generated.set(pageNumber, { sizeBytes: page.bytes.byteLength, widthPx: page.widthPx, heightPx: page.heightPx });
-          }
-          nativeDone = true;
-        }
-      }
-      if (isPdf && !nativeDone && resolved.engine) {
-        // Keys are engine-scoped, so a fallback render must land under the pdftoppm key space.
-        engineName = "pdftoppm";
-        for (const pageNumber of pageNumbers) {
-          keys.set(pageNumber, `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/v2-${dpi}dpi${edgeSuffix}/page-${pageNumber}.${extension}`);
-        }
-        await Promise.all(pageNumbers.map(async (pageNumber) => {
-          existing.set(pageNumber, await this.storage.objectSize(keys.get(pageNumber)!));
-        }));
-      }
-      const pdftoppmPages = isPdf && !nativeDone
-        ? pageNumbers.filter((pageNumber) => existing.get(pageNumber) === null)
-        : [];
-      const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-raster-"));
+      const source = await this.sources.acquire(args.document);
       try {
-        // One pdfinfo call per contiguous run sizes the pages to render; each page then renders in its own pdftoppm
-        // call, a few at a time. Lanes share one abort signal: the first failure aborts every in-flight sibling
-        // command, the lanes drain, and nothing is uploaded after it. Every command also takes a process-wide slot.
-        const lanes = this.options.pdftoppmConcurrency ?? defaultPdftoppmConcurrency();
-        const sizes = new Map<number, { widthPt: number; heightPt: number }>();
-        await runLanes(contiguousPageRanges(pdftoppmPages), lanes, args.signal, async (range, signal) => {
-          for (const [pageNumber, size] of await this.pdfPageSizes(source.path, range.first, range.last, signal)) sizes.set(pageNumber, size);
-        });
-        if (pdftoppmPages.some((pageNumber) => !sizes.has(pageNumber))) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
-        // Each page's area from its size, measured and authorized before anything renders or is cached.
-        await recordRenderedPageAreas(args.runId, args.document, pdftoppmPages.map((pageNumber) => {
-          const size = sizes.get(pageNumber)!;
-          return { pageNumber, area: pageAreaEquivalentsPt(size.widthPt, size.heightPt) };
-        }));
-        await runLanes(pdftoppmPages, lanes, args.signal, async (selectedPage, signal) => {
-          const size = sizes.get(selectedPage)!;
-          const renderDpi = longEdgeCappedDpi(size.widthPt, size.heightPt, dpi, maxLongEdgePx);
-          // Each command writes only to its own directory and reads the source read-only: concurrent
-          // lanes share no writable path (so no socket or file to meet on), and one lane cannot touch
-          // another's output.
-          const laneDir = await mkdtemp(path.join(scratch, "docslurp-page-"));
-          const prefix = path.join(laneDir, `page-${selectedPage}-${selectedPage}`);
-          const rendered = await this.runner.renderPdfPageRange(
-            source.path,
-            prefix,
-            selectedPage,
-            selectedPage,
-            renderDpi,
-            longEdgeCappedEdge(size.widthPt, size.heightPt, renderDpi, maxLongEdgePx),
-          );
-          if (!rendered.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
-          const plan = { ...rendered, readOnlyInputs: true };
-          await this.rasterSlots.run(signal, () => this.runner.run(plan, signal));
+        if (!isPdf) {
+          const bytes = await readFile(source.path);
+          await this.storage.putBytes(keys.get(1)!, bytes, outputMimeType);
+          generated.set(1, { sizeBytes: bytes.byteLength, widthPx: null, heightPx: null });
+        }
+        let nativeDone = false;
+        if (isPdf && resolved.engine) {
+          let rendered: Awaited<ReturnType<typeof renderPagesNative>> | null = null;
+          try {
+            rendered = await renderPagesNative(resolved.engine, source.path, missing, {
+              dpi,
+              ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}),
+              concurrency: this.options.concurrency,
+              signal: args.signal,
+            });
+          } catch (error) {
+            if (args.signal?.aborted) throw error;
+            logNativePdfFallback("raster-render", error, "pdftoppm");
+          }
+          if (rendered && missing.every((pageNumber) => rendered.has(pageNumber))) {
+            const areas: PageEquivalentRow[] = [];
+            for (const [pageNumber, page] of rendered) {
+              // Billed from the page's point size, as the pdftoppm path is: a DPI lowered by the pixel bounds or a long-edge
+              // cap changes the pixels, never the page.
+              if (page.widthPt && page.heightPt) areas.push({ pageNumber, area: pageAreaEquivalentsPt(page.widthPt, page.heightPt) });
+              else if (page.widthPx && page.heightPx) areas.push({ pageNumber, area: pageAreaEquivalents(page.widthPx, page.heightPx, page.dpi) });
+            }
+            // Measured and authorized before any page is cached, outside the engine fallback: a refusal (an unfunded run is
+            // paused) or a failed record stops here and leaves nothing a retry would skip.
+            await recordRenderedPageAreas(args.runId, args.document, areas);
+            for (const [pageNumber, page] of rendered) {
+              await this.storage.putBytes(keys.get(pageNumber)!, page.bytes, "image/png");
+              generated.set(pageNumber, { sizeBytes: page.bytes.byteLength, widthPx: page.widthPx, heightPx: page.heightPx });
+            }
+            nativeDone = true;
+          }
+        }
+        if (isPdf && !nativeDone && resolved.engine) {
+          // Keys are engine-scoped, so a fallback render must land under the pdftoppm key space.
+          engineName = "pdftoppm";
+          for (const pageNumber of pageNumbers) {
+            keys.set(pageNumber, `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/v2-${dpi}dpi${edgeSuffix}/page-${pageNumber}.${extension}`);
+          }
+          await Promise.all(pageNumbers.map(async (pageNumber) => {
+            existing.set(pageNumber, await this.storage.objectSize(keys.get(pageNumber)!));
+          }));
+        }
+        const pdftoppmPages = isPdf && !nativeDone
+          ? pageNumbers.filter((pageNumber) => existing.get(pageNumber) === null)
+          : [];
+        const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-raster-"));
+        try {
+          // Reused pdfinfo measurements size the selected pages before bounded same-size render batches.
+          const lanes = this.options.pdftoppmConcurrency ?? defaultPdftoppmConcurrency();
+          const { sizes, store: storePageSizes } = await this.measurePageSizes(args.document, args.runId, source, pdftoppmPages, lanes, args.signal);
+          if (pdftoppmPages.some((pageNumber) => !sizes.has(pageNumber))) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
+          // Each page's area from its size, measured and authorized before anything renders or is cached.
+          await recordRenderedPageAreas(args.runId, args.document, pdftoppmPages.map((pageNumber) => {
+            const size = sizes.get(pageNumber)!;
+            return { pageNumber, area: pageAreaEquivalentsPt(size.widthPt, size.heightPt) };
+          }));
+          const batchAdjacent = process.env.DOCSLURP_PDF_RASTER_BATCHING === "on";
+          const batches: Array<{ first: number; last: number; dpi: number; edge: number }> = [];
+          for (const pageNumber of pdftoppmPages) {
+            const size = sizes.get(pageNumber)!;
+            const renderDpi = longEdgeCappedDpi(size.widthPt, size.heightPt, dpi, maxLongEdgePx);
+            const edge = longEdgeCappedEdge(size.widthPt, size.heightPt, renderDpi, maxLongEdgePx);
+            const previous = batches.at(-1);
+            // At most two ordinary pages per command. Keep large renders single, with the existing edge and slot limits.
+            if (batchAdjacent && previous && previous.first === previous.last && previous.last + 1 === pageNumber &&
+                previous.dpi === renderDpi && previous.edge === edge && edge * edge * 8 <= 32 * 1024 * 1024) {
+              previous.last = pageNumber;
+            } else {
+              batches.push({ first: pageNumber, last: pageNumber, dpi: renderDpi, edge });
+            }
+          }
+          await runLanes(batches, lanes, args.signal, async (batch, signal) => {
+            // Each process reads the source read-only and writes only into its own bounded output directory.
+            const laneDir = await mkdtemp(path.join(scratch, "docslurp-page-"));
+            const stem = `page-${batch.first}-${batch.last}`;
+            const rendered = await this.runner.renderPdfPageRange(
+              source.path, path.join(laneDir, stem), batch.first, batch.last, batch.dpi, batch.edge,
+            );
+            if (!rendered.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
+            const paired = batch.first !== batch.last;
+            const pairOutputLimit = 36 * 1024 * 1024;
+            await this.rasterSlots.run(signal, () => this.runner.run({
+              ...rendered, readOnlyInputs: true, ...(paired ? { maxOutputBytes: pairOutputLimit } : {}),
+            }, signal));
 
-          const stem = `${path.basename(prefix)}-`;
-          const filename = (await readdir(laneDir)).find((candidate) => {
-            if (!candidate.startsWith(stem)) return false;
-            const suffix = candidate.slice(stem.length).match(/^(\d+)\.png$/);
-            return suffix !== null && Number(suffix[1]) === selectedPage;
+            const files = new Map<number, string>();
+            for (const filename of await readdir(laneDir)) {
+              if (!filename.startsWith(`${stem}-`)) continue;
+              const suffix = filename.slice(stem.length + 1).match(/^(\d+)\.png$/);
+              if (!suffix) continue;
+              const pageNumber = Number(suffix[1]);
+              if (files.has(pageNumber)) throw new Error(`pdftoppm produced duplicate output for page ${pageNumber}`);
+              files.set(pageNumber, filename);
+            }
+            if (paired && files.size !== 2) throw new Error("pdftoppm did not produce exactly two pages");
+            let pairBytes = 0;
+            for (let pageNumber = batch.first; pageNumber <= batch.last; pageNumber += 1) {
+              const filename = files.get(pageNumber);
+              if (!filename) throw new Error(`pdftoppm did not produce page ${pageNumber}`);
+              if (!paired) continue;
+              signal.throwIfAborted();
+              const file = path.join(laneDir, filename);
+              if (!(await lstat(file)).isFile()) throw new Error("Invalid raster output file");
+              const { sizeBytes, widthPx, heightPx } = await readPngFileFacts(file);
+              pairBytes += sizeBytes;
+              if (pairBytes > pairOutputLimit || !widthPx || !heightPx || Math.max(widthPx, heightPx) > batch.edge) {
+                throw new Error(`Invalid raster output for page ${pageNumber}`);
+              }
+            }
+            for (let pageNumber = batch.first; pageNumber <= batch.last; pageNumber += 1) {
+              const bytes = await readFile(path.join(laneDir, files.get(pageNumber)!));
+              signal.throwIfAborted();
+              await this.storage.putBytes(keys.get(pageNumber)!, bytes, "image/png");
+              generated.set(pageNumber, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
+            }
           });
-          if (!filename) throw new Error(`pdftoppm did not produce page ${selectedPage}`);
-          const bytes = await readFile(path.join(laneDir, filename));
-          signal.throwIfAborted();
-          await this.storage.putBytes(keys.get(selectedPage)!, bytes, "image/png");
-          generated.set(selectedPage, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
-        });
-        const unrendered = pdftoppmPages.filter((pageNumber) => !generated.has(pageNumber));
-        if (unrendered.length > 0) throw new Error(`pdftoppm did not render pages ${unrendered.join(",")}`);
+          const unrendered = pdftoppmPages.filter((pageNumber) => !generated.has(pageNumber));
+          if (unrendered.length > 0) throw new Error(`pdftoppm did not render pages ${unrendered.join(",")}`);
+          args.signal?.throwIfAborted();
+          await storePageSizes();
+        } finally {
+          await rm(scratch, { recursive: true, force: true });
+        }
       } finally {
-        await rm(scratch, { recursive: true, force: true });
+        await source.release();
       }
     }
 

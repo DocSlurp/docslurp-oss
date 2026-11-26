@@ -69,9 +69,9 @@ function activity(runId: string, execute: typeof executeVisionRuntime, env: Node
   const created = shared;
   const state = WorkflowState.create({
     id: runId, orgId: "esc-org", projectId: "esc-ws", userId: "esc-u", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
-    pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true },
+    pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } },
   } as unknown as ProjectRun, []);
-  state.store = created;
+  state.bindStore(created);
   state.visionAttempts = created.visionAttempts;
   state.usageLedger.runId = runId;
   const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: { DOCSLURP_OCR_ESCALATION: "on", ...env }, execute });
@@ -151,13 +151,13 @@ describe("OCR escalation across activity retries", () => {
       batch.commit();
     }
     expect(execute).toHaveBeenCalledTimes(2);
-    const receipts = await admin<{ metric: string; input_tokens: number; output_tokens: number; cost_cents: string; provider_cost: number }[]>`
+    const receipts = await admin<{ metric: string; input_tokens: string; output_tokens: string; cost_cents: string; provider_cost: number }[]>`
       select metric, input_tokens, output_tokens, cost_cents::text, (metadata ->> 'providerCostCents')::float8 as provider_cost
       from usage_events where run_id = 'esc-run-2' and metric in ('page-analysis-attempt', 'ocr-escalation') order by metric`;
     expect(receipts).toHaveLength(2);
-    expect(receipts[0]).toMatchObject({ metric: "ocr-escalation", input_tokens: 1_500, output_tokens: 400 });
+    expect(receipts[0]).toMatchObject({ metric: "ocr-escalation", input_tokens: "1500", output_tokens: "400" });
     expect(receipts[0]!.provider_cost).toBeGreaterThan(0);
-    expect(receipts[1]).toMatchObject({ metric: "page-analysis-attempt", input_tokens: 1_500, output_tokens: 120 });
+    expect(receipts[1]).toMatchObject({ metric: "page-analysis-attempt", input_tokens: "1500", output_tokens: "120" });
     expect(receipts[1]!.provider_cost).toBeCloseTo(0.03);
     // Both calls were admitted by the durable guard: they count against the document's attempt budget.
     const [attempts] = await admin<{ attempts: number }[]>`

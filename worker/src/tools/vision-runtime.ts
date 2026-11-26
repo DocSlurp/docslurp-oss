@@ -1,8 +1,10 @@
 import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
+import { assertLocalCliReaderAllowed } from "../lib/vm-only-parsing.js";
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
-import { nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache, assertAutomaticModelCallAllowed } from "@docslurp/shared";
+import { activeCapabilityPools, poolMemberAutomaticRoute, poolMemberForModel, nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache, assertAutomaticModelCallAllowed, AutomaticCallRefusedError, prepareAutomaticCallPrices, reportAutomaticCallOutcome, visionAutomaticRoute } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
-import { ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
+import { findProviderRoutingExclusion, ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
+import { defaultVisionFallbackModel, recordPoolFailover, recordPoolServed, visionPageRouteRegionProblem, visionPoolMemberId } from "../lib/capability-pools.js";
 import {
   VISUAL_RELATIONSHIP_INSTRUCTIONS,
   MARKDOWN_LATEX_VISION_PROMPT,
@@ -17,7 +19,7 @@ import {
   visionPromptKeyForModel,
   visionModelProfile,
 } from "./vision-model-profiles.js";
-import { attachVisionBilledUsage, estimateTokens, findVisionBilledUsage, findVisionOutputRejected, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal, type TokenCounts } from "./vision-stream.js";
+import { attachVisionBilledUsage, attachVisionModelConfig, estimateTokens, findVisionBilledUsage, findVisionOutputRejected, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal, type TokenCounts } from "./vision-stream.js";
 import { findVisionGuardStop, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import {
   attachVisionServedRoute,
@@ -216,6 +218,11 @@ export interface VisionExecutionResult {
   baseUrl: string | null;
   fallbackUsed: boolean;
   fallbackReason: string | null;
+  /**
+   * The vision capability pool member that served the page (capability-pools.ts poolMemberId), when the served model is
+   * a pool member: the fallback's when `fallbackUsed`. For per-page records.
+   */
+  poolMemberId?: string;
   /** Provider finish reason of the (first) choice; undefined for local runtimes. */
   finishReason?: string | null;
   /** Model id the provider reports having served (`payload.model`); undefined when the runtime omits it. */
@@ -281,6 +288,34 @@ export function detectModelSwap(requested: string, served: string | undefined, p
   return { requested, served, provider };
 }
 
+/** A page read refused because its route can reach a host with no stated US or EU region (nothing was sent). */
+export class VisionRouteRegionError extends Error {
+  constructor(detail: string) {
+    super(`vision page read refused: ${detail}`);
+    this.name = "VisionRouteRegionError";
+  }
+}
+
+/**
+ * Why a primary vision read was an outage the pool may fail over from, or null when it was the page's own answer: `routing`
+ * (no host under the request's constraints, nothing billed), `timeout` or `unavailable` (a server error or a dropped
+ * connection that outlasted the retries). Never after a billed attempt, a caller's abort, or any other refusal.
+ */
+export function visionOutageReason(error: unknown, signal?: AbortSignal): "routing" | "timeout" | "unavailable" | null {
+  if (signal?.aborted) return null;
+  if (findVisionOutputRejected(error) || findVisionBilledUsage(error)) return null;
+  if (findProviderRoutingExclusion(error)) return "routing";
+  for (let current = error, depth = 0; current && depth < 8; current = (current as { cause?: unknown }).cause, depth += 1) {
+    const name = (current as { name?: unknown }).name;
+    if (name === "TimeoutError") return "timeout";
+    if (current instanceof ProviderRetryableError) {
+      if (current.status === null) return /time(d)? ?out/i.test(current.message) ? "timeout" : "unavailable";
+      return current.status >= 500 ? "unavailable" : null;
+    }
+  }
+  return null;
+}
+
 export async function executeVisionRuntime(args: {
   imagePath: string;
   mimeType?: string;
@@ -292,6 +327,14 @@ export async function executeVisionRuntime(args: {
   /** Project privacy mode; hosted vision routes are refused outside `standard`. */
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
+  /**
+   * A page read of the run's vision route (vision capability), billed as a page: it counts as a vision pool serve, its
+   * fallback is valued as the page's read, and, with DOCSLURP_VISION_POOL_FALLBACK=on and no project fallback, the vision
+   * pool's next member (or DOCSLURP_VISION_FALLBACK_MODEL) is its fallback, tried only after a routing refusal, a timeout or
+   * a server error. Chart calls, critique, document-map OCR, materialize and OCR second reads leave it unset. Every call in
+   * a run (a gate) is region-checked, page read or not.
+   */
+  pageRead?: boolean;
   /**
    * The run's vision attempt guard (lib/vision-attempt-guard.ts), admitting every request this call
    * sends, the fallback route's included. Required so no call path can skip it; null only outside a
@@ -327,6 +370,13 @@ export async function executeVisionRuntime(args: {
    * whose size cannot be read, is refused before admission (nothing is sent or billed): `VisionImageOverBudgetError`.
    */
   maxImageTokens?: number;
+  /**
+   * A per-request price ceiling (OpenRouter routes only): `max_price` is sent at the lower of the catalog price and this
+   * ceiling, and the request is restricted to `hosts`, so only hosts priced under the ceiling can serve it (OCR
+   * escalation, shared ocr-escalation-routes.ts). No host under it: OpenRouter refuses the request (a routing exclusion,
+   * `ProviderRoutingExclusionError`, lib/provider-retry.ts), and nothing is billed.
+   */
+  priceCeiling?: VisionPriceCeiling;
 }): Promise<VisionExecutionResult> {
   const normalized = normalizeVisionConfig(args.vision, args.cfg, args.outputSchema);
   const selected = args.promptText !== undefined ? { ...normalized, prompt: args.promptText } : normalized;
@@ -342,28 +392,86 @@ export async function executeVisionRuntime(args: {
   args = { ...args, requestText: schemaLabelsRequestText(selected.prompt), cacheOrderedPrompt: args.promptText === undefined };
   // Request profiles describe plain page transcription only; the fallback route is judged the same way.
   const routeArgs: RouteRequestArgs = { ...args, transcription: isPageTranscription(args) };
+  const pageRead = args.pageRead === true;
+  // Customer content goes only to hosts with a stated US or EU region: inside a run (every call has a gate), a route that
+  // cannot prove it is refused before anything is sent (fail closed), whatever the call (page read, critique, chart,
+  // document map, materialize, second read). Benchmarks (no gate) name their hosts themselves.
+  if (args.gate) {
+    const problem = visionPageRouteRegionProblem(selected.modelUri);
+    if (problem) throw new VisionRouteRegionError(problem);
+  }
+  const primaryMember = pageRead ? visionPoolMemberId(selected.modelUri) : null;
+  // The project's fallback, else (page reads in a run only, behind the flag) the deployment's pool default.
+  const poolDefault = !selected.remoteFallbackModelUri && pageRead && args.gate && selected.runtime !== "remote-openai"
+    ? defaultVisionFallbackModel(selected.modelUri)
+    : null;
+  const fallbackUri = selected.remoteFallbackModelUri ?? poolDefault;
   try {
-    return await runRouteVisionRequest(selected, selected.prompt, routeArgs);
+    const served = await runRouteVisionRequest(selected, selected.prompt, routeArgs);
+    if (primaryMember) recordPoolServed("vision", primaryMember);
+    return primaryMember ? { ...served, poolMemberId: primaryMember } : served;
   } catch (error) {
     // A refused request is not a route failure: the fallback route would be refused the same way. A route refused
     // for billing above its bound is the exception: the fallback is a different route with its own count.
     const stop = findVisionGuardStop(error);
     if (stop && stop.reason !== "route-overrun") throw error;
-    if (!selected.remoteFallbackModelUri || selected.runtime === "remote-openai") {
+    if (!fallbackUri || selected.runtime === "remote-openai") {
       throw error;
     }
-    if (args.gate) assertAutomaticModelCallAllowed(selected.remoteFallbackModelUri, "vision fallback model");
+    // The pool default fails over only when the primary could not serve: no host under its routing constraints, a timeout
+    // or a server error, with nothing billed. A content-filter refusal, a refused input or a billed rejected answer is the
+    // page's answer, not an outage.
+    const outage = poolDefault ? visionOutageReason(error, args.signal) : null;
+    if (poolDefault && !outage) throw error;
+    if (args.gate) {
+      const problem = visionPageRouteRegionProblem(fallbackUri);
+      if (problem) {
+        recordPoolFailover("vision", primaryMember, null, "region");
+        throw error;
+      }
+    }
+    const fallbackMember = visionPoolMemberId(fallbackUri);
+    const routingRefusal = findProviderRoutingExclusion(error);
+    const failoverReason = outage ?? (routingRefusal ? "routing" : "error");
+    // Whether the primary's attempt may have been billed: only a routing refusal with no billed attempt behind it is known
+    // to be unbilled (no host accepted it), so the fallback is then the page's only billed read. Anything else counts as
+    // billed (fail closed: the pricing provider values that fallback lower).
+    const primaryBilled = !(routingRefusal && !findVisionOutputRejected(error) && !findVisionBilledUsage(error) && stop?.reason !== "route-overrun");
+    // The deployment's pool default is sent on its member's route: its hosts under its price ceiling.
+    const poolMember = !selected.remoteFallbackModelUri ? poolMemberForModel("vision", fallbackUri, "read", activeCapabilityPools()) : null;
+    const ceiling = poolMember?.priceCeiling ?? null;
+    const fallbackArgs: RouteRequestArgs = ceiling
+      ? { ...routeArgs, priceCeiling: { inputUsdPerMillion: ceiling.inputUsdPerMTok, outputUsdPerMillion: ceiling.outputUsdPerMTok, imageUsd: ceiling.imageUsd, hosts: ceiling.hosts } }
+      : routeArgs;
+    // The fallback is an automatic call: besides the call-time policy it must keep the margin at the fallback route's
+    // current price (automatic-call-margin.ts). Refused: the primary's error stands and no fallback request is sent.
+    let fallbackDecision: ReturnType<typeof assertAutomaticModelCallAllowed> = null;
+    if (args.gate) {
+      const fallbackRoute = poolMember ? poolMemberAutomaticRoute(poolMember) : visionAutomaticRoute(fallbackUri);
+      await prepareAutomaticCallPrices("page-transcription", [fallbackRoute]);
+      try {
+        fallbackDecision = assertAutomaticModelCallAllowed(fallbackUri, "vision fallback model", { kind: "page-transcription", route: fallbackRoute, role: "fallback", primaryBilled, billsPage: pageRead });
+      } catch (refusal) {
+        if (refusal instanceof AutomaticCallRefusedError) {
+          recordPoolFailover("vision", primaryMember, null, "margin");
+          throw error;
+        }
+        throw refusal;
+      }
+    }
     const fallbackProvider = (() => {
       try {
-        return new URL(selected.remoteFallbackModelUri).hostname.toLowerCase();
+        return new URL(fallbackUri).hostname.toLowerCase();
       } catch {
         return "unknown";
       }
     })();
     // Never fail over to a hosted model when the project forbids it.
-    if (!isProviderCallAllowed(args.privacyMode, { provider: fallbackProvider, model: "", modelUri: selected.remoteFallbackModelUri, capability: "vision" })) {
+    if (!isProviderCallAllowed(args.privacyMode, { provider: fallbackProvider, model: "", modelUri: fallbackUri, capability: "vision" })) {
+      recordPoolFailover("vision", primaryMember, null, "privacy");
       throw error;
     }
+    recordPoolFailover("vision", primaryMember, fallbackMember, failoverReason);
 
     const fallbackReason = error instanceof Error ? error.message : String(error);
     // The primary's requests may have been billed (a rejected output, a stream cut off): kept for the caller to
@@ -377,20 +485,29 @@ export async function executeVisionRuntime(args: {
       // Inside the try: a fallback refused at setup still carries the primary's billed failure to the caller.
       const fallbackConfig = normalizeVisionConfig({
         ...args.vision,
-        target: inferModelTarget(selected.remoteFallbackModelUri),
-        modelUri: selected.remoteFallbackModelUri,
+        target: inferModelTarget(fallbackUri),
+        modelUri: fallbackUri,
         remoteFallbackModelUri: null,
       }, args.cfg, args.outputSchema);
       assertProviderAllowed(args.privacyMode, visionCall(fallbackConfig));
-      fallback = await runRouteVisionRequest(fallbackConfig, selected.prompt, routeArgs);
+      fallback = await runRouteVisionRequest(fallbackConfig, selected.prompt, fallbackArgs);
     } catch (fallbackError) {
       if (primaryFailure && fallbackError && typeof fallbackError === "object") primaryFailures.set(fallbackError, primaryFailure);
       throw fallbackError;
     }
 
+    if (fallbackMember && pageRead) recordPoolServed("vision", fallbackMember);
+    if (fallbackDecision) {
+      reportAutomaticCallOutcome(fallbackDecision, {
+        costUsd: fallback.costCents !== undefined ? fallback.costCents / 100 : null,
+        inputTokens: fallback.inputTokens,
+        outputTokens: fallback.outputTokens,
+      }, "vision fallback model");
+    }
     return {
       ...fallback,
       ...(primaryFailure ? { primaryFailure } : {}),
+      ...(fallbackMember && pageRead ? { poolMemberId: fallbackMember } : {}),
       fallbackUsed: true,
       fallbackReason
     };
@@ -458,8 +575,27 @@ function weightedGate(gate: VisionRequestGate, weightCents: number, route: Visio
 /** What one route's request needs from `executeVisionRuntime`'s call, plus whether it is plain page transcription. */
 type RouteRequestArgs = Pick<
   Parameters<typeof executeVisionRuntime>[0],
-  "imagePath" | "mimeType" | "outputPath" | "runner" | "signal" | "cfg" | "privacyMode" | "gate" | "reasoning" | "maxOutputTokens" | "singleAttempt" | "maxImageTokens" | "requestText" | "cacheOrderedPrompt"
+  "imagePath" | "mimeType" | "outputPath" | "runner" | "signal" | "cfg" | "privacyMode" | "gate" | "reasoning" | "maxOutputTokens" | "singleAttempt" | "maxImageTokens" | "requestText" | "cacheOrderedPrompt" | "priceCeiling"
 > & { transcription: boolean };
+
+/** A per-request price ceiling: USD per million prompt and completion tokens, USD per image, and the hosts allowed. */
+export interface VisionPriceCeiling {
+  inputUsdPerMillion: number;
+  outputUsdPerMillion: number;
+  imageUsd: number;
+  hosts: readonly string[];
+}
+
+/** The catalog `max_price`, lowered to a per-request ceiling. */
+function cappedMaxPrice(maxPrice: VisionMaxPrice | null, ceiling: VisionPriceCeiling | undefined): VisionMaxPrice | null {
+  if (!maxPrice || !ceiling) return maxPrice;
+  return {
+    inputUsdPerMillion: Math.min(maxPrice.inputUsdPerMillion, ceiling.inputUsdPerMillion),
+    outputUsdPerMillion: Math.min(maxPrice.outputUsdPerMillion, ceiling.outputUsdPerMillion),
+    imageUsd: Math.min(maxPrice.imageUsd, ceiling.imageUsd),
+    requestUsd: maxPrice.requestUsd,
+  };
+}
 
 /**
  * Sends one page to a resolved route. Private routes are authorized (and,
@@ -521,6 +657,11 @@ async function sendRouteVisionRequest(
     imageTokens: visionImageTokenBound(imageSize, model),
     outputTokens: outputCap.bound,
   });
+  // A price ceiling or host restriction must be sent as one: a route that cannot carry it (not OpenRouter, or no catalog
+  // price to send as max_price) is refused before anything is admitted or sent, never sent unrestricted.
+  if (args.priceCeiling && (isPrivate || billing !== "openrouter" || !pricing.maxPrice)) {
+    throw new UnpricedVisionRouteError(model, "cannot carry the request's price ceiling and host restriction");
+  }
   const knownSize = Boolean(imageSize?.widthPx && imageSize.heightPx);
   console.log(
     `[vision-weight] model=${model} billing=${billing} weightCents=${pricing.weightCents.toFixed(4)} ` +
@@ -543,12 +684,29 @@ async function sendRouteVisionRequest(
     outputCap,
     ...(args.singleAttempt ? { singleAttempt: true } : {}),
   };
+  // The settings this call ran with, recorded next to the model on its usage row (shared model-provenance.ts).
+  const reasoning = args.reasoning as unknown;
+  const modelConfig = {
+    promptMode: requestProfile?.promptMode ?? "template",
+    temperature: requestProfile?.temperature ?? 0,
+    topP: requestProfile?.topP,
+    maxTokens: outputCap.maxTokens ?? undefined,
+    reasoning: typeof reasoning === "string" ? reasoning
+      : reasoning && typeof reasoning === "object" && typeof (reasoning as { effort?: unknown }).effort === "string" ? (reasoning as { effort: string }).effort
+      : reasoning ? "on" : undefined,
+    transcription: args.transcription ? true : undefined,
+  };
   if (!isPrivate) {
-    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, maxPrice: pricing.maxPrice, streaming: args.cfg.visionStreaming });
+    const hosted = await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy,
+      maxPrice: cappedMaxPrice(pricing.maxPrice, args.priceCeiling), streaming: args.cfg.visionStreaming,
+      ...(args.priceCeiling && pricing.maxPrice ? { providerOnly: args.priceCeiling.hosts } : {}) })
+      .catch((error: unknown) => { attachVisionModelConfig(error, modelConfig); throw error; });
+    return { ...hosted, costMetadata: { ...hosted.costMetadata, modelConfig } };
   }
   const call = await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: route.modelUri, capability: "vision", operation: "worker.vision" });
   onUsageModel(call.usageModel);
-  const result = await runVisionRequest({ ...base, runtime: "openai-compatible", model: call.model, baseUrl: call.baseUrl, apiKey: "", fetchImpl: call.fetch, providerLabel: `private:${call.route.alias}`, streaming: args.cfg.visionStreaming });
+  const result = await runVisionRequest({ ...base, runtime: "openai-compatible", model: call.model, baseUrl: call.baseUrl, apiKey: "", fetchImpl: call.fetch, providerLabel: `private:${call.route.alias}`, streaming: args.cfg.visionStreaming })
+    .catch((error: unknown) => { attachVisionModelConfig(error, modelConfig); throw error; });
   const cost = call.cost({ inputTokens: result.inputTokens, outputTokens: result.outputTokens, durationMs: result.latencyMs });
   // The registry's price is an explicit charge for every token of the call.
   const { chargedTokens: _chargedTokens, ...rest } = result;
@@ -557,7 +715,7 @@ async function sendRouteVisionRequest(
     provider: PRIVATE_MODEL_PROVIDER,
     model: call.usageModel,
     costCents: cost.costCents,
-    costMetadata: { ...cost.metadata, servedModel: call.model },
+    costMetadata: { ...cost.metadata, servedModel: call.model, modelConfig },
   };
 }
 
@@ -768,6 +926,8 @@ export async function runVisionRequest(args: {
   gate: VisionRequestGate | null;
   /** Prices and fee caps the request's guard weight assumes; sent to OpenRouter as `provider.max_price`. */
   maxPrice?: VisionMaxPrice | null;
+  /** OpenRouter hosts the request is restricted to, in place of the model profile's (a price-ceiling route). */
+  providerOnly?: readonly string[];
   /** Overrides the model's page-transcription reasoning default (OpenRouter only). */
   reasoning?: OpenRouterReasoning;
   /** Per-model request shape (prompt mode, system message, sampling); see `visionRequestProfileForRoute`. */
@@ -806,6 +966,7 @@ export async function runVisionRequest(args: {
     },
     async (): Promise<VisionRequestResult> => {
       if (args.runtime === "local-cli") {
+        assertLocalCliReaderAllowed();
         const plan = await args.runner.florence2(
           args.imagePath,
           args.outputPath,
@@ -902,6 +1063,10 @@ export async function runVisionRequest(args: {
         // Per-model routing restricted to providers measured to transcribe faithfully.
         ...(isOpenRouter ? openRouterProviderParams(args.model) : {}),
       };
+      if (isOpenRouter && args.providerOnly?.length) {
+        const own = (body as { provider?: Record<string, unknown> }).provider ?? {};
+        Object.assign(body, { provider: { ...own, only: [...args.providerOnly], order: undefined, sort: own.sort ?? "price", allow_fallbacks: true } });
+      }
       // An org or project that turned off China-based providers keeps them out of every attempt: the
       // restriction is applied right before each send (vision-stream.ts `withProviderPolicy`).
       // No upstream provider (or OpenRouter fallback) may bill above the price the guard weighed this

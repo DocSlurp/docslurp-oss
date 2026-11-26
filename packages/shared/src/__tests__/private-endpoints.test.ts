@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   authorizePrivateModelCall,
   configurePrivateCallAudit,
+  foldSystemMessages,
   embeddingConfigSchema,
   isProviderCallAllowed,
   isPrivateNetworkHost,
@@ -185,6 +186,42 @@ describe("authorizePrivateModelCall", () => {
     await expect(authorizePrivateModelCall({ privacyMode: "strict-privacy", modelUri: "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8", capability: "text", operation: "t", auditScope: { projectId: "ws" } }))
       .rejects.toThrow();
     expect(write).not.toHaveBeenCalled();
+  });
+});
+
+describe("models without the system role", () => {
+  const noSystem = { id: "acme/no-system-llm", capability: "text", systemMessage: false };
+
+  it("accepts systemMessage on text models only", () => {
+    expect(parsePrivateModelEndpointRegistry(registry({ models: [noSystem] })).endpoints[0]!.models[0]!.systemMessage).toBe(false);
+    expect(() => parsePrivateModelEndpointRegistry(registry({ models: [{ id: "v", capability: "vision", systemMessage: false }] }))).toThrow(/systemMessage only applies to text models/);
+  });
+
+  it("strips any system message into the user turn; no request ever carries cache_salt", async () => {
+    setPrivateModelEndpointRegistryForTests(JSON.parse(registry({ models: [noSystem, { id: "plain", capability: "text" }] })));
+    process.env.TEST_PRIVATE_GPU1_TOKEN = "secret-token";
+    const bodies: Array<Record<string, unknown>> = [];
+    const baseFetch = vi.fn(async (_url: unknown, init?: RequestInit) => { bodies.push(JSON.parse(String(init?.body))); return new Response("{}"); });
+    const request = JSON.stringify({ model: "m", messages: [{ role: "system", content: "Rules." }, { role: "user", content: "Tenant text." }] });
+    const noSys = await authorizePrivateModelCall({ privacyMode: "standard", modelUri: "llm://private/gpu1/acme/no-system-llm", capability: "text", operation: "t", baseFetch: baseFetch as never });
+    await noSys.fetch("https://gpu1.example.com/v1/chat/completions", { method: "POST", body: request });
+    expect(bodies[0]).toEqual({ model: "m", messages: [{ role: "user", content: "Rules.\n\nTenant text." }] });
+    const plain = await authorizePrivateModelCall({ privacyMode: "standard", modelUri: "llm://private/gpu1/plain", capability: "text", operation: "t", baseFetch: baseFetch as never });
+    await plain.fetch("https://gpu1.example.com/v1/chat/completions", { method: "POST", body: request });
+    expect(bodies[1]).toEqual(JSON.parse(request));
+  });
+
+  it("folds system text ahead of array user content and keeps other turns", () => {
+    expect(foldSystemMessages([
+      { role: "system", content: [{ type: "text", text: "A" }] },
+      { role: "assistant", content: "earlier" },
+      { role: "user", content: [{ type: "image_url", image_url: { url: "x" } }] },
+    ])).toEqual([
+      { role: "assistant", content: "earlier" },
+      { role: "user", content: [{ type: "text", text: "A" }, { type: "image_url", image_url: { url: "x" } }] },
+    ]);
+    const unchanged = [{ role: "user", content: "q" }];
+    expect(foldSystemMessages(unchanged)).toBe(unchanged);
   });
 });
 

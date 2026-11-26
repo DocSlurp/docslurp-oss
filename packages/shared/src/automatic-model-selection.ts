@@ -1,5 +1,5 @@
 /**
- * Models the system never selects on its own.
+ * Models the system never selects on its own: a hard denylist, beside the call-time margin gate.
  *
  * A model on this list is never a fallback, failover, escalation, retry target, Speed boost swap, route-tier pool
  * option, page-router target or chart generator candidate. A caller or operator may still name one explicitly where a
@@ -13,12 +13,14 @@
  * check. Every builder of an
  * automatic list filters through `isAutomaticSelectionDenied`, and automatic-model-selection.test.ts (shared) plus the
  * worker and server lists' own tests fail if a denied family appears in one.
+ *
+ * Empty today. DeepSeek V4.1 Flash was listed from 2026-11-13 to 2026-11-15 (owner decision); it is now admitted by the
+ * margin gate instead
+ * (automatic-call-margin.ts): every automatic call is priced at the highest current price its route can reach, time of
+ * day included, and is skipped unless the billed value covers it by the minimum margin. Keep this list for a model that
+ * must never be picked automatically whatever it costs.
  */
-export const NO_AUTOMATIC_SELECTION_MODEL_FAMILIES: readonly string[] = [
-  // Owner decision 2026-11-13: never auto-escalate or fall back to DeepSeek V4.1 Flash, any build or route.
-  "deepseek-v4.1-flash",
-  "deepseek-v4p1-flash",
-];
+export const NO_AUTOMATIC_SELECTION_MODEL_FAMILIES: readonly string[] = [];
 
 /** Percent-decoding passes before matching (`%252F` is `/` encoded twice). */
 const MAX_DECODE_PASSES = 3;
@@ -63,21 +65,33 @@ function familyPattern(family: string): RegExp {
   return pattern;
 }
 
-/** Whether automatic selection must never pick this model (any build, variant or route of a denied family). */
-export function isAutomaticSelectionDenied(modelOrUri: string | null | undefined): boolean {
+/** Whether `modelOrUri` is any build, variant or route of `family` (the family between separators, never a longer name). */
+export function isModelInFamily(modelOrUri: string | null | undefined, family: string): boolean {
   if (!modelOrUri) return false;
-  const segment = modelFamilySegment(modelOrUri);
   // The family between separators: `-1017` or `.1017` builds, a vendor prefix, a label; never a longer name (`-flashy`).
-  return NO_AUTOMATIC_SELECTION_MODEL_FAMILIES.some((family) => familyPattern(family).test(segment));
+  return familyPattern(family).test(modelFamilySegment(modelOrUri));
+}
+
+/** Whether automatic selection must never pick this model (any build, variant or route of a denied family). */
+export function isAutomaticSelectionDenied(
+  modelOrUri: string | null | undefined,
+  families: readonly string[] = NO_AUTOMATIC_SELECTION_MODEL_FAMILIES,
+): boolean {
+  if (!modelOrUri) return false;
+  return families.some((family) => isModelInFamily(modelOrUri, family));
 }
 
 /** `models` without the denied ones, in order. */
-export function withoutAutomaticSelectionDenied<T extends string>(models: readonly T[]): T[] {
-  return models.filter((model) => !isAutomaticSelectionDenied(model));
+export function withoutAutomaticSelectionDenied<T extends string>(models: readonly T[], families: readonly string[] = NO_AUTOMATIC_SELECTION_MODEL_FAMILIES): T[] {
+  return models.filter((model) => !isAutomaticSelectionDenied(model, families));
 }
 
 /** Throws when an automatic selection list names a denied model; call where such a list is defined. */
-export function assertNoAutomaticSelectionDenied(label: string, models: Iterable<string | null | undefined>): void {
-  const denied = [...models].filter((model): model is string => isAutomaticSelectionDenied(model));
+export function assertNoAutomaticSelectionDenied(
+  label: string,
+  models: Iterable<string | null | undefined>,
+  families: readonly string[] = NO_AUTOMATIC_SELECTION_MODEL_FAMILIES,
+): void {
+  const denied = [...models].filter((model): model is string => isAutomaticSelectionDenied(model, families));
   if (denied.length) throw new Error(`${label} names models that are never selected automatically: ${denied.join(", ")}`);
 }

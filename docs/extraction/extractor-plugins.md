@@ -89,7 +89,7 @@ export function register(host: ExtractorPluginHost): ExtractorPlugin {
       id: "example-vm",
       maxSourceBytes: 500 * 1024 * 1024,
       assertConfigured() { /* throw when the VM image or credentials are missing */ },
-      async run(job, context, signal) { /* one fresh VM; write Markdown to job.output */ return { exitCode: 0, stdout: "{}", stderr: "" }; },
+      async run(job, context, signal) { /* in a VM; write Markdown to job.output */ return { exitCode: 0, stdout: "{}", stderr: "" }; },
       timeoutMs: (pages) => 180_000,
       embeddedImages: { producerId: "example-embedded-images", optionsDigest: "…", read: async (output) => imageSet },
       figures: { producerId: "example-figures" }, // only when DOCSLURP_DOPPLER_IMAGE_EXTRACT is on
@@ -106,7 +106,7 @@ export function register(host: ExtractorPluginHost): ExtractorPlugin {
 - `run` writes Markdown with one form-feed-separated slot per page. Throw `host.SandboxRunError(message, usage)` on
   failure so the usage is recorded; never put raw provider or parser text in the message. The host refuses Markdown
   that is not a regular file or exceeds 256 MiB (`SANDBOXED_PDF_MAX_MARKDOWN_BYTES`) before reading it.
-- `run` may return `ocrPages`: the 1-based pages whose text it read with OCR. Each is billed as one Rich page read.
+- `run` may return `ocrPages`: the 1-based pages whose text it read with OCR. Each is billed as one Scan page read.
   The host requires unique integers within the document's page count and refuses the run otherwise. Omit the field
   when unknown: the host then records no OCR reads for the document. It never infers them for this route.
 - `imageOrientation.orient` returns a record the host validates against `orientationResultSchema`
@@ -122,8 +122,10 @@ export function register(host: ExtractorPluginHost): ExtractorPlugin {
   provider that returns `figures` for a job that did not ask is refused.
 - `run` may return `pageFacts`: Doppler's [page facts](doppler-page-facts.md) (`doppler-page-facts/1` JSON lines, a
   string or the raw bytes) from the same job. The host parses them with a strict, bounded reader and records each
-  page's text layer and scan class (`document_page_facts`); malformed or oversized facts are dropped, never repaired,
-  and never bill or authorize a read.
+  page's text layer, scan class and math and table encoding words (`document_page_facts`); malformed or oversized facts
+  are dropped, never repaired, and never bill. `job.pageFacts.include` names the families to add to the basic level
+  (`pdftomarkdown --page-facts-include`, comma-separated; today `mathtables`); a provider that cannot compute one returns
+  facts without it, which the host reads as unknown.
 - `shardProfile` registers the provider's prior cost profile; calibration refines it from the shard timings it
   records through `context.recordTiming`.
 
@@ -139,11 +141,10 @@ to start; it never moves OCR to the worker host or to a hosted model instead. Se
 - It runs the fixed `worker/scripts/docslurp_ocr.py` CLI inside the VM with exactly those settings and the models
   pinned in `worker/ocr-models.json`, and copies back the CLI's JSON result to `output` and the PNGs it wrote (bounded
   by `maxLongEdge`) to the image directory.
-- It must isolate every job in a fresh VM or microVM, with the requirements below. One job never sees another
-  job's files. Organization membership alone does not establish equal project or API-key authorization; do not reuse
-  a VM across jobs on the basis of `tenantKey`.
+- It runs every job in a VM or microVM with the requirements below. A warm VM may serve jobs of any run or
+  organization one after another; each job's results go back only to that job.
 - `run(job, signal, context)` receives `tenantKey` (the run's organization) and `affinityKey` (the document) for
-  accounting and placement hints. Neither permits sharing a VM security boundary across jobs.
+  accounting, fairness caps and placement hints.
 - `maxSourceBytes` refuses larger inputs before any VM work; `timeoutMs(frames)` bounds one run's wall time;
   `assertConfigured()` throws when the image, models or credentials are missing, which stops the worker at start.
 - The host validates everything it gets back: the result against the shared OCR result schema, page numbers, sizes,
@@ -161,8 +162,9 @@ flag on and no provider (or `assertConfigured()` throwing), the worker refuses t
 - The provider receives a `PageImageReadJob` (`worker/src/extractors/plugins.ts`): `scope` (`orgId`, `runId`) and
   `pages`, each an opaque `key` and the absolute path of a PNG the OCR boundary wrote and the host checked by signature
   and size. It never receives the customer's stored file, a document id or credentials.
-- It reads the pages in a VM or microVM bound to `scope.orgId` for that VM's whole life. The VM may serve several jobs
-  of that organization, never another's, and refuses a job for another organization. The VM has no network beyond the job's own connection, no credentials and no cloud metadata access.
+- It reads the pages in a VM or microVM, which may be a warm VM shared by jobs of any run or organization. Each
+  page's Markdown goes back only to the job that sent it. The VM has no network beyond the job's own connection, no
+  credentials and no cloud metadata access.
 - `read(job, signal)` resolves with `results` (at most one per key: `{ key, status: "read", markdown, inputTokens?,
   outputTokens? }` or `{ key, status: "failed", reason }`, reason one of `timeout`, `refused`, `oversized`, `invalid`,
   `vm-lost`, `capacity`) and `usage`, the provider cost of the job as usage events.
@@ -179,6 +181,11 @@ flag on and no provider (or `assertConfigured()` throwing), the worker refuses t
   before sending the job, so concurrent jobs cannot pass the cap together; without it the host reserves 0. It is required
   with `DOCSLURP_VISION_PAGE_READER` (the worker refuses to start without it), and a vision job whose estimate is 0 or not
   finite is not sent.
+- Optional `privateRoute` (`{ modelUri, capability, baseUrl? }`): the operator-registered private model route the reader
+  serves (`llm://private/<alias>/<model>`, registered in `DOCSLURP_PRIVATE_MODEL_ENDPOINTS` for `capability`). Projects
+  under `local-only` or `strict-privacy` have pages read by the reader only when this resolves as private the same way
+  `llm://private` routes do; without it, or with a route the registry does not hold, they skip the reader before any
+  reader VM starts and keep the recogniser's text ([Quality and visuals](quality-and-visuals.md#the-page-image-reader-under-privacy-modes)).
 - Optional `hostCountry` and `operatorCountry`: ISO 3166-1 alpha-2 codes for where the reader's VMs process pages and for
   the company that operates them, by ownership and jurisdiction (`CN` for a Chinese-owned cloud wherever it is listed).
   Vision page reads require both and apply the organization's provider-region policy to each
@@ -188,6 +195,16 @@ flag on and no provider (or `assertConfigured()` throwing), the worker refuses t
 - Optional `evalScore` (0 to 1) and `evalRef`, together: the reader's composite on the page-OCR tier benchmark and the
   recorded run it comes from. A tier word in `DOCSLURP_OCR_PAGE_READER` ranks the reader by it against the hosted
   escalation reader ([OCR](ocr.md#page-reader)); a reader without it is never chosen by a tier.
+- Optional `warm`: non-blocking start-up for a reader whose VMs take minutes to boot ([OCR](ocr.md#warm-start)).
+  `warm.start(scope)` begins making a reader ready for that organization and run, within the provider's own caps, and
+  returns at once; `warm.status(scope)` answers from memory with `none`, `booting`, `ready` (plus provider-reported
+  `bootMs` and `bootCostCents` for telemetry), `failed` or `refused`. Neither may block, throw for a capacity or boot
+  failure, or send a page: a start binds a VM to `scope` exactly as a job's lease would. `refused` must mean nothing was
+  started or billed (the host then returns the start-up reservation); anything else that ends a start is `failed`. The host sends jobs only once
+  `status` reports `ready`, marked `requireReady: true`; the provider must then use an already ready VM of the scope or
+  reject the job at once (a `capacity` failure), never boot one for it. The first job served by a warmed reader records
+  its boot as provider cost. Optional `warm.minPages`: the reader pages a run should expect before a start-up pays for
+  itself under the provider's own cost model (the host's threshold unless the operator sets one).
 
 At load the worker lists the capability as `page-reader`.
 
@@ -229,10 +246,11 @@ batch?: {
   and organizations, the teardown breaker) before it enters a batch; a refused document never reaches the VM.
 - **Provisional checkpoints.** The checkpoints the first pass writes are re-run by the ordinary loop when the run extracts
   PDFs differently (served from the persisted batch result, no second VM) or when the Markdown a later stage read changed.
-- **Isolation.** The same rules as single-file runs: a fresh VM per batch, no credentials or network in it, bounded output.
-  Every file of the batch belongs to the same organization.
-- **Options.** `math` (the project's `documentExtraction.options["vm-pdf"].math`) and `figures` (the deploy's figure
-  extraction). Workers advertise `workflow.first-pass` only when a batch provider is registered.
+- **Isolation.** The same rules as single-file runs: a VM with no credentials or network, bounded output. Every file of
+  the batch belongs to the job's run (checked against the database), so results land on the right documents.
+- **Options.** `math` (`pdftomarkdown --math`: on unless the project's `documentExtraction.options["vm-pdf"].math` is
+  `false`, with `DOCSLURP_DOPPLER_MATH_DEFAULT` on, the default; still behind the deploy gate `DOCSLURP_FIRST_PASS_MATH`),
+  `figures` (the deploy's figure extraction) and `pageFacts` (as a single-file job's `pageFacts`). Workers advertise `workflow.first-pass` only when a batch provider is registered.
 
 The first pass runs only when the deploy sets `DOCSLURP_FIRST_PASS=on`, the pipeline's `firstPass` is not `off`, and the
 whole fleet advertises the capability; unsetting the flag is the rollback. To roll out to a few organizations first, also
@@ -240,12 +258,33 @@ set `DOCSLURP_FIRST_PASS_ORGS` to a comma-separated list of org ids: runs of any
 skip the first pass. Nothing becomes searchable before the document's
 publish gate passes (`worker/src/pipeline/first-pass-gate.ts`: a clean malware verdict).
 
+## Capability pool members (`poolMembers`)
+
+Every plugin service that reads customer pages is a member of its capability's pool (`@docslurp/shared` `capability-pools.ts`): `text` for a sandboxed PDF provider, `ocr` for a sandboxed OCR provider or a page image reader. The plugin registers one `CapabilityPoolServiceRegistration` per service on its `poolMembers` array:
+
+| Field | Meaning |
+| --- | --- |
+| `capability` | `text`, `ocr` or `vision` |
+| `stage` | `read` (default); `second-read` only for `ocr` |
+| `backend` | the service's provider `id` (`sandboxedPdf.id`, `sandboxedOcr.id`, `pageImageReader.id`) |
+| `engine` | a generic, public-safe label (2-24 lowercase letters, digits, `-`): part of the member id, so never a private name |
+| `regions` | where the service processes pages: `{ region: "US" or "EU", evidence: "endpoint-tag", "provider-docs" or "openrouter-metadata", source, checked }`, at least one; never inferred from a company's headquarters |
+| `automaticFailover` | whether the pool may move to this member on its own |
+| `quality`, `pagesPerDollar` | optional `{ value, evalRef }` measurements |
+| `priority` | optional order among the capability's services (lower first) |
+
+The member id is `<capability>.service.<engine>.<region>` (`text.service.vm-pdf.us`). It is stamped where the member serves pages (`SandboxedPdfResult.poolMemberId`, `sandboxedPdfPoolMember(job)`, page reader usage metadata and summary `poolMemberId`), for per-page records.
+
+The worker refuses to start when a service has no member, when a member states a region other than US, EU or `global` (`global`: an unpinned cloud region; `local` is reserved for core's built-in, customer-owned execution; a plugin renting marketplace GPUs must exclude China-controlled hosts itself), or when `DOCSLURP_CAPABILITY_POOL_<CAPABILITY>` names an id nobody registers. Several plugins may each provide a sandboxed PDF provider when every one is a `text` member: the text pool then runs a job on its first member and fails over to the next automatic member when a member cannot run it (an infrastructure error; a refusal of the input, `refused: true` or `ocrRefused: true`, never fails over). Figures, embedded images, batches and shard profiles are the first member's; a job asking for figures or images fails over only to a member returning them under the same producer id.
+
 ## Isolation requirements
 
-Untrusted files are processed behind a VM or microVM boundary (`AGENTS.md`). A provider must:
+Untrusted files are processed behind a VM or microVM boundary (`AGENTS.md`). The boundary keeps customer bytes away from
+the worker's secrets; it does not separate one job, run or organization from another. VMs may be shared and kept warm
+across jobs of any organization. A provider must:
 
-- run each job in a fresh VM with no network, no credentials and no cloud metadata access;
-- bound input, output, memory and time, and terminate the VM on every exit path;
+- run each job in a VM with no network, no credentials and no cloud metadata access;
+- bound input, output, memory and time, and stop a VM that misbehaves;
 - return only framed, bounded output that the host validates without decoding pixels or parsing the PDF.
 
 ## Host-side PDF parsing that remains

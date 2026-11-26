@@ -1,6 +1,6 @@
 # Security
 
-What protects a self-hosted install: the parser sandbox, malware scanning, secrets and encryption keys, and network exposure. For how the pieces connect, see the [trust boundaries diagram](architecture.md#trust-boundaries).
+What protects a self-hosted install: the parser sandbox, malware scanning, secrets and encryption keys, and network exposure. For how the pieces connect, see the [trust boundaries diagram](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/architecture.md#trust-boundaries).
 
 ## Parser sandbox
 
@@ -44,8 +44,8 @@ The scan policy comes from `resolveMalwareScanPolicy` in `worker/src/tools/runne
 | Variable | Default in production | Default otherwise | Meaning |
 | --- | --- | --- | --- |
 | `DOCSLURP_CLAMAV_REQUIRE_DAEMON` | `false` | `false` | Require `clamdscan`. If it is unavailable, the scan returns an error ("clamdscan is required but unavailable"). |
-| `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | `false`; setting it stops startup | `false` | When `false`, a stale or missing signature database blocks scanning. In development and test only, `true` makes it a warning; anywhere else the worker refuses to start with it set ([development-only settings](configuration.md#development-only-settings)). |
-| `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS` | `24` | `24` | Age after which signatures count as stale. |
+| `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | `false`; setting it stops startup | `false` | When `false`, a stale or missing signature database blocks scanning. In development and test only, `true` makes it a warning; anywhere else the worker refuses to start with it set ([development-only settings](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/configuration.md#development-only-settings)). |
+| `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS` | `24` | `24` | Age after which signatures count as stale. Outside development and test the worker accepts 1 to 72 and refuses to start with anything else. Upstream publishes about once a day, so at `24` a worker that starts just after the newest set turns a day old refuses to start until the next set reaches it; `48` avoids that. |
 | `DOCSLURP_CLAMAV_DB_DIR` | `/var/lib/clamav` | `/var/lib/clamav` | Signature directory. |
 
 Both scan paths apply the same limits (`worker/src/tools/clam-limits.ts`). libclamav's defaults skip files over 100 MB and report them clean. They also stop at a scan size, embedded-file count, nesting depth or scan time and report the remainder clean. DocSlurp raises the size limits above anything quarantine downloads (uploads default to 500 MiB) and sets `AlertExceedsMax`. Any limit that is still hit becomes a `Heuristics.Limits.Exceeded.*` detection, and quarantine refuses the file as `malware-scan-limit-exceeded` whatever the fail-open policy says. `AlertExceedsMax` does not cover the content limits, past which libclamav silently stops normalizing HTML or scripts, looking for embedded PE files or matching PCRE signatures (a `data:` URI past Debian's packaged 10M `MaxHTMLNormalize` was never decoded). Every scan path therefore sets `MaxHTMLNormalize`, `MaxHTMLNoTags`, `MaxScriptNormalize`, `MaxEmbeddedPE` and `PCREMaxFileSize` to 1024M, and `MaxZipTypeRcg`, `MaxPartitions`, `MaxIconsPE`, `MaxRecHWP3`, `PCREMatchLimit` and `PCRERecMatchLimit` explicitly to libclamav 1.4's defaults, so a packaged config cannot lower them (`--max-htmlnormalize=1024M` and so on for clamscan).
@@ -81,7 +81,7 @@ With the Modal parser sandbox, `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` moves the sca
 
 Scanner sessions follow these rules:
 
-- **One document per session.** The session's first command binds it to that document. A command of another document, of no document or of another organization is refused before it reaches a VM. clamd outlives each command, so a document that compromised it could otherwise answer for later documents.
+- **No per-document or per-organization binding.** Today each document's quarantine opens its own session, but a session may run commands of any document or organization. Residue on shared scanner VMs is accepted (`AGENTS.md`).
 - **Network blocked after restore.** Before a restored VM runs anything, a root check confirms it cannot connect to public addresses. Otherwise the VM is refused.
 - **No per-VM secrets in the snapshot.** Every restored VM starts from the same memory, including userspace random-number state. The snapshot holds only the image, the signatures, the clamd config and the loaded daemon. Nothing that needs per-VM randomness, such as keys, tokens or nonces, may be added to it.
 - **Platform-cost builds.** The snapshot build serves every organization, so its VM time is logged as platform cost (`[sandbox-usage] status=platform kind=scanner-build`). It is never charged to the organization whose scan triggered it. A failed build is not retried for 60 s, and scans in that window return an error verdict.
@@ -97,11 +97,18 @@ Scanner sessions follow these rules:
 | `POSTGRES_PASSWORD`, `DATABASE_URL` | The database. Keep the password in `DATABASE_URL` in step with `POSTGRES_PASSWORD`. Postgres reads the password only when its volume is created, so editing the file does not change an existing database. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Object storage. In this stack they are also the MinIO root user and password. |
 | `BETTER_AUTH_SECRET` | Better Auth, the sign-in layer. It is also the last fallback root for file proxy URL tokens, and the root the chat evidence-tag key is derived from when `EVIDENCE_TAG_KEY` is unset. |
-| `EVIDENCE_TAG_KEY` (optional) | Keys the tags that delimit retrieved evidence in chat prompts and the per-org salt at the start of chat system prompts, so documents cannot forge evidence boundaries and orgs never share a cached prompt prefix. At least 32 characters; production refuses a shorter value. |
+| `EVIDENCE_TAG_KEY` (optional) | Keys the tags that delimit retrieved evidence in chat prompts, so documents cannot forge evidence boundaries. At least 32 characters; production refuses a shorter value. |
 | `OAUTH_TOKEN_ENCRYPTION_KEY` | OAuth tokens persisted in `oauth_accounts`. |
 | `CREDENTIALS_ENCRYPTION_KEY` | Connector credentials. |
 | `SECRETS_ENCRYPTION_KEY` | Project secrets stored at rest. It is also the first fallback root for file proxy URL tokens. |
 | `METRICS_SECRET` | Access to the metrics endpoint. |
+| `DOCSLURP_ESTIMATE_SIGNING_SECRET` (preferred) | Signs cost estimates (the `signature` a reindex or project-change estimate returns, sent back as `confirmEstimate`), so a paid change runs only at the price that was shown. At least 32 characters, not a default value, and the same on every API and chat-executor process. Unset, the key comes from `SECRETS_ENCRYPTION_KEY` (which production already requires), then `BETTER_AUTH_SECRET`, then `FILE_TOKEN_SECRET`. Rotating it invalidates outstanding estimates only (clients re-estimate). The worker never needs it. |
+
+### Estimate signing key rollout
+
+Every process that signs or verifies estimates (the API and, when you run one, the chat executor) must resolve the same key. Each logs `estimate signing key source=<variable> fingerprint=<12 hex>` at startup (the fingerprint is an HMAC under the key and reveals nothing about it), and the API serves the same `{ source, fingerprint }` at `GET /ops/estimate-signing` behind the `METRICS_SECRET` bearer. On another machine, `tsx server/scripts/estimate-signing-fingerprint.ts` prints it for that environment. The fingerprints must match.
+
+To introduce `DOCSLURP_ESTIMATE_SIGNING_SECRET` (or rotate it), set the same value on **every** such process in one rollout, then compare fingerprints. Until all of them have it, processes with and without it use different keys and refuse each other's signatures as `estimate_stale`; outstanding estimates from before the change are refused once (clients re-estimate).
 
 ### Rotate AES-GCM at-rest keys
 

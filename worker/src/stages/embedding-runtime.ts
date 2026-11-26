@@ -167,6 +167,7 @@ async function extractTextForEmbeddingRaw(
    * blocks, so a caller without it would index the raw reference Markdown as page text.
    */
   canonicalArtifactUri: string | undefined,
+  allowSourceFallback = true,
 ): Promise<{
   text: string;
   extractor: string;
@@ -212,6 +213,10 @@ async function extractTextForEmbeddingRaw(
     // empty as extracted. Re-reading the source would skip what extraction
     // decided (page images left unread, redactions), so it stays empty.
     return { text: "", extractor: "extract-markdown-artifact", canonicalDocument };
+  }
+
+  if (!allowSourceFallback) {
+    return { text: "", extractor: "no-extracted-text", canonicalDocument };
   }
 
   if (isCsvLike(document)) {

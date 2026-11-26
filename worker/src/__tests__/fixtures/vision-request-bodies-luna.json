@@ -34,12 +34,8 @@
     },
     "provider": {
       "only": [
-        "openai",
         "amazon-bedrock/us-east-1",
         "azure/us"
-      ],
-      "ignore": [
-        "openai/flex"
       ],
       "sort": "price",
       "allow_fallbacks": true,

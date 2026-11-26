@@ -4,7 +4,8 @@ import path from "node:path";
 import { repairMarkdownTables, tableLeakPageCap, tableReliability } from "@docslurp/shared";
 import { describe, expect, it } from "vitest";
 
-import { buildAdaptiveRoutingDecisionSurface, TABLE_LEAK_CAPPED_SIGNAL, TABLE_LEAK_ONLY_SIGNAL, TABLE_UNRELIABLE_SIGNAL } from "../stages/classify-route.js";
+import { encodingRouteFromFlags } from "../lib/doppler-encoding-facts.js";
+import { buildAdaptiveRoutingDecisionSurface, classifyAdaptivePage, encodingReadDecision, TABLE_LEAK_CAPPED_SIGNAL, TABLE_LEAK_ONLY_SIGNAL, TABLE_UNRELIABLE_SIGNAL } from "../stages/classify-route.js";
 import { legacyPageHints } from "../stages/vision-extract.js";
 
 /** Doppler's recorded Markdown (pinned commit) for a generated fixture, repaired as extract-markdown repairs it. */
@@ -19,6 +20,15 @@ const route = (text: string) => {
   if (surface.status !== "ready") throw new Error("not ready");
   return surface.pages[0]!;
 };
+
+// A bulleted agenda laid out as a table: Doppler's Markdown and streaming HTML for routing-table-bullet-list.pdf before
+// d317bea (DocSlurp/doppler#51 keeps bullet lists out of tables). Kept inline so the list repair stays covered.
+const AGENDA_ITEMS = [["Approve the minutes of the last meeting", "Chair", "5 min"], ["Review the quarterly survey results", "Planning", "20 min"],
+  ["Agree the revised district schedule", "Committee", "15 min"], ["Archive the inspection notes", "Records", "5 min"],
+  ["Confirm the next meeting date", "Secretary", "5 min"], ["Any other business", "All", "10 min"]];
+const AGENDA_INTRO = "### Agenda\n\nThe committee reviewed the quarterly report and agreed the revised schedule for the district program. Members noted that the field survey was completed on time and that the archive copy\n\n";
+const AGENDA_PIPE_TABLE = AGENDA_INTRO + AGENDA_ITEMS.map((cells, i) => `| - | ${cells.join(" | ")} |${i === 0 ? "\n| --- | --- | --- | --- |" : ""}`).join("\n");
+const AGENDA_HTML_TABLE = `${AGENDA_INTRO}<table>\n<tbody>\n${AGENDA_ITEMS.map((cells) => `<tr><td>-</td>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("\n")}\n</tbody>\n</table>`;
 
 // Ground truth: what generate-routing-layout-fixtures.py draws (FINANCIAL and the regional table).
 const FINANCIAL = [["Account", "2024", "2025", "Change"], ["Revenue", "48,210", "52,934", "+9.8%"], ["Cost of sales", "21,877", "23,015", "+5.2%"],
@@ -81,8 +91,21 @@ describe("born-digital tables are served from Doppler (owner policy 2026-11-05)"
     expect(route(markdown).ocrDecision?.authorized ?? false).toBe(false);
   });
 
-  it("a bulleted agenda Doppler laid out as a table is rendered as a list and not escalated", () => {
+  it("Doppler writes a bulleted agenda as a list, not a table, and it is not escalated", () => {
+    // Since d317bea (DocSlurp/doppler#51) the converter itself keeps bullet lists out of tables: nothing is left to repair.
     const { markdown, repairs } = recorded("routing-table-bullet-list");
+    expect(repairs).toEqual({ mergedHeaders: 0, listsRestored: 0 });
+    expect(rowsOf(markdown)).toEqual([]);
+    expect(markdown).toContain("- Approve the minutes of the last meeting Chair 5 min");
+    expect(markdown.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(6);
+    const page = route(markdown);
+    expect(page.route).not.toBe("table-heavy");
+    expect(page.ocrDecision?.authorized ?? false).toBe(false);
+  });
+
+  it("a bulleted agenda laid out as a table is rendered as a list and not escalated", () => {
+    // What Doppler wrote for the same fixture before d317bea; other converters can still write it.
+    const { markdown, repairs } = repairMarkdownTables(AGENDA_PIPE_TABLE);
     expect(repairs.listsRestored).toBe(1);
     expect(rowsOf(markdown)).toEqual([]);
     expect(markdown).toContain("- Approve the minutes of the last meeting — Chair — 5 min");
@@ -99,10 +122,53 @@ describe("born-digital tables are served from Doppler (owner policy 2026-11-05)"
     const page = route(broken);
     expect(page.route).toBe("table-heavy");
     expect(page.ocrDecision).toMatchObject({ authorized: true, signals: expect.arrayContaining([TABLE_UNRELIABLE_SIGNAL, "table:mostly-empty-cells"]) });
+
+    const nativeOnly = buildAdaptiveRoutingDecisionSurface({
+      documentId: "doc", filename: "table.pdf", text: broken, pageCount: 1,
+      evidence: { source: "canonical-document", artifactUri: "test:table" },
+      routingV2: true, tableRescue: false,
+    }).pages[0];
+    expect(nativeOnly?.route).toBe("table-heavy");
+    expect(nativeOnly?.ocrDecision?.authorized ?? false).toBe(false);
+  });
+
+  describe("with Doppler's encodings (d317bea): a text-layer table bit is geometry, not the converter's verdict", () => {
+    // The page facts describe the words' layout (columns of words aligned on a whitespace gutter), not what the converter
+    // wrote: the bulleted agenda is written as a list, and with --math the stacked formulas are written as LaTeX, yet both
+    // pages carry `whitespace`. On a prose page the bit adds the table path (a table-heavy route, no read); on a formula
+    // page the text's own route wins. Neither ever asks for a read.
+    const noRead = { authorized: false, confidence: 0.2, signals: [] };
+    it("the bulleted agenda (a list in the Markdown) takes the table path on its whitespace bit, with no read", () => {
+      const text = readFileSync(path.resolve("testdata/pdf-fixtures/doppler-md-html/routing-table-bullet-list.pdf.md"), "utf8");
+      // The recorded facts for this page: tableBits 8 (whitespace), no math.
+      const encodings = encodingRouteFromFlags([], ["whitespace"], false);
+      expect(classifyAdaptivePage(1, text, { routingV2: true }).route).not.toBe("table-heavy");
+      const page = classifyAdaptivePage(1, text, { routingV2: true, encodings });
+      expect(page.route).toBe("table-heavy");
+      expect(page.signals).toContain("encoding-table:whitespace");
+      expect(encodingReadDecision(noRead, encodings).authorized).toBe(false);
+    });
+    it("the growth page (display formulas in aligned columns) stays a formula page; the bit is only a signal, with no read", () => {
+      // pdftomarkdown --stream --html --math, encoding-tables-math.pdf page 2: formulas, no table.
+      const text = ["## Growth model", "", "The quarterly growth rate follows from the ratio of consecutive revenues:", "",
+        "$$g_{t}=\\frac{R_{t}-R_{t-1}}{R_{t-1}},\\bar{g}=\\frac{1}{n}\\sum_{t=1}^{n}g_{t},\\sigma^{2}=\\frac{1}{n-1}\\sum_{t=1}^{n}(g_{t}-\\bar{g})^{2}.$$", "",
+        "Compounded over a year the rate is", "", "$$G=\\prod_{t=1}^{4}(1+g_{t})-1=\\exp(\\sum_{t=1}^{4}\\ln(1+g_{t}))-1.$$"].join("\n");
+      expect(text).not.toContain("<table");
+      // The recorded facts for this page: mathBits 3 (text-math, stacked-math), tableBits 8 (whitespace).
+      const encodings = encodingRouteFromFlags(["text-math", "stacked-math"], ["whitespace"], true);
+      expect(encodings).toMatchObject({ table: "text-layer", math: "text", mathGrid: false });
+      const page = classifyAdaptivePage(2, text, { routingV2: true, encodings });
+      // The LaTeX the math reader wrote wins over the whitespace bit: the route is the one the text gives without encodings.
+      expect(page.route).toBe("formula-heavy");
+      expect(page.route).toBe(classifyAdaptivePage(2, text, { routingV2: true }).route);
+      expect(page.signals).toContain("encoding-math:text");
+      expect(page.signals).not.toContain("encoding-table:whitespace");
+      expect(encodingReadDecision(noRead, encodings).authorized).toBe(false);
+    });
   });
 
   describe("the VM guest's HTML tables get the same repairs (real-Modal finding F3)", () => {
-    /** The streaming converter's `--html` output (Doppler 79957e1, the guest's mode) for the same fixtures, repaired. */
+    /** The streaming converter's `--html` output (Doppler d317bea, the guest's mode) for the same fixtures, repaired. */
     const html = (name: string) => repairMarkdownTables(readFileSync(path.resolve("testdata/pdf-fixtures/doppler-md-html", `${name}.pdf.md`), "utf8"));
     const htmlRows = (markdown: string) => [...markdown.matchAll(/<tr>([\s\S]*?)<\/tr>/g)]
       .map((row) => [...row[1]!.matchAll(/<t[dh]>([\s\S]*?)<\/t[dh]>/g)].map((cell) => cell[1]!));
@@ -119,13 +185,32 @@ describe("born-digital tables are served from Doppler (owner policy 2026-11-05)"
       expect(route(markdown).ocrDecision?.authorized ?? false).toBe(false);
     });
 
-    it("a bulleted agenda laid out as an HTML table is rendered as a list", () => {
+    it("the streaming converter writes the bulleted agenda as a list (d317bea): nothing to repair", () => {
       const { markdown, repairs } = html("routing-table-bullet-list");
+      expect(repairs).toEqual({ mergedHeaders: 0, listsRestored: 0 });
+      expect(markdown).not.toContain("<table");
+      expect(markdown.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(6);
+      expect(route(markdown).route).not.toBe("table-heavy");
+    });
+
+    it("a bulleted agenda laid out as an HTML table is rendered as a list", () => {
+      // The streaming converter's HTML for the same fixture before d317bea.
+      const { markdown, repairs } = repairMarkdownTables(AGENDA_HTML_TABLE);
       expect(repairs).toEqual({ mergedHeaders: 0, listsRestored: 1 });
       expect(markdown).not.toContain("<table");
       expect(markdown).toContain("- Approve the minutes of the last meeting — Chair — 5 min");
       expect(markdown.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(6);
       expect(route(markdown).route).not.toBe("table-heavy");
+    });
+
+    it("keeps all wrapped prose within its original HTML table cell", () => {
+      // The VM guest streams HTML for a 3-column, 4-row grid with wrapped text in each cell.
+      const source = readFileSync(path.resolve("testdata/pdf-fixtures/doppler-md-html/routing-table-large-coverage.pdf.md"), "utf8");
+      const { markdown } = repairMarkdownTables(source);
+      const sentence = "Survey area north of the harbour, measured in the spring and checked again in the autumn season by the field team on site. Records kept at the desk.";
+      expect(htmlRows(markdown)).toEqual(
+        [1, 2, 3, 4].map((row) => [1, 2, 3].map((column) => `Row ${row} column ${column} ${sentence}`)),
+      );
     });
 
     it("a clean HTML financial statement is left exactly as extracted", () => {

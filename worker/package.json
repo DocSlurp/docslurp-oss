@@ -3,27 +3,40 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "dist/temporal/worker.js",
-  "types": "dist/temporal/worker.d.ts",
+  "main": "dist/processor/index.js",
+  "types": "dist/processor/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/temporal/worker.d.ts",
-      "default": "./dist/temporal/worker.js"
+      "types": "./dist/processor/index.d.ts",
+      "default": "./dist/processor/index.js"
+    },
+    "./processor": {
+      "types": "./dist/processor/index.d.ts",
+      "default": "./dist/processor/index.js"
+    },
+    "./processor/pdf-reference": {
+      "types": "./dist/processor/pdf-reference.d.ts",
+      "default": "./dist/processor/pdf-reference.js"
     },
     "./testing": {
       "types": "./src/testing.ts",
       "default": "./src/testing.ts"
+    },
+    "./processor/pdf-text-layer": {
+      "types": "./dist/processor/pdf-text-layer.d.ts",
+      "default": "./dist/processor/pdf-text-layer.js"
+    },
+    "./processor/ocr": {
+      "types": "./dist/ocr/engine.d.ts",
+      "default": "./dist/ocr/engine.js"
     }
   },
   "scripts": {
-    "dev": "tsx watch src/temporal/worker.ts",
-    "start": "node dist/temporal/worker.js",
+    "process:artifacts": "node dist/processor/cli.js",
     "build": "pnpm --filter @docslurp/shared build && tsc -p tsconfig.json && node scripts/copy-routing-assets.mjs && node scripts/bundle-chart-guest.mjs",
     "typecheck": "pnpm --filter @docslurp/shared build && tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:temporal-replay": "vitest run src/__tests__/temporal-replay.test.ts",
-    "temporal:record-histories": "tsx src/test/temporal-replay/record-histories.ts",
     "fixtures:pdf": "node testdata/pdf-fixtures/generate-fixtures.mjs",
     "benchmark:vision": "tsx src/benchmarks/vision-benchmark-cli.ts",
     "benchmark:parsebench": "tsx src/benchmarks/parsebench-benchmark-cli.ts",

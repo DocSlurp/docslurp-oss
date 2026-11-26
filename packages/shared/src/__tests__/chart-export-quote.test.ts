@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-  defaultPipelineFeatures,
+  defaultPipelineFeatures as defaultFastestPipeline,
   DISTINCT_TEST_PRICING,
   estimateChartExportCredits,
   expectedBillableVisuals,
@@ -15,6 +15,9 @@ import {
   QuoteSettingsError,
   resetPricingProviderForTests,
 } from "../index.js";
+
+// AI chart reads are vision reads: Smartest (the ladder's intelligent rung) runs and prices them; Fastest keeps free.
+const defaultPipelineFeatures = { ...defaultFastestPipeline, ladder: { maxRung: "intelligent" as const } };
 
 /**
  * The public quote (POST /v1/estimate, estimateUpload().quote, SDK/CLI/MCP uploadEstimate) prices chart export like

@@ -7,13 +7,14 @@
  * - Never opens the PDF: no native binding, no render, no byte scan of the source. Encryption comes from the facts' doc line.
  * - The stored lines are re-validated by the strict reader (parseDopplerPageFacts), bounded by the host's own measured page
  *   count; storage is not trusted to hold what extract-markdown wrote.
+ * - Pages come back as page evidence (lib/page-evidence-doppler.ts), the one reading of the facts every consumer shares.
  * - Anything short of complete, valid facts is `unavailable`: the router then writes no plan and the document keeps the
  *   existing (v3) routing. Missing or malformed facts never authorize a model read and never raise a charge.
  */
 import { StorageObjectTooLargeError } from "../../tools/storage.js";
 import { dopplerPageFactsByteBudget, parseDopplerPageFacts, type DopplerPageFactsDocument } from "../../lib/doppler-page-facts.js";
-import type { ProbeRow } from "../page-input.js";
-import { probeRowsFromDopplerFacts } from "./doppler-facts.js";
+import type { PageEvidence } from "../../lib/page-evidence.js";
+import { documentEvidenceFromDoppler } from "../../lib/page-evidence-doppler.js";
 
 
 export type FactsProbeUnavailable =
@@ -27,7 +28,7 @@ export type FactsProbeUnavailable =
   | "facts-all-pages-failed";
 
 export type FactsProbeResult =
-  | { status: "ok"; rows: ProbeRow[]; locked: boolean; pagesKnown: number; pagesFailed: number; linesDropped: number }
+  | { status: "ok"; pages: PageEvidence[]; locked: boolean; pagesKnown: number; pagesFailed: number; linesDropped: number }
   | { status: "unavailable"; reason: FactsProbeUnavailable; detail?: string };
 
 export type FactsProbeRunner = (args: {
@@ -64,7 +65,7 @@ export function createDopplerFactsProbeRunner(read: FactsReader): FactsProbeRunn
     const { facts } = parsed;
     const summary = { pagesKnown: facts.summary.pagesKnown, pagesFailed: facts.summary.pagesFailed, linesDropped: facts.summary.linesDropped };
     if (lockedDoc(facts)) {
-      return { status: "ok", rows: probeRowsFromDopplerFacts({ doc: { ...facts.doc, locked: true }, pages: new Map() }, pageCount), locked: true, ...summary };
+      return { status: "ok", pages: documentEvidenceFromDoppler({ doc: { ...facts.doc, locked: true }, pages: new Map() }), locked: true, ...summary };
     }
     if (facts.doc.error) return { status: "unavailable", reason: "facts-unreadable-document" };
     // Every page the host counted must be known (a failed page is known, as the probe's failed row): a partial plan would
@@ -72,9 +73,9 @@ export function createDopplerFactsProbeRunner(read: FactsReader): FactsProbeRunn
     if (facts.pages.size !== pageCount) return { status: "unavailable", reason: "facts-incomplete", detail: `${facts.pages.size}/${pageCount}` };
     // Facts that know nothing about any page are no facts: v3 decides, not a row of failed pages.
     if (facts.summary.pagesFailed >= pageCount) return { status: "unavailable", reason: "facts-all-pages-failed" };
-    const rows = probeRowsFromDopplerFacts(facts, pageCount);
-    if (rows.length !== pageCount) return { status: "unavailable", reason: "facts-incomplete", detail: `${rows.length}/${pageCount}` };
-    // Facts rows never carry a thumbnail; strip one defensively so nothing downstream reads a host path.
-    return { status: "ok", rows: rows.map(({ thumbnail: _thumbnail, ...row }) => row), locked: false, ...summary };
+    // Page evidence has no thumbnail: nothing built from facts can hand the router a host path.
+    const pages = documentEvidenceFromDoppler(facts, { pageCount });
+    if (pages.length !== pageCount) return { status: "unavailable", reason: "facts-incomplete", detail: `${pages.length}/${pageCount}` };
+    return { status: "ok", pages, locked: false, ...summary };
   };
 }

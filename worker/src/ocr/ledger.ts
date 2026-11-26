@@ -1,10 +1,10 @@
 /*
- * Billing and usage for OCR reads (`page-ocr`, one Rich page each; the ledger keys the charge by run, document and page, so a
+ * Billing and usage for OCR reads (`page-ocr`, one OCR page each; the ledger keys the charge by run, document and page, so a
  * retried checkpoint or a second reader never charges it twice):
  *
- * - An uploaded image: every frame the engine read is one Rich page, whether or not it found text (owner decision,
+ * - An uploaded image: every frame the engine read is one OCR page, whether or not it found text (owner decision,
  *   2026-11-05). The OCR VM's cost is the same either way, and a blank image is still a read the customer asked for.
- * - A scanned PDF page: one Rich page only when the read found words; a blank page bills Fast at completion.
+ * - A scanned PDF page: one OCR page only when the read found words; a blank page bills Fast at completion.
  *
  * One compute event per job carries the boundary's measured CPU, peak RSS and wall time; the VM provider's own cost arrives
  * separately through the runner (settleRemote), at provider cost.
@@ -14,17 +14,17 @@ import type { OcrReadOutcome } from "./engine.js";
 
 const HAS_WORDS = /[\p{L}\p{N}]/u;
 
-type OcrLedger = Pick<PipelineUsageEventLedger, "chargeRichPage" | "enqueue">;
+type OcrLedger = Pick<PipelineUsageEventLedger, "chargeOcrPage" | "enqueue">;
 
 /**
- * Charge the job's pages as Rich reads (every frame of an image; each PDF page with words) and record the job's measured
+ * Charge the job's pages as OCR reads (every frame of an image; each PDF page with words) and record the job's measured
  * compute. Returns the pages charged.
  */
 export function recordOcrReads(ledger: OcrLedger, documentId: string, outcome: OcrReadOutcome, context: { stage: string; kind: "image" | "pdf"; replay?: boolean }): number[] {
   const charged: number[] = [];
   for (const page of outcome.pages) {
     if (context.kind === "pdf" && !HAS_WORDS.test(page.text)) continue;
-    ledger.chargeRichPage({ documentId, pageNumber: page.pageNumber, readBy: "page-ocr", model: `ppocr:${page.recogniser}` });
+    ledger.chargeOcrPage({ documentId, pageNumber: page.pageNumber, readBy: "page-ocr", model: `ppocr:${page.recogniser}` });
     charged.push(page.pageNumber);
   }
   if (context.replay) return charged;

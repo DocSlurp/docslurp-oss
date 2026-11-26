@@ -1,4 +1,9 @@
+import { VM_PDF_MAX_SOURCE_BYTES } from "@docslurp/shared";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
+import { containsPdfEncryptName } from "../lib/quarantine-bytes.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -16,7 +21,7 @@ import {
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { quarantineScanSnapshotEnabled, type CommandRunner } from "../tools/runner.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
-import { sha256Bytes, verifyQuarantineUpload } from "../sandbox/source-integrity.js";
+import { sha256Bytes, sha256File, verifyQuarantineUpload } from "../sandbox/source-integrity.js";
 import { chartExportActive, chartExportConfigOf, chartExportModelsActive } from "../chart-export/config.js";
 import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
 import { parserImageCapability } from "../sandbox/startup.js";
@@ -24,6 +29,26 @@ import { CHART_INLINE_SLOT, chartExportInlineEnabled, chartInlineSlotValue, inli
 import { INLINE_COMMAND_BUDGET_CAPABILITY } from "../chart-export/inline-guest.js";
 import { chartExportVmUsageEvent, deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import { applyParseSource, clearParseSource, originalSourceForQuarantine } from "../lib/parse-source.js";
+
+/** Keep the header and enough overlap for a slash, seven escaped name bytes and a delimiter. */
+export async function quarantineSourceEvidence(file: string) {
+  const hash = createHash("sha256");
+  let bytes = Buffer.alloc(0);
+  let tail: Buffer = Buffer.alloc(0);
+  let encryptName = false;
+  for await (const chunk of createReadStream(file)) {
+    const data = chunk as Buffer;
+    hash.update(data);
+    if (bytes.length < 1024) bytes = Buffer.concat([bytes, data.subarray(0, 1024 - bytes.length)]);
+    if (!encryptName && bytes.subarray(0, 5).toString("latin1") === "%PDF-") {
+      const window = Buffer.concat([tail, data]);
+      // Appending an ordinary name byte avoids treating the end of a chunk as a delimiter.
+      encryptName = window.includes("/Encrypt") || containsPdfEncryptName(Buffer.concat([window, Buffer.from("x")]));
+      tail = Buffer.from(window.subarray(-32));
+    }
+  }
+  return { bytes, scannedSha256: hash.digest("hex"), encryptName: encryptName || containsPdfEncryptName(tail) };
+}
 
 export class QuarantineStage implements Stage {
   readonly name = "quarantine";
@@ -44,7 +69,7 @@ export class QuarantineStage implements Stage {
     // snapshot and terminated when the document's checks finish. No VM ever serves a second document (council M1): a
     // document that compromised the daemon could otherwise answer for every later one. Off: the stage runs as before.
     const snapshot = quarantineScanSnapshotEnabled();
-    const perDocument = <T>(fn: () => Promise<T>): Promise<T> => snapshot ? this.runner.withMalwareScanner(state.run.orgId, fn) : fn();
+    const perDocument = <T>(fn: () => Promise<T>): Promise<T> => snapshot ? this.runner.withMalwareScanner(fn) : fn();
     await runDocuments(documents, state.docConcurrency, async (document) => {
       const key = buildArtifactStorageKey(...runArtifactRoot(state.run, document.userId).split("/"), "quarantine", `${document.id}.json`);
       const artifactSlot = `${document.id}:quarantine`;
@@ -68,6 +93,7 @@ export class QuarantineStage implements Stage {
               trustedTempDownloadPattern("docslurp-quarantine-", document),
               {
                 maxBytes: Math.max(
+                  document.mimeType === "application/pdf" ? VM_PDF_MAX_SOURCE_BYTES : 0,
                   this.config.quarantineMaxSingleEntryBytes,
                   this.config.quarantineMaxTotalUncompressedBytes
                 )
@@ -76,10 +102,11 @@ export class QuarantineStage implements Stage {
 
             const copyDir = await mkdtemp(path.join(tmpdir(), "docslurp-quarantine-copy-"));
             try {
-              const bytes = await readFile(tempFile);
+              const evidence = vmOnlyParsing() ? await quarantineSourceEvidence(tempFile) : undefined;
+              const bytes = evidence?.bytes ?? await readFile(tempFile);
               // The scanned bytes must be the bytes the server hashed. Their hash is what the decision binds parsers of the
               // upload to (council R8-L1), so a swap after this scan is refused even for a row without a server hash.
-              const scannedSha256 = sha256Bytes(bytes);
+              const scannedSha256 = evidence?.scannedSha256 ?? sha256Bytes(bytes);
               // The upload has no parse decision yet (this scan records it), so the parsers' decision gate, which refuses
               // an object without one in production, does not apply; the hash binding and the unreadable-key refusal do.
               verifyQuarantineUpload(original, scannedSha256);
@@ -88,7 +115,7 @@ export class QuarantineStage implements Stage {
               // Inline charts need an image whose guest charges them against this command's budget, and (free tier) a grant
               // from the org's free-VM cap. Either missing: no chart request; a counted refusal stands in for the answer.
               const wanted = inlineChartRequest(state.run.pipeline, document.mimeType, process.env);
-              const inlineRefusal = wanted ? await inlineChartAdmission({ pipeline: state.run.pipeline, documentId: document.id, runId: state.run.id, orgId: state.run.orgId ?? null, store: state.store }) : null;
+              const inlineRefusal = wanted ? await inlineChartAdmission({ pipeline: state.run.pipeline, documentId: document.id, runId: state.run.id, orgId: state.run.orgId ?? null, budgets: state.store?.budgets }) : null;
               const charts = inlineRefusal ? null : wanted;
               const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(charts ? { charts } : {}), ...(signal ? { signal } : {}) });
               const verified = verifyIntakeFileFacts(document, inspection);
@@ -98,6 +125,7 @@ export class QuarantineStage implements Stage {
                 filename: document.filename,
                 declaredMimeType: verified?.scanDeclaredMimeType ?? document.mimeType,
                 bytes,
+                hostEncryptName: evidence?.encryptName,
                 tempFile,
                 runner: this.runner,
                 policy: this.config,
@@ -113,10 +141,9 @@ export class QuarantineStage implements Stage {
               if (artifact.decision === "accepted" && artifact.pdfDecryption?.status === "decrypted") {
                 if (!copyPath) throw new Error("encrypted PDF accepted without its scanned copy");
                 const stored = performance.now();
-                const copy = await readFile(copyPath);
                 const copyKey = buildArtifactStorageKey(...runArtifactRoot(state.run, document.userId).split("/"), "quarantine", `${document.id}.scanned.pdf`);
-                parseCopy = { key: copyKey, sha256: sha256Bytes(copy) };
-                await this.storage.putBytes(copyKey, copy, "application/pdf");
+                parseCopy = { key: copyKey, sha256: await sha256File(copyPath) };
+                await this.storage.streamToStorage(copyKey, createReadStream(copyPath), "application/pdf");
                 artifact.pdfDecryption.parseSource = { uri: this.storage.uri(copyKey), sha256: parseCopy.sha256, storeMs: Math.round(performance.now() - stored) };
               }
               // Fail closed (council R7-H1): every accepted document gets this build's parse decision on its own row (its scanned
@@ -124,13 +151,13 @@ export class QuarantineStage implements Stage {
               // parses a document without one (lib/parse-source.ts).
               const accepted = artifact.decision === "accepted";
               const decision = { copy: parseCopy, scannedSha256 };
-              if (state.store?.setDocumentParseSource) {
-                if (!(await state.store.setDocumentParseSource(state.run.id, document.id, accepted ? decision : null))) {
+              if (state.store) {
+                if (!(await state.store.records.setDocumentParseSource(state.run.id, document.id, accepted ? decision : null))) {
                   throw new Error(`parse decision of document ${document.id} was not recorded`);
                 }
               } else if (parseCopy || (document.parseSourceDecision !== undefined && document.parseSourceDecision !== "unscanned-allowed")) {
                 // A loaded document (or a copy to point at) needs the decision persisted: later activities reload it.
-                throw new Error("parse decision cannot be recorded: the store cannot persist it");
+                throw new Error("parse decision cannot be recorded: the state has no store");
               }
               if (accepted) applyParseSource(document, decision);
               else clearParseSource(document);
@@ -160,8 +187,8 @@ export class QuarantineStage implements Stage {
               else if (state.artifactLedger.readDocument(document.id, CHART_INLINE_SLOT)) state.artifactLedger.recordDocument(document.id, CHART_INLINE_SLOT, chartInlineSlotValue(artifactUri, false));
               if (verified && !verified.refused) {
                 // Persist what the bytes are over the API's provisional record; format-detect and routing read it.
-                if (!state.store?.setDocumentFileFacts) throw new Error("file facts verified but the store cannot persist them");
-                await state.store.setDocumentFileFacts(state.run.id, document.id, verified.facts);
+                if (!state.store) throw new Error("file facts verified but the state has no store to persist them");
+                await state.store.records.setDocumentFileFacts(state.run.id, document.id, verified.facts);
                 document.fileFacts = verified.facts;
                 document.mimeType = verified.facts.mimeType;
               }
@@ -203,7 +230,8 @@ export async function inlineChartAdmission(args: {
   documentId: string;
   runId: string;
   orgId: string | null;
-  store: { reserveChartExportFreeVmRun?(a: { orgId: string; runId: string; documentId: string; perHour: number }): Promise<boolean> } | undefined;
+  /** The fleet budgets of the run's store; none (an unbound state) refuses a free run (fail closed). */
+  budgets: Pick<import("../db/fleet-budgets.js").FleetBudgets, "reserveChartExportFreeVmRun"> | undefined;
   env?: Readonly<Record<string, string | undefined>>;
   hasCapability?: (capability: string) => boolean | "present" | "missing" | "sandbox-not-ready";
 }): Promise<InlineCharts | null> {
@@ -221,7 +249,7 @@ export async function inlineChartAdmission(args: {
     return { status: "refused", reason: "image-unsupported", ms: 0 };
   }
   if (chartExportModelsActive(args.pipeline, env)) return null;
-  const reserve = args.store?.reserveChartExportFreeVmRun?.bind(args.store);
+  const reserve = args.budgets?.reserveChartExportFreeVmRun.bind(args.budgets);
   let granted = false;
   if (reserve && args.orgId) {
     try {

@@ -3,6 +3,7 @@ import { withBackgroundSpan } from "@docslurp/shared/observability";
 
 import {
   WORKER_CAPABILITY_PROTOCOL,
+  type WorkerAdvertisedConfig,
   type WorkerCapability,
 } from "@docslurp/shared";
 
@@ -26,6 +27,8 @@ export interface WorkerCapabilityProbes {
   creditLeasesActive: () => Promise<boolean>;
   /** documents.lexical_searchable_at exists (0051). */
   lexicalColumnPresent: () => Promise<boolean>;
+  /** The page read charge settlement trigger exists (0185): this worker may write OCR page class charges. */
+  ocrPageClassSettlement?: () => Promise<boolean>;
 }
 
 /** Capabilities this build supports, given runtime config and schema. */
@@ -37,11 +40,16 @@ export async function resolveWorkerCapabilities(probes: WorkerCapabilityProbes):
     "workflow.page-range-shards",
     "workflow.quarantine-shards",
     "workflow.quarantine-document-threshold",
+    // This build resolves DOCSLURP_PROFILE and enforces every DOCSLURP_DISABLE token at execution (release R0).
+    "extraction.config-v1",
   ];
-  const [leases, lexical] = await Promise.all([
+  const [leases, lexical, ocrSettlement] = await Promise.all([
     probes.creditLeasesActive().catch(() => false),
     probes.lexicalColumnPresent().catch(() => false),
+    probes.ocrPageClassSettlement?.().catch(() => false) ?? Promise.resolve(false),
   ]);
+  // Bills OCR route reads in the OCR page class and settles Fast with page rules 2 (pipeline/ocr-page-class.ts).
+  if (ocrSettlement) capabilities.push("billing.ocr-page-class");
   if (leases) capabilities.push("billing.credit-leases");
   if (lexical) capabilities.push("search.early-lexical");
   // Only a worker whose PDF provider converts batches can run a first pass: without it the fleet never records one.
@@ -66,6 +74,20 @@ export function lexicalColumnProbe(sql: Client): () => Promise<boolean> {
   };
 }
 
+/** Cached once present; re-checked every 5 minutes while missing: the settlement trigger of migration 0185. */
+export function ocrPageClassSettlementProbe(sql: Client): () => Promise<boolean> {
+  let state: { present: boolean; checkedAt: number } | null = null;
+  return async () => {
+    const now = Date.now();
+    if (state && (state.present || now - state.checkedAt < 5 * 60_000)) return state.present;
+    const [row] = await sql<{ present: boolean }[]>`
+      select exists (select 1 from pg_trigger where tgname = 'usage_events_settle_page_read_charge' and not tgisinternal) as present
+    `;
+    state = { present: row?.present === true, checkedAt: now };
+    return state.present;
+  };
+}
+
 export interface WorkerCapabilityRegistryOptions {
   sql: Client;
   instanceId: string;
@@ -73,12 +95,18 @@ export interface WorkerCapabilityRegistryOptions {
   taskQueue: string;
   buildId: string | null;
   capabilities: () => Promise<WorkerCapability[]>;
+  /** What this worker advertises about its configuration (`worker_capabilities.config`, migration 0182). */
+  config?: () => WorkerAdvertisedConfig | null;
   intervalMs?: number;
   log?: (line: string) => void;
 }
 
 function isUndefinedTable(error: unknown): boolean {
   return (error as { code?: string } | null)?.code === "42P01";
+}
+
+function isUndefinedColumn(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === "42703";
 }
 
 /** Host key: the Fly machine id, else hostname plus pid (several local workers per host). */
@@ -96,6 +124,8 @@ export class WorkerCapabilityRegistry {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastAdvertised: string | null = null;
   private missingTableLogged = false;
+  /** Migration 0182 (`config`) is missing: heartbeat without it, re-checked with the schema cache. */
+  private configColumnMissingAt: number | null = null;
   private readonly log: (line: string) => void;
   readonly intervalMs: number;
 
@@ -106,12 +136,12 @@ export class WorkerCapabilityRegistry {
 
   private schemaCache: { when: number | null; at: number } | null = null;
 
-  /** Newest applied migration (drizzle journal `when`), re-read every 5 minutes. */
+  /** When the newest migration was applied (epoch ms, from the runner's ledger), re-read every 5 minutes. */
   private async schemaAppliedWhen(): Promise<number | null> {
     const now = Date.now();
     if (this.schemaCache && now - this.schemaCache.at < 5 * 60_000) return this.schemaCache.when;
     const rows = await this.options.sql<{ latest: string | number | null }[]>`
-      select max(created_at) as latest from drizzle.__drizzle_migrations
+      select (extract(epoch from max(applied_at)) * 1000)::bigint as latest from docslurp_migrations.applied
     `.catch(() => null);
     const latest = rows?.[0]?.latest;
     const when = latest === null || latest === undefined ? null : Number(latest);
@@ -125,6 +155,20 @@ export class WorkerCapabilityRegistry {
     try {
       const capabilities = await this.options.capabilities();
       const schemaWhen = await this.schemaAppliedWhen();
+      const config = this.options.config?.() ?? null;
+      const configColumn = config !== null && (this.configColumnMissingAt === null || Date.now() - this.configColumnMissingAt > 5 * 60_000);
+      if (configColumn) {
+        try {
+          await this.upsert(capabilities, schemaWhen, config);
+          this.configColumnMissingAt = null;
+          this.logAdvertised(capabilities, config);
+          return true;
+        } catch (error) {
+          if (!isUndefinedColumn(error)) throw error;
+          if (this.configColumnMissingAt === null) this.log("[worker-capabilities] worker_capabilities.config missing (migration 0182 not applied); advertising capabilities without the posture digest");
+          this.configColumnMissingAt = Date.now();
+        }
+      }
       await sql`
         insert into worker_capabilities (
           instance_id, identity, task_queue, build_id, protocol, capabilities,
@@ -147,14 +191,7 @@ export class WorkerCapabilityRegistry {
           last_seen_at = now(),
           stopped_at = null
       `;
-      const advertised = `${buildId ?? "auto"}:${capabilities.join(",")}`;
-      if (advertised !== this.lastAdvertised) {
-        this.lastAdvertised = advertised;
-        this.log(
-          `[worker-capabilities] registered instance=${instanceId} identity=${identity} taskQueue=${taskQueue} ` +
-          `buildId=${buildId ?? "auto"} protocol=${WORKER_CAPABILITY_PROTOCOL} capabilities=${capabilities.join(",") || "none"}`,
-        );
-      }
+      this.logAdvertised(capabilities, null);
       return true;
     } catch (error) {
       if (isUndefinedTable(error)) {
@@ -167,6 +204,45 @@ export class WorkerCapabilityRegistry {
       }
       return false;
     }
+  }
+
+  private async upsert(capabilities: WorkerCapability[], schemaWhen: number | null, config: WorkerAdvertisedConfig): Promise<void> {
+    const { sql, instanceId, identity, taskQueue, buildId } = this.options;
+    await sql`
+      insert into worker_capabilities (
+        instance_id, identity, task_queue, build_id, protocol, capabilities, config,
+        schema_applied_when, started_at, last_seen_at, stopped_at
+      ) values (
+        ${instanceId}, ${identity}, ${taskQueue}, ${buildId}, ${WORKER_CAPABILITY_PROTOCOL},
+        ${sql.array(capabilities)}::text[], ${sql.json(config as never)}, ${schemaWhen}, now(), now(), null
+      )
+      on conflict (instance_id) do update set
+        identity = excluded.identity,
+        task_queue = excluded.task_queue,
+        build_id = excluded.build_id,
+        protocol = excluded.protocol,
+        capabilities = excluded.capabilities,
+        config = excluded.config,
+        schema_applied_when = excluded.schema_applied_when,
+        started_at = case
+          when worker_capabilities.identity = excluded.identity then worker_capabilities.started_at
+          else now()
+        end,
+        last_seen_at = now(),
+        stopped_at = null
+    `;
+  }
+
+  private logAdvertised(capabilities: WorkerCapability[], config: WorkerAdvertisedConfig | null): void {
+    const { instanceId, identity, taskQueue, buildId } = this.options;
+    const advertised = `${buildId ?? "auto"}:${capabilities.join(",")}:${config?.postureDigest ?? ""}`;
+    if (advertised === this.lastAdvertised) return;
+    this.lastAdvertised = advertised;
+    this.log(
+      `[worker-capabilities] registered instance=${instanceId} identity=${identity} taskQueue=${taskQueue} ` +
+      `buildId=${buildId ?? "auto"} protocol=${WORKER_CAPABILITY_PROTOCOL} capabilities=${capabilities.join(",") || "none"}` +
+      (config ? ` extractionConfig=${config.extractionConfig ?? "none"} posture=${config.postureDigest ?? "none"}` : ""),
+    );
   }
 
   /** Register now (bounded wait) and keep heartbeating until stop(). */

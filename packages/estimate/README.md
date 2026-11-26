@@ -89,6 +89,43 @@ PDF facts (counts are over the sampled pages):
 | `ruledTablePages` | Pages table-heavy from ruled grids alone: rules (stroked horizontal and vertical lines and rectangle edges, thin filled rectangles; at most 3 pt thick, at least 8 pt long, meeting within 2.5 pt) form a grid of at least 2 horizontals and 3 verticals; a grid of 5 or more rows, or grids covering 40% of the page on a 200 × 200 raster. Tables only the extractor finds are not seen |
 | `routePages` | Sampled pages per cost route, as production routes them (`pageCostRoute` in `@docslurp/shared`): `ocr-read` (no text-layer word, something drawn: scan-fill OCR reads it), `ocr-blank` (nothing to read), `table` (ruled grids unknown or table-heavy: the table path), `text`, `unknown` |
 | `sampledTextEquivalents`, `sampledAreaEquivalents`, `sampledPageEquivalents`, `maxPageEquivalents` | Page equivalents of the sampled pages by the rule billing measures with (`page-equivalents.ts`): a page counts as the larger of 1, its text pages (60 lines or 3,500 characters a page) and its area in Letter pages (capped at 8). A page packed with tiny, invisible or off-page text, or an oversized page, counts as the pages it holds |
+| `pageEncodings` | How math and tables are encoded on the sampled pages: `[mask, pages]` pairs, one per distinct page mask, sorted by mask; the pages add up to `sampledPages`. A histogram, never a per-page array. Bits (`PDF_PAGE_ENCODING_BITS` in `@docslurp/shared`, below); `pdfPageEncodingPages(pageEncodings, "mathFont")` gives the pages with one (a lower bound) and the partial pages without it |
+| `taggedFormulas`, `taggedTables`, `taggedMathSources`, `taggedTruncated?` | The whole document's structure tree: /Formula and /Table elements (custom types through the RoleMap), and formulas whose source is recoverable (TeX-like Alt or ActualText, a MathML associated file or MathML structure). 0 when the document is untagged; absent when the document's content budget was spent before the tree was read; `taggedTruncated` when the bounded walk (50,000 elements, 64 levels, each object once, source reads within the content budget) stopped early or met a root or kid that does not resolve, so the counts are lower bounds |
+
+Page encoding bits (a page can carry several; read from the page's own content stream and structure tree, never
+rendered; font names, text and element text are only classified into these bits and never leave the profiler):
+
+| Bit | Name | Set when the page |
+|---|---|---|
+| 0 | `mathFont` | shows glyphs from a math-class font with a Unicode mapping: TeX math families, an OpenType MATH table or a name with "Math", KaTeX/MathJax fonts; Symbol and OpenSymbol only inside a line (never a bullet) |
+| 1 | `stackedMath` | has two-dimensional math: math glyphs over each other (baselines 0.3 to 3 em apart, overlapping across) or a fraction bar with text right above and below |
+| 2 | `mathSource` | has recoverable formula source: TeX-like ActualText, a tagged formula with TeX-like Alt or ActualText, MathML structure or a MathML associated file, or shows math in a document with a MathML associated file |
+| 3 | `actualText` | marks content with ActualText (any replacement text) |
+| 4 | `formulaStrip` | places a short, wide image in text: 8 to 100 pt tall, at least 1.6 times as wide, under 6% of the page and 85% of its width, on a page of 10 or more glyphs, not repeated like furniture |
+| 5 | `glyphOutlines` | draws three or more small clusters (120 pt a side at most) of filled curve paths with 6 or more curves and 4 per path: text or math converted to outlines |
+| 6 | `type3BitmapFont` | shows glyphs from a Type 3 font whose glyph procedures paint images (bitmap fonts) |
+| 7 | `unmappedMathFont` | shows glyphs from a math-class font without a Unicode mapping |
+| 8 | `ruleGrid` | has a ruled grid (`ruledTablePages`' grid rule, any size) |
+| 9 | `horizontalRuleTable` | has a table drawn with horizontal rules only: three or more rules sharing both ends, no vertical rule across them, a header row in the first gap, a gap of two or more rows, and rows with column gaps (lined forms, heading underlines and footnote rules are not) |
+| 10 | `taggedTable` | is named by a /Table element or its descendants |
+| 11 | `taggedFormula` | is named by a /Formula element or its descendants |
+| 12 | `tableImage` | places a lossless (not JPEG) image 48 pt or taller, 5 to 60% of the page and 40% of its width wide, in a page of 30 or more words. A chart in a PNG looks the same |
+| 13 | `mathGrid` | has a matrix-like grid of math glyphs: two text-size rows of two or more aligned columns, a delimiter on both sides spanning them (chained extension glyphs, a glyph set large, a short vertical rule or a tall path) and no fraction bar between them. Conservative: a matrix whose brackets are single font glyphs is not seen, and aligned equations, big-operator limits and tables are not matrices |
+| 15 | `partial` | was not read to the end, hit a cap or a work budget, showed glyphs from a font whose class could not be read (an unsupported filter, a predictor or external data, a stream cut or corrupt before its answer, too many glyph procedures, the encoding facts' read budget or the font cache spent), checked 1 MiB of ActualText, saved more graphics states than the walker keeps or restored one it never saved, or its structure tree was not read: its bits are a lower bound |
+
+Tables aligned by whitespace alone are not detected: the profiler places words only by estimate (half an em a glyph),
+which cannot find column gaps reliably without font metrics.
+
+### Per-page stat stream (local output)
+
+`estimator.profileWithPageStats(file, head, tail)` (Node: `profilePathWithPageStats`; Python:
+`profile_with_page_stats` and `profile_path_with_page_stats`; ABI: `ds_probe_pages`) returns the same profile and,
+beside it, `pageStats`: JSONL with one object per sampled page, `{"page":12,"mask":3,"counts":1110}`. `page` is the
+1-based page number, `mask` the page's encoding bits, and `counts` packs one 4-bit log2 bucket (0 for none, else
+`min(15, floor(log2 n) + 1)`) per entry of `PDF_PAGE_STAT_COUNTS`, entry `i` in bits `4i` to `4i+3`: words, glyphs,
+math glyphs, images, path operations, ruling lines, glyph-outline clusters, formula strips (`unpackPdfPageStatCounts`
+decodes it). It is content-free and bounded like the profile (24 lines at most), for local and SDK use; it is never
+part of the profile and the server does not read it.
 
 The thresholds (significant image size, the raster rule, repeated-image detection, the text page rule) come from
 `profiler-rules.json`, generated from `@docslurp/shared`, so the profiler and the worker read the same numbers.
@@ -137,10 +174,14 @@ const { files, request, stats, partial, cancelled } = await estimateFiles(estima
 - **Quotes.** `requestQuote({ files, apiKey, project?, speedBoost?, origin? })` posts to
   `POST /v1/uploads/estimate` (an API key with the `ingest` scope). The answer is labelled an estimate: a profile
   never changes what an upload is charged, which the worker measures as it processes the files.
-- **Errors.** `EstimatorError.code` is `invalid_request`, `crashed`, `worker_failed` or `quote_failed`. After
-  `crashed`, the estimator has already started a fresh module instance.
-- **Memory.** An estimator uses one WebAssembly memory of at most 256 MiB for its lifetime; after a `crashed` error it
-  reuses it. Run big batches through `@docslurp/estimate/worker`: a heavy PDF blocks an inline caller's event loop for
+- **Errors.** `EstimatorError.code` is `invalid_request`, `crashed` (a panic, with its message), `out_of_memory` (the
+  file needed more than the module's memory), `worker_failed` or `quote_failed`. After `crashed` or `out_of_memory`,
+  the estimator has already started a fresh module instance, and `profile` has retried the file once without loading
+  the whole document, so a PDF still gets its page count; the error is raised only when that retry fails too.
+- **Memory.** An estimator uses one WebAssembly memory of at most 256 MiB at a time; a trap replaces it with a fresh
+  one (a memory cannot shrink, and reusing one a file grew to its maximum would starve every later file). A PDF whose
+  declared objects would not fit a whole-document load gets its page count from a bounded read of its page tree
+  instead, with a note and no page facts. Run big batches through `@docslurp/estimate/worker`: a heavy PDF blocks an inline caller's event loop for
   a second or more, the worker's caller for a few milliseconds (`test/progress.test.mjs` measures both).
 
 ## Development

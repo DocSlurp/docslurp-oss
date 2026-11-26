@@ -75,7 +75,7 @@ describe("unsafe overrides", () => {
   // #398 council: settings whose value weakens protection rather than an on/off fail-open flag.
   const UNSAFE_VALUES: Record<(typeof UNSAFE_VALUE_SETTINGS)[number], { unsafe: string[]; safe: Array<string | undefined> }> = {
     DOCSLURP_CLAMAV_ENABLED: { unsafe: ["false", "0", "no", "off", "typo"], safe: [undefined, "", "true", "1", "yes", "on"] },
-    DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: { unsafe: ["25", "999999", "0", "-1", "NaN", "1+999"], safe: [undefined, "", "1", "12", "24"] },
+    DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: { unsafe: ["73", "100", "999999", "0", "-1", "NaN", "1+999", "072", "7.2"], safe: [undefined, "", "1", "12", "24", "25", "48", "69", "72"] },
     QUARANTINE_ENABLED: { unsafe: ["false", "0", "no", "off", " OFF ", "flase"], safe: [undefined, "", "true", "1", "yes", "on", " TRUE "] },
     DOCSLURP_PARSER_SANDBOX: { unsafe: ["none", " None "], safe: [undefined, "", "bubblewrap", "landlock", "modal"] },
   };
@@ -149,6 +149,22 @@ describe("start-worker.sh and the worker agree on what development is", () => {
   it.each(["service", " Service ", "\u00a0service", "self-hosted", ""])("DOCSLURP_SERVICE_PROFILE=%j", (value) => {
     const node = isDevelopmentEnvironment({ NODE_ENV: "development", DOCSLURP_SERVICE_PROFILE: value }) ? "development" : "deployed";
     expect(shell({ NODE_ENV: "development", DOCSLURP_SERVICE_PROFILE: value })).toBe(node);
+  });
+
+  it.each(["service", " Service ", "\u00a0service", "selfhost", "dev", "DEV", "services", ""])("DOCSLURP_PROFILE=%j", (value) => {
+    for (const nodeEnv of ["development", "test", "", "production", "staging"]) {
+      const env = { NODE_ENV: nodeEnv, DOCSLURP_PROFILE: value };
+      const node = isDevelopmentEnvironment(env) ? "development" : "deployed";
+      expect(shell(env), JSON.stringify(env)).toBe(node);
+    }
+  });
+
+  it("never classifies DOCSLURP_PROFILE=service as development, nor dev/selfhost under a deployed NODE_ENV", () => {
+    expect(shell({ NODE_ENV: "development", DOCSLURP_PROFILE: "service" })).toBe("deployed");
+    expect(shell({ NODE_ENV: "test", DOCSLURP_PROFILE: "service", DOCSLURP_SERVICE_PROFILE: "" })).toBe("deployed");
+    expect(shell({ NODE_ENV: "production", DOCSLURP_PROFILE: "dev" })).toBe("deployed");
+    expect(shell({ NODE_ENV: "staging", DOCSLURP_PROFILE: "selfhost" })).toBe("deployed");
+    expect(shell({ NODE_ENV: "development", DOCSLURP_PROFILE: "selfhost", DOCSLURP_SERVICE_PROFILE: "service" })).toBe("deployed");
   });
 
   it("matches the expected classification for the council's odd values", () => {

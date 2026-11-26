@@ -17,6 +17,8 @@ import { hasFailedDocumentStage } from "./document-health.js";
 import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import type { WorkflowState } from "./pipeline.js";
+import { noteDocumentStageComplete, noteRunPageStage, recordDocumentStageFailure, recordDocumentStageRetry } from "./run-milestones.js";
+import { OCR_ESCALATION_STAGE_STAT, ocrEscalationStageStats } from "../ocr/escalation-stats.js";
 import {
   buildRunProgressEvent,
   recordPageProgress,
@@ -85,6 +87,7 @@ export function runSpentCents(state: WorkflowState): number {
 }
 
 export function isCostCapExceeded(state: WorkflowState): boolean {
+  if (state.stage === "vision-extract" && state.visionStageSpendAdmitted) return false;
   const cap = state.run.pipeline.maxCostCents;
   if (cap === null || cap === undefined || cap <= 0) {
     return false;
@@ -177,6 +180,7 @@ function recordRetryPerformance(
   reason: "low-plausibility" | "error",
   metadata: Record<string, unknown>,
 ): void {
+  recordDocumentStageRetry(stageName, reason);
   state.pendingPerformance.push({
     documentId: document.id,
     scope: "document",
@@ -297,6 +301,8 @@ export async function runDocumentStage(
   }
 
   const checkpoint = state.documentStage(document.id, stageName);
+  // Read now: the attempt below replaces the checkpoint in the state.
+  const completedBefore = checkpoint?.status === "completed";
   if (checkpoint?.status === "completed" && options?.rerunCompleted !== true && !firstPassCheckpointStale(state, document.id, stageName, checkpoint)) {
     console.log(
       `[checkpoint-debug] document=${document.id} stage=${stageName} skipped=already-completed ` +
@@ -365,7 +371,7 @@ export async function runDocumentStage(
         const blamed = typeof failure.blameDocumentId === "string" && failure.blameDocumentId !== document.id ? failure.blameDocumentId : null;
         if (!ownCommand && blamed) {
           // On the blamed document's own row for the stage it last ran (council X #1), never this document's stage name.
-          const recorded = state.store?.noteBlamedSandboxStrike
+          const recorded = state.store
             ? await state.store.noteBlamedSandboxStrike(state, blamed).catch((error: unknown) => {
               console.warn(`[checkpoint-debug] document=${blamed} blamed sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
               return null;
@@ -373,7 +379,7 @@ export async function runDocumentStage(
             : null;
           if (recorded === null) console.warn(`[checkpoint-debug] document=${blamed} run=${state.run.id} blamed sandbox strike not recorded: no stage row for that document in this run`);
         }
-        const strikes = (ownCommand || failure.blameDocumentId === document.id) && state.store?.noteSandboxInfrastructureStrike
+        const strikes = (ownCommand || failure.blameDocumentId === document.id) && state.store
           ? await state.store.noteSandboxInfrastructureStrike(state, document.id, stageName).catch((error: unknown) => {
             console.warn(`[checkpoint-debug] document=${document.id} stage=${stageName} sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
             return 0;
@@ -387,15 +393,19 @@ export async function runDocumentStage(
       // A command teardown that failed in this activity ends it, even if the stage swallowed it.
       const latched = latchedTeardownError();
       if (latched) throw latched;
+      // The document's OCR escalation record (pages a second read covered, pages the per-document cap left on their first
+      // read), so the ingest report sees it on whichever stage read the document.
+      const escalation = ocrEscalationStageStats(state.artifactLedger, document.id);
+      const resultStats = escalation ? { ...(result.stats ?? {}), [OCR_ESCALATION_STAGE_STAT]: escalation } : result.stats;
       const stats = state.firstPassShard
         // The first pass's checkpoints are provisional: the ordinary loop re-runs them when the content they read changed.
-        ? { ...(result.stats ?? {}), [FIRST_PASS_CHECKPOINT]: {
+        ? { ...(resultStats ?? {}), [FIRST_PASS_CHECKPOINT]: {
           markdown: state.artifactLedger.readDocument(document.id, "markdown") ?? null,
           markdownSha256: stageName === "extract-markdown"
             ? (result.stats as { markdownSha256?: unknown } | undefined)?.markdownSha256 ?? null
             : (state.documentStage(document.id, "extract-markdown")?.stats as { markdownSha256?: unknown } | undefined)?.markdownSha256 ?? null,
         } }
-        : result.stats ?? {};
+        : resultStats ?? {};
 
       const plausibilityDecision = shouldEscalateForLowPlausibility(stats, attempt);
       if (plausibilityDecision.escalate) {
@@ -428,6 +438,10 @@ export async function runDocumentStage(
 
       if (state.store) {
         await state.store.completeDocumentStage(state, document.id, stageName, artifactUri, stats, result.geoFinalSource);
+        // The index checkpoint publishes the document to search. Its pages reach the run row with the next progress
+        // checkpoint (no statement of their own); a checkpoint that was already complete added them before.
+        if (stageName === "index" && !completedBefore) state.pendingSearchablePages += Math.max(1, document.pageCount);
+        await noteDocumentStageComplete(state, stageName, document.pageCount);
         if (needsDocumentProgressCheckpoint(state)) await state.store.updateProgress(state);
         await state.store.appendEvent(
           buildRunProgressEvent(state, {
@@ -535,6 +549,7 @@ export async function runDocumentStage(
       finalStats,
       trustedDocumentFailure(cause)
     );
+    recordDocumentStageFailure(stageName, trustedDocumentFailure(cause)?.code);
     await state.store.updateProgress(state);
     await state.store.appendEvent(
       buildRunProgressEvent(state, {
@@ -627,6 +642,7 @@ export async function emitDocumentPageProgress(
 
   if (status === "completed" && state.store) {
     await state.store.setPageStageComplete(state.run.id, document.id, stageName, pageNumber);
+    await noteRunPageStage(state, stageName);
   }
 
   const now = Date.now();
@@ -658,11 +674,8 @@ export async function completeDocumentPages(
 ): Promise<void> {
   for (let offset = 0; offset < pages.length; offset += 100) {
     const batch = pages.slice(offset, offset + 100);
-    if (state.store?.setPagesStageComplete) {
-      await state.store.setPagesStageComplete(state.run.id, document.id, stageName, batch);
-    } else if (state.store) {
-      for (const page of batch) await state.store.setPageStageComplete(state.run.id, document.id, stageName, page);
-    }
+    if (state.store) await state.store.setPagesStageComplete(state.run.id, document.id, stageName, batch);
+    if (batch.length > 0) await noteRunPageStage(state, stageName);
     if (!emitProgress) continue;
     for (const pageNumber of batch) recordPageProgress(state, { documentId: document.id, stageName, pageNumber, pageCount, status: "completed" });
     if (state.store) {

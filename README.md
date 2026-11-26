@@ -11,33 +11,25 @@ Send DocSlurp any file. Get back page-by-page Markdown and structured fields, hy
 2. **RAG search:** hybrid search and RAG context with page citations, over REST, the SDK, the CLI, MCP and drop-in Algolia, Meilisearch, Typesense and Pagefind clients.
 3. **Configurable chat endpoint:** cited answers from `/v1/chat` and the OpenAI-compatible `/v1/chat/completions`, with streaming and per-project settings.
 
-This repository holds the **DocSlurp server** (API and worker), the **database migrations**, the **CLI**, the **client SDKs** and the search integrations. The hosted product and its web dashboard are developed separately at <https://docslurp.io>.
-
-> **Status: pre-release.** APIs and data models change without notice until v1.
+This repository provides the processing runtime, artifact processor CLI and TypeScript API, shared contracts, and client SDKs. The hosted HTTP API, durable jobs, and dashboard are developed separately.
 
 ## What is in this repository
 
 | Path | What it is | License |
 | --- | --- | --- |
-| `server/` | The Hono API (`@docslurp/server`): ingestion, search, RAG context, chat, MCP, webhooks, auth | BUSL-1.1 (→ Apache-2.0 after 3 years) |
-| `worker/` | Temporal-driven ingestion pipeline: parsing, OCR, chunking, embedding, indexing, extraction | BUSL-1.1 (→ Apache-2.0 after 3 years) |
+| `worker/` | Document processing runtime: parsing, OCR, chunking, embedding, indexing, extraction | BUSL-1.1 (→ Apache-2.0 after 3 years) |
 | `packages/cli` | `@docslurp/cli`: upload files, watch runs, retrieve cited evidence | BUSL-1.1 (→ Apache-2.0 after 3 years) |
 | `packages/contrib-algolia-server` | Server-side Algolia-style sync adapter | MIT |
 | `packages/sdk` (incl. `@docslurp/sdk/embed`), `contrib-astro`, `contrib-search-compat`, `shared` | TypeScript SDK and embeddable widgets, Astro component, Algolia/Meilisearch/Typesense/Pagefind-compatible clients, shared contracts | MIT |
 | `packages/contrib-wordpress` | WordPress search plugin | MIT |
 
-## Self-host quickstart
+## Standalone processing
 
-You need Docker with Compose v2 (8 GB RAM or more for the lean worker) and a recent Node.js for the one-time config generator.
+Build the worker and run the [artifact processor](docs/integration/artifact-processor.md) with a configured parser VM.
+The CLI and the TypeScript binding process files without an application account, application database, or Temporal server.
 
-```sh
-node scripts/selfhost-init.mjs                  # writes .env.selfhost with random secrets
-node scripts/selfhost-check.mjs                 # validates the configuration
-docker compose --env-file .env.selfhost -f compose.selfhost.yml up -d --build
-node scripts/selfhost-check.mjs --running       # waits for a healthy API and worker
-```
-
-The stack runs the API, one worker, Postgres, Redis, MinIO and Temporal. There is no bundled web UI: use the REST API under `/v1`, the CLI, the SDK or MCP. Back up `.env.selfhost`: changing encryption keys later can make stored secrets unreadable. Full details, configuration options and operations notes are in [docs/self-host/README.md](docs/self-host/README.md).
+The former bundled API and worker Compose setup is retired. Its last pre-retirement instructions remain available in
+[the earlier repository tree](https://github.com/DocSlurp/docslurp-oss/tree/8dc734e2/docs/self-host).
 
 ## Use it
 
@@ -61,11 +53,7 @@ Every package has an official docs page, a source folder in this repository and 
 ## Develop
 
 ```sh
-cp .env.example .env
 pnpm install
-pnpm db:up && pnpm db:migrate && pnpm db:seed
-pnpm dev:api        # the Hono API on http://localhost:8787
-pnpm dev:worker     # the ingestion worker (second terminal)
 pnpm typecheck && pnpm test
 ```
 
@@ -75,7 +63,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [CODE_OF_
 
 DocSlurp is **source-available, not OSI-approved open source**.
 
-- **Server** (`server/` including `server/db/`, `worker/`, CLI): [Business Source License 1.1](LICENSE). Each version becomes Apache-2.0 three years after it is first published.
+- **Worker, schema fixtures and CLI** (`worker/`, `server/db/`, CLI): [Business Source License 1.1](LICENSE). Each version becomes Apache-2.0 three years after it is first published.
   - **Free production use** for a deployment of up to **16 vCPUs across at most 4 worker or GPU instances** (parser/OCR sandboxes and self-hosted GPU inference count; per-request model APIs do not). No license key, no sign-up: it is an honor system and the software does not check.
   - **Larger deployments** need a commercial license: email legal@docslurp.io.
   - Offering DocSlurp to third parties as a hosted document ingestion, extraction, search or chat service is not covered by the free grant.
@@ -87,4 +75,4 @@ DocSlurp is **source-available, not OSI-approved open source**.
 
 ## Repository ownership
 
-Develop the server, worker, SDKs and CLI in this repository. The private web application and production operations live in [DocSlurp/app](https://github.com/DocSlurp/app), which pins this repository as its `core/` submodule. The former private monorepo is retained as a historical archive; new changes and releases belong here.
+Develop processing transformations, worker integrations, SDKs and CLI tools here. The hosted application pins this repository as its core submodule.

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, readFile, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, mkdir, rm, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync, spawn } from "node:child_process";
@@ -24,6 +24,12 @@ async function fixture(
 ) {
   const dir = await mkdtemp(join(tmpdir(), "clam-startup-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
+  const launch = join(dir, "scripts", "start-worker.sh");
+  const hostDir = join(dir, "vendor-artifacts", "operator-config");
+  await mkdir(join(dir, "scripts"));
+  await mkdir(hostDir, { recursive: true });
+  await copyFile(startup, launch);
+  await writeFile(join(hostDir, "worker-host.mjs"), "");
   const bin = join(dir, "bin"),
     db = join(dir, "db"),
     run = join(dir, "run"),
@@ -77,11 +83,12 @@ ${workerSignal ? `for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=
   return {
     dir,
     env,
+    launch,
     worker,
     calls,
     versionTZ,
     run: () => {
-      const r = spawnSync("bash", [startup], {
+      const r = spawnSync("bash", [launch], {
         env,
         encoding: "utf8",
         timeout: 12000,
@@ -106,6 +113,15 @@ ${workerSignal ? `for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=
     },
   };
 }
+test("hosted startup rejects a missing staged entry before starting the worker", async (t) => {
+  const f = await fixture(t);
+  await rm(join(f.dir, "vendor-artifacts", "operator-config", "worker-host.mjs"));
+  const result = f.run();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /requires a staged worker-host/);
+  await assert.rejects(readFile(f.worker), { code: "ENOENT" });
+});
+
 test("freshly copied files cannot hide an old signature header; refresh and periodic updater receive no credentials", async (t) => {
   const f = await fixture(t);
   const r = f.run();
@@ -175,6 +191,17 @@ for (const zone of ["Asia/Tokyo", "America/Los_Angeles"])
     assert.ok(zones.length >= 2);
     assert.ok(zones.every((z) => z === "UTC"));
   });
+for (const [limit, age, ok] of [["25", 24.5, true], ["48", 47, true], ["69", 60, true], ["70", 60, true], ["72", 71, true], ["48", 49, false], ["72", 73, false]])
+  test(`a deployed limit of ${limit}h ${ok ? "accepts" : "refuses"} ${age}h-old signatures`, async (t) => {
+    const f = await fixture(t, { age, updateFails: true });
+    f.env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS = limit;
+    const r = f.run();
+    if (ok) assert.equal(r.status, 0, r.stdout + r.stderr);
+    else {
+      assert.notEqual(r.status, 0);
+      await assert.rejects(readFile(f.worker), { code: "ENOENT" });
+    }
+  });
 test("a fractional day beyond the freshness deadline is refused", async (t) => {
   const f = await fixture(t, { age: 24.5, updateFails: true });
   const r = f.run();
@@ -185,7 +212,7 @@ test("a fractional day beyond the freshness deadline is refused", async (t) => {
 for (const signal of ["SIGTERM", "SIGINT"])
   test("parent " + signal + " drains worker and reaps updater", async (t) => {
     const f = await fixture(t, { age: 1, workerSignal: true });
-    const child = spawn("bash", [startup], {
+    const child = spawn("bash", [f.launch], {
       env: f.env,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -265,7 +292,7 @@ trap 'qa_inject_signal "$BASH_COMMAND"' DEBUG
 `,
         );
         f.env.BASH_ENV = envFile;
-        const child = spawn("bash", [startup], {
+        const child = spawn("bash", [f.launch], {
           env: f.env,
           stdio: ["ignore", "ignore", "ignore"],
         });
@@ -307,7 +334,7 @@ for (const first of ["SIGTERM", "SIGINT"])
           workerSignal: true,
           drainMs: 400,
         });
-        const child = spawn("bash", [startup], {
+        const child = spawn("bash", [f.launch], {
           env: f.env,
           stdio: ["ignore", "ignore", "ignore"],
         });
@@ -356,6 +383,8 @@ for (const name of unsafeOverrides)
     ["NODE_ENV=production", { NODE_ENV: "production" }],
     ["NODE_ENV=staging", { NODE_ENV: "staging" }],
     ["the service profile", { NODE_ENV: "", DOCSLURP_SERVICE_PROFILE: "service" }],
+    ["DOCSLURP_PROFILE=service", { NODE_ENV: "", DOCSLURP_PROFILE: "service" }],
+    ["DOCSLURP_PROFILE=dev under NODE_ENV=production", { NODE_ENV: "production", DOCSLURP_PROFILE: "dev" }],
   ])
     for (const value of ["true", "1", " TRUE ", "ture"])
       test(`${name}=${JSON.stringify(value)} under ${label} refuses startup`, async (t) => {
@@ -408,6 +437,8 @@ const deployedEnvironments = [
   ["NODE_ENV=<BOM>", { NODE_ENV: "﻿" }],
   ["NODE_ENV=dev elopment", { NODE_ENV: "dev elopment" }],
   ["the service profile", { NODE_ENV: "", DOCSLURP_SERVICE_PROFILE: "service" }],
+  ["DOCSLURP_PROFILE=service", { NODE_ENV: "development", DOCSLURP_PROFILE: " Service " }],
+  ["DOCSLURP_PROFILE=selfhost under NODE_ENV=staging", { NODE_ENV: "staging", DOCSLURP_PROFILE: "selfhost" }],
 ];
 for (const [name, value] of [
   ["QUARANTINE_ENABLED", "false"],
@@ -518,12 +549,17 @@ for (const nodeEnv of ["production", "staging", "preview", "prodution", "\u00a0d
     ["DOCSLURP_CLAMAV_ENABLED", "false"],
     ["DOCSLURP_CLAMAV_ENABLED", "typo"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "999999"],
-    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "25"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "73"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "100"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "0"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "072"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "7.2"],
+    // Digits from another script: [0-9] would match them under a UTF-8 locale.
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "\u0664\u0668"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "1+999"],
   ]) {
     test(`startup refuses ${name}=${value} in ${nodeEnv}`, () => {
-      const result = spawnSync("bash", [startup], { env: { ...process.env, NODE_ENV: nodeEnv, [name]: value }, encoding: "utf8", timeout: 5000 });
+      const result = spawnSync("bash", [startup], { env: { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8", NODE_ENV: nodeEnv, [name]: value }, encoding: "utf8", timeout: 5000 });
       assert.equal(result.status, 1, result.stderr);
       assert.match(result.stderr, new RegExp(name));
       assert.match(result.stderr, /Refusing to start/);

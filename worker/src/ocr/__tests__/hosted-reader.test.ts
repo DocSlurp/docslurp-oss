@@ -5,30 +5,41 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../../config.js";
 import { priceVisionResult } from "../../lib/guarded-vision-call.js";
-import { MemoryVisionAttemptBackend, type VisionRequestGate } from "../../lib/vision-attempt-guard.js";
+import { MemoryVisionAttemptBackend, visionGuardFor, withVisionCall, type VisionRequestGate } from "../../lib/vision-attempt-guard.js";
+import { attachVisionBilledUsage, findVisionBilledUsage } from "../../tools/vision-stream.js";
 import type { ProjectRun } from "../../models.js";
+import { PageBasis, PageBasisUnboundError } from "../../pipeline/page-basis.js";
+import { bindMemoryPageBasis } from "../../pipeline/page-basis-memory.js";
 import { WorkflowState } from "../../pipeline/pipeline.js";
 import { pngHeader } from "../../test/fake-ocr.js";
 import type { CommandRunner } from "../../tools/runner.js";
 import type { executeVisionRuntime, VisionExecutionResult } from "../../tools/vision-runtime.js";
 import type { OcrPageRead, OcrReadOutcome } from "../engine.js";
 import { escalateOcrPages } from "../escalation.js";
+import { ocrEscalationStageStats } from "../escalation-stats.js";
+import { SpendCheckUnavailableError } from "../../db/spend-check.js";
 import { createHostedOcrReader, DEFAULT_OCR_ESCALATION_MODEL, HOSTED_OCR_MAX_BYTES, HostedOcrSkipped, ocrEscalationModel } from "../hosted-reader.js";
-import { isAutomaticSelectionDenied } from "@docslurp/shared";
+import { DISTINCT_TEST_PRICING, installTestPricing, isAutomaticSelectionDenied, OCR_ESCALATION_GLM_MODEL, OCR_ESCALATION_QWEN_MODEL, OCR_ESCALATION_ROUTES, resetPricingProviderForTests, TEST_PAGE_CREDITS } from "@docslurp/shared";
+import { ProviderRoutingExclusionError } from "../../lib/provider-retry.js";
 import { ocrDocument } from "../read-document.js";
 
 const MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct";
 const CFG = { openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config;
 const ROUTE = { runtime: "openai-compatible", baseUrl: "https://api.deepinfra.com/v1/openai", provider: "deepinfra", model: MODEL, billing: "deepinfra" } as const;
 
+// Smartest by default: escalation (a Vision read) runs only where the ladder reaches the intelligent rung.
 function runState(pipeline: Record<string, unknown> = {}, run: Record<string, unknown> = {}): WorkflowState {
   const state = WorkflowState.create({
     id: "run-1", orgId: "org-1", projectId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
-    pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true, ...pipeline },
+    pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" }, ...pipeline },
     ...run,
   } as unknown as ProjectRun, []);
   state.visionAttempts = new MemoryVisionAttemptBackend();
   state.usageLedger.runId = "run-1";
+  // A store that persists escalation reads (none yet), as every hydrated activity has; a page task has none.
+  (state as unknown as { store: unknown }).store = { ocrEscalationReads: async () => [], recordOcrEscalationRead: async () => 1 };
+  // A funded organization: escalation reads check the balance first (an in-memory page basis with no limit).
+  bindMemoryPageBasis(state);
   return state;
 }
 
@@ -38,6 +49,8 @@ function stubExecute(read: (args: ExecuteArgs) => string | Error = () => "Hosted
   return vi.fn(async (args: ExecuteArgs): Promise<VisionExecutionResult> => {
     await (args.gate as VisionRequestGate | null | undefined)?.admit();
     const text = read(args);
+    // As the runtime does: a routing refusal (nothing billed) is handed back to the guard before it is thrown.
+    if (text instanceof ProviderRoutingExclusionError && !findVisionBilledUsage(text)) await (args.gate as VisionRequestGate | null | undefined)?.unbilled("routing", { provider: "openrouter", status: text.status });
     if (text instanceof Error) throw text;
     return {
       runtime: "openai-compatible", provider: "deepinfra", model: MODEL, prompt: "p", text, raw: "", latencyMs: 5,
@@ -86,7 +99,7 @@ describe("OCR escalation reads", () => {
     const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
     const outcome = await outcomeWith([{ pageNumber: 1, text: "b1urry", escalate: true }, { pageNumber: 2, text: "crisp", escalate: false }]);
     const summary = await escalateOcrPages(outcome, reader, "doc-1");
-    expect(summary).toEqual({ attempted: 1, replaced: 1, skipped: {}, failed: 0 });
+    expect(summary).toEqual({ attempted: 1, replaced: 1, skipped: {}, failed: 0, capped: 0 });
     expect(outcome.pages[0]).toMatchObject({ text: "Hosted transcription", recogniser: `escalated:${MODEL}` });
     expect(outcome.pages[1]!.text).toBe("crisp");
     expect(execute).toHaveBeenCalledTimes(1);
@@ -96,7 +109,7 @@ describe("OCR escalation reads", () => {
     expect(events).toHaveLength(1);
     const expectedCost = priceVisionResult({ route: { ...ROUTE }, inputTokens: 1_234, outputTokens: 321, costCents: 0.42 } as never, CFG);
     expect(expectedCost).toBeGreaterThan(0);
-    // Provider spend rides in metadata (the customer is charged the Rich page, not the provider's cost).
+    // Provider spend rides in metadata (the customer is charged the Rich page, not the provider's cost): escalation upgrades the page to Rich.
     expect(events[0]).toMatchObject({ provider: "deepinfra", model: MODEL, inputTokens: 1_234, outputTokens: 321, costCents: 0 });
     expect(events[0]!.metadata).toMatchObject({ documentId: "doc-1", pageNumber: 1, purpose: "ocr-escalation", outcome: "completed", providerCostCents: expectedCost, costRole: "provider" });
     expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich").map((event) => event.id)).toEqual(["rich:run-1:doc-1:1"]);
@@ -108,7 +121,9 @@ describe("OCR escalation reads", () => {
     const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: { ...ON, DOCSLURP_OCR_ESCALATION_MAX_PAGES: "2" }, execute });
     const outcome = await outcomeWith([1, 2, 3].map((pageNumber) => ({ pageNumber, text: `ocr ${pageNumber}`, escalate: true })));
     const summary = await escalateOcrPages(outcome, reader, "doc-1");
-    expect(summary).toMatchObject({ attempted: 3, replaced: 2, skipped: { budget: 1 } });
+    expect(summary).toMatchObject({ attempted: 3, replaced: 2, skipped: { budget: 1 }, capped: 1 });
+    // The document's record for the ingest report: two pages read a second time, one left on its first OCR read by the cap.
+    expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ escalatedPages: 2, cappedPages: 1, capped: [3] });
     // The third read is refused at its first request's admission: nothing was sent and nothing is recorded for it.
     expect(execute).toHaveBeenCalledTimes(3);
     expect(state.usageLedger.snapshot().filter((event) => event.metric === "ocr-escalation")).toHaveLength(2);
@@ -117,6 +132,177 @@ describe("OCR escalation reads", () => {
     await expect(reader.read({ documentId: "doc-2", pageNumber: 1, imagePath: outcome.pages[0]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).resolves.toMatchObject({ text: "Hosted transcription" });
     await expect(reader.read({ documentId: "doc-1", pageNumber: 2, imagePath: outcome.pages[1]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).resolves.toBeDefined();
     await expect(reader.read({ documentId: "doc-1", pageNumber: 3, imagePath: outcome.pages[2]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).rejects.toMatchObject({ reason: "budget" });
+  });
+
+  it("checks the balance for the OCR-to-Rich upgrade before each escalation read: an org funded for OCR only never overdraws, and the run is not paused", async () => {
+    const state = runState();
+    const execute = stubExecute();
+    // Enough for the pages' OCR charges, not for an upgrade to Rich. Read-only: nothing here can pause the run.
+    const balance = 2 * TEST_PAGE_CREDITS.ocr;
+    const ledger = bindMemoryPageBasis(state, { balance });
+    state.usageLedger.chargeOcrPage({ documentId: "doc-1", pageNumber: 1, readBy: "page-ocr" });
+    state.usageLedger.chargeOcrPage({ documentId: "doc-1", pageNumber: 2, readBy: "page-ocr" });
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+    const outcome = await outcomeWith([1, 2].map((pageNumber) => ({ pageNumber, text: `ocr ${pageNumber}`, escalate: true })));
+    const summary = await escalateOcrPages(outcome, reader, "doc-1");
+    expect(summary).toMatchObject({ attempted: 1, replaced: 0, skipped: { unfunded: 1 }, capped: 0 });
+    // The check covered the upgrade plus the OCR charges still buffered; no provider call, no Rich charge, OCR text kept.
+    expect(ledger.sizings).toHaveLength(1);
+    expect(ledger.sizings[0]).toBeCloseTo(TEST_PAGE_CREDITS.rich - TEST_PAGE_CREDITS.ocr + 2 * TEST_PAGE_CREDITS.ocr);
+    expect(execute).not.toHaveBeenCalled();
+    // Read-only: no pausing check, and the run is not paused.
+    expect(ledger.checks).toEqual([]);
+    expect(ledger.paused).toBeNull();
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
+    expect(outcome.pages.map((page) => page.text)).toEqual(["ocr 1", "ocr 2"]);
+    // Both pages are recorded as skipped for funds, for the ingest report.
+    expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ escalatedPages: 0, skippedPages: { unfunded: 2 } });
+    // Fail closed: no store to persist the read (a page task), or no organization (or user) to charge, skips the read too.
+    for (const strip of [
+      (s: WorkflowState) => { (s as unknown as { store: unknown }).store = undefined; },
+      (s: WorkflowState) => { s.run.orgId = null as never; },
+      (s: WorkflowState) => { s.run.userId = "" as never; },
+    ]) {
+      const bare = runState();
+      strip(bare);
+      const bareExecute = stubExecute();
+      const bareOutcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
+      expect(await escalateOcrPages(bareOutcome, createHostedOcrReader({ state: bare, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: bareExecute }), "doc-1")).toMatchObject({ skipped: { unfunded: 1 } });
+      expect(bareExecute).not.toHaveBeenCalled();
+    }
+    // No store bound to the page basis: refused (retryable), never read as funded and never skipped silently.
+    const unbound = runState();
+    unbound.pageBasis = PageBasis.unbound(unbound);
+    const unboundExecute = stubExecute();
+    await expect(escalateOcrPages(await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]), createHostedOcrReader({ state: unbound, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: unboundExecute }), "doc-1"))
+      .rejects.toBeInstanceOf(PageBasisUnboundError);
+    expect(unboundExecute).not.toHaveBeenCalled();
+    // A check that cannot decide is retried: the error propagates.
+    const broken = runState();
+    bindMemoryPageBasis(broken).failNext = "balance";
+    await expect(escalateOcrPages(await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]), createHostedOcrReader({ state: broken, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: stubExecute() }), "doc-1")).rejects.toBeInstanceOf(SpendCheckUnavailableError);
+    // Funded: the read goes ahead.
+    const funded = runState();
+    const fundedExecute = stubExecute();
+    const fundedOutcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
+    expect(await escalateOcrPages(fundedOutcome, createHostedOcrReader({ state: funded, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: fundedExecute }), "doc-1")).toMatchObject({ replaced: 1 });
+    expect(fundedExecute).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads with GLM under its price ceiling on Wafer, then on Morph, then with Qwen when no host can serve GLM under either", async () => {
+    const state = runState();
+    const execute = stubExecute((args) => args.vision.modelUri === OCR_ESCALATION_GLM_MODEL
+      ? new ProviderRoutingExclusionError(404, "No endpoints found matching your data policy and max_price")
+      : "Qwen transcription");
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+    const outcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
+    expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ replaced: 1, failed: 0 });
+    expect(execute.mock.calls.map((call) => call[0].vision.modelUri)).toEqual([OCR_ESCALATION_GLM_MODEL, OCR_ESCALATION_GLM_MODEL, OCR_ESCALATION_QWEN_MODEL]);
+    // Each GLM request carries its own ceiling and host; Qwen's carries none.
+    for (const index of [0, 1]) {
+      const ceiling = OCR_ESCALATION_ROUTES[index]!.priceCeiling!;
+      expect(execute.mock.calls[index]![0].priceCeiling).toEqual({ inputUsdPerMillion: ceiling.inputUsdPerMTok, outputUsdPerMillion: ceiling.outputUsdPerMTok, imageUsd: 0, hosts: ceiling.hosts });
+    }
+    expect(execute.mock.calls[0]![0].priceCeiling!.hosts).toEqual(["wafer/us"]);
+    expect(execute.mock.calls[1]![0].priceCeiling!.hosts).toEqual(["morph/fp8"]);
+    expect(execute.mock.calls[2]![0].priceCeiling).toBeUndefined();
+    expect(outcome.pages[0]!.text).toBe("Qwen transcription");
+  });
+
+  it("skips the read, never sending it to a pricier host, when no reader can be served under its ceiling", async () => {
+    const state = runState();
+    const execute = stubExecute(() => new ProviderRoutingExclusionError(503, "There is no available model provider that meets your routing requirements"));
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+    const outcome = await outcomeWith([1, 2].map((pageNumber) => ({ pageNumber, text: `ocr ${pageNumber}`, escalate: true })));
+    expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ replaced: 0, failed: 0, skipped: { margin: 1 } });
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
+    expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ skippedPages: { "price-check": 2 } });
+  });
+
+  it("hands GLM's routing refusals back unbilled: 30 refused pages leave the breaker closed and the attempt budget whole", async () => {
+    const state = runState();
+    const env = { ...ON, DOCSLURP_OCR_ESCALATION_MAX_PAGES: "40" } as NodeJS.ProcessEnv;
+    // As the runtime does: each request is admitted, a routing refusal is handed back unbilled, a Qwen read succeeds.
+    const execute = vi.fn(async (args: ExecuteArgs): Promise<VisionExecutionResult> => {
+      const gate = args.gate as VisionRequestGate;
+      await gate.admit();
+      if (args.vision.modelUri === OCR_ESCALATION_GLM_MODEL) {
+        await gate.unbilled("routing", { provider: "openrouter", status: 404 });
+        throw new ProviderRoutingExclusionError(404, "No endpoints found matching your data policy and max_price");
+      }
+      return { runtime: "openai-compatible", provider: "deepinfra", model: MODEL, prompt: "p", text: "Qwen read", raw: "", latencyMs: 5,
+        inputTokens: 10, outputTokens: 10, usageSource: "provider", costCents: 0.01, baseUrl: ROUTE.baseUrl, fallbackUsed: false, route: { ...ROUTE } } as unknown as VisionExecutionResult;
+    });
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env, execute });
+    const outcome = await outcomeWith(Array.from({ length: 30 }, (_, index) => ({ pageNumber: index + 1, text: `ocr ${index + 1}`, escalate: true })));
+    expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ attempted: 30, replaced: 30, failed: 0, skipped: {} });
+    // Two GLM hosts refuse each page, Qwen reads it: 90 requests, none counted against the breaker or the budget.
+    expect(execute).toHaveBeenCalledTimes(90);
+    // The run's other vision reads are unaffected: the breaker is closed and a new call is admitted.
+    expect(visionGuardFor(state).stop).toBeNull();
+    await expect(withVisionCall(state, { documentId: "doc-2", pageNumber: 1, purpose: "page" }, async (gate) => { await gate.admit(); })).resolves.toBeUndefined();
+  });
+
+  it("a read that times out after it was sent is possibly billed: no fall-through to Qwen, recorded as unknown-billed", async () => {
+    const state = runState();
+    const execute = vi.fn(async (args: ExecuteArgs): Promise<VisionExecutionResult> => {
+      await (args.gate as VisionRequestGate | null | undefined)?.admit();
+      // Wafer refuses (routing, unbilled); Morph is sent and never answers within its timeout.
+      if ((args as { priceCeiling?: { hosts: string[] } }).priceCeiling?.hosts.includes("wafer/us")) {
+        await (args.gate as VisionRequestGate | null | undefined)?.unbilled("routing", { provider: "openrouter", status: 404 });
+        throw new ProviderRoutingExclusionError(404, "No endpoints found matching your data policy and max_price");
+      }
+      if (args.vision.modelUri !== OCR_ESCALATION_GLM_MODEL) throw new Error("Qwen must not be called");
+      await new Promise((_resolve, reject) => args.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))));
+      throw new Error("unreachable");
+    });
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute, routeTimeoutMs: (route) => (route.timeoutMs ? 20 : undefined) });
+    const outcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
+    expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ replaced: 0, skipped: { "unknown-billed": 1 } });
+    expect(execute.mock.calls.map((call) => (call[0] as { priceCeiling?: { hosts: string[] } }).priceCeiling?.hosts)).toEqual([["wafer/us"], ["morph/fp8"]]);
+    expect(outcome.pages[0]!.text).toBe("ocr 1");
+    // The possible charge stays visible: one usage event of unknown cost, flagged, on the route that was sent.
+    expect(state.usageLedger.snapshot().filter((event) => event.metadata?.possiblyBilled === true)).toEqual([
+      expect.objectContaining({ model: "z-ai/glm-5.3-flash", costCents: 0, metadata: expect.objectContaining({ outcome: "timeout", costSource: "unknown", poolMemberId: "ocr.llm.glm-5.3-flash+morph.us" }) }),
+    ]);
+    expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ skippedPages: { "unknown-billed": 1 } });
+  });
+
+  it("does not fall back to Qwen after a GLM attempt of the page was billed: the read fails like any rejected read", async () => {
+    const state = runState();
+    const execute = stubExecute((args) => {
+      if (args.vision.modelUri !== OCR_ESCALATION_GLM_MODEL) return "Qwen read";
+      // Attempt 1 served and rejected (billed), the retry refused for routing.
+      const error = new ProviderRoutingExclusionError(503, "There is no available model provider that meets your routing requirements");
+      attachVisionBilledUsage(error, { inputTokens: 2_000, outputTokens: 8_000, costMetadata: {}, costCents: 0.3, usageSource: "provider" } as never);
+      return error;
+    });
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+    expect(await escalateOcrPages(await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]), reader, "doc-1")).toMatchObject({ replaced: 0, failed: 1 });
+    expect(execute.mock.calls.map((call) => call[0].vision.modelUri)).toEqual([OCR_ESCALATION_GLM_MODEL]);
+    // The billed GLM attempt is recorded under the GLM reader's own id.
+    const failedIds = state.usageLedger.snapshot().map((event) => event.id ?? "").filter((id) => id.includes(":failed:"));
+    expect(failedIds.length).toBeGreaterThan(0);
+    expect(failedIds.every((id) => id.includes(":scan-ocr/hosted-escalation-glm:failed:"))).toBe(true);
+  });
+
+  it("gates each reader on its own: a refused GLM falls back to Qwen, both refused skip the read", async () => {
+    const state = runState();
+    installTestPricing({ automaticCallValueUsd: (call) => (call.model.includes("glm") ? 0 : 1) });
+    try {
+      const execute = stubExecute();
+      const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+      expect(await escalateOcrPages(await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]), reader, "doc-1")).toMatchObject({ replaced: 1 });
+      expect(execute.mock.calls.map((call) => call[0].vision.modelUri)).toEqual([OCR_ESCALATION_QWEN_MODEL]);
+      installTestPricing({ automaticCallValueUsd: () => 0 });
+      const none = stubExecute();
+      const refused = createHostedOcrReader({ state: runState(), cfg: CFG, runner: {} as CommandRunner, env: ON, execute: none });
+      expect(await escalateOcrPages(await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]), refused, "doc-1")).toMatchObject({ skipped: { margin: 1 } });
+      expect(none).not.toHaveBeenCalled();
+    } finally {
+      installTestPricing(DISTINCT_TEST_PRICING);
+    }
   });
 
   it("keeps the per-document budget across an activity retry or a worker restart (a new state on the same attempt ledger)", async () => {
@@ -168,6 +354,25 @@ describe("OCR escalation reads", () => {
     }
   });
 
+  it("Fastest never escalates: zero hosted calls and no Vision page with DOCSLURP_OCR_ESCALATION=on; Smartest still escalates", async () => {
+    for (const maxRung of ["ocr", "fast"] as const) {
+      const state = runState({ quality: "auto", ladder: { maxRung } });
+      const execute = stubExecute();
+      const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+      const outcome = await outcomeWith([{ pageNumber: 1, text: "b1urry", escalate: true }]);
+      expect((await escalateOcrPages(outcome, reader, "doc-1")).skipped).toEqual({ disabled: 1 });
+      expect(execute).not.toHaveBeenCalled();
+      expect(outcome.pages[0]!.text).toBe("b1urry");
+      expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
+    }
+    const smart = runState({ quality: "auto", ladder: { maxRung: "intelligent" } });
+    const execute = stubExecute();
+    const reader = createHostedOcrReader({ state: smart, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+    const outcome = await outcomeWith([{ pageNumber: 1, text: "b1urry", escalate: true }]);
+    expect((await escalateOcrPages(outcome, reader, "doc-1")).replaced).toBe(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the OCR text when the hosted read fails", async () => {
     const state = runState();
     const execute = stubExecute(() => new Error("provider 500"));
@@ -214,7 +419,9 @@ describe("DOCSLURP_OCR_MODE=hosted", () => {
     expect(runner.run).not.toHaveBeenCalled();
     expect(runner.sandboxedOcrRead).not.toHaveBeenCalled();
     expect(state.usageLedger.snapshot().filter((event) => event.metric === "hosted-ocr")).toHaveLength(1);
-    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich").map((event) => event.id)).toEqual(["rich:run-1:doc-1:1"]);
+    // The operator's hosted OCR model reads in the OCR engine's place: one flat OCR page, not Rich.
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-ocr").map((event) => event.id)).toEqual(["ocr:run-1:doc-1:1"]);
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
   });
 
   it.each([
@@ -265,13 +472,35 @@ describe("DOCSLURP_OCR_MODE=hosted", () => {
 });
 
 describe("OCR escalation model override", () => {
-  it("never escalates to a model that is never selected automatically (DeepSeek V4.1 Flash, any build or route)", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  it("takes any non-denylisted override, DeepSeek V4.1 Flash included: its reads pass the margin gate instead", () => {
     expect(isAutomaticSelectionDenied(DEFAULT_OCR_ESCALATION_MODEL)).toBe(false);
-    for (const model of ["llm://openrouter/deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v4.1-flash", "llm://deepinfra/deepseek-ai/DeepSeek-V4.1-Flash"]) {
-      expect(ocrEscalationModel({ DOCSLURP_OCR_ESCALATION_MODEL: model })).toBe(DEFAULT_OCR_ESCALATION_MODEL);
+    for (const model of ["llm://openrouter/deepseek/deepseek-v4.1-flash-1017", "llm://openrouter/openai/gpt-6-luna"]) {
+      expect(ocrEscalationModel({ DOCSLURP_OCR_ESCALATION_MODEL: model })).toBe(model);
     }
-    expect(ocrEscalationModel({ DOCSLURP_OCR_ESCALATION_MODEL: "llm://openrouter/openai/gpt-6-luna" })).toBe("llm://openrouter/openai/gpt-6-luna");
-    warn.mockRestore();
+  });
+
+  it("skips an escalation read the margin gate refuses, before anything is sent, and keeps the recogniser's text", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // A billed value the escalation route's list price cannot cover by the minimum margin.
+    installTestPricing({ automaticCallValueUsd: () => 0.000001 });
+    try {
+      const state = runState();
+      const execute = stubExecute();
+      const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+      const outcome = await outcomeWith([{ pageNumber: 1, text: "b1urry", escalate: true }]);
+      const summary = await escalateOcrPages(outcome, reader, "doc-1");
+      expect(summary).toMatchObject({ attempted: 1, replaced: 0, skipped: { margin: 1 } });
+      expect(execute).not.toHaveBeenCalled();
+      expect(outcome.pages[0]!.text).toBe("b1urry");
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/\[automatic-margin\] skipped label=ocr-escalation .*reason="below the minimum margin"/));
+      // A value that covers it: the read goes ahead.
+      installTestPricing({ automaticCallValueUsd: () => 1 });
+      const allowed = await outcomeWith([{ pageNumber: 1, text: "b1urry", escalate: true }]);
+      await escalateOcrPages(allowed, createHostedOcrReader({ state: runState(), cfg: CFG, runner: {} as CommandRunner, env: ON, execute }), "doc-1");
+      expect(execute).toHaveBeenCalledTimes(1);
+    } finally {
+      resetPricingProviderForTests();
+      warn.mockRestore();
+    }
   });
 });

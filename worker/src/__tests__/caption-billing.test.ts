@@ -17,14 +17,15 @@ function localRead(state: WorkflowState, metric: string, pageNumber: number) {
 }
 
 describe("a local photo caption does not make a page Rich", () => {
-  it("charges no Rich page for a caption; an OCR read of the page still does", () => {
+  it("charges no page for a caption; an OCR read of the page charges it OCR", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     expect(RICH_PAGE_READ_METRICS.has("image-label")).toBe(false);
     const state = WorkflowState.create(run, []);
     localRead(state, "image-label", 3); // a caption of a photo on page 3: the page's text was not read by a model
     localRead(state, "page-ocr", 4); // page 4 was OCR'd
     const events = state.usageLedger.checkpoint().events;
-    const rich = events.filter((event) => event.metric === BILLABLE_UNIT_METRICS.richPage);
-    expect(rich.map((event) => event.metadata?.pageNumber)).toEqual([4]);
+    expect(events.filter((event) => event.metric === BILLABLE_UNIT_METRICS.richPage)).toEqual([]);
+    const ocr = events.filter((event) => event.metric === BILLABLE_UNIT_METRICS.ocrPage);
+    expect(ocr.map((event) => event.metadata?.pageNumber)).toEqual([4]);
   });
 });

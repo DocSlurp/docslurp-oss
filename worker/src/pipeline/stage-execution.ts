@@ -1,8 +1,12 @@
+import { planDocumentShards, quarantineShardOptions } from "../temporal/document-shards.js";
+import { StaleExecutionError } from "../db/execution-ownership.js";
+import { resolvedRunModels } from "./resolved-models.js";
 import { firstPassExtractionDiffers } from "./first-pass-pipeline.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
-import type { PreloadedRunState } from "../db/store.js";
+import type { PreloadedRunState } from "../db/run-ledger.js";
 import { extendDbTraceLabel } from "../lib/db-trace.js";
 import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder } from "@docslurp/shared";
+import { noteRunMilestone, noteRunOutcome, workerStartKind } from "./run-milestones.js";
 import { withObservation, flushObservability } from "@docslurp/shared/observability";
 import { ApplicationFailure } from "@temporalio/common";
 
@@ -33,12 +37,15 @@ import {
 } from "./local-compute-cost.js";
 import { hasFailedDocumentStage } from "./document-health.js";
 import { WorkflowState, type Stage } from "./pipeline.js";
+import { runSpentCents } from "./checkpoints.js";
+import { PageBasis } from "./page-basis.js";
 import { pageRangeExecutorIsolated, pagesInRanges, resolveShardPageRanges } from "./page-ranges.js";
 import { recordShardTiming } from "./shard-calibration.js";
 import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 import { pinRunPageBillingRules } from "../db/page-base-fee.js";
+import { pinRunOcrPageClass } from "./ocr-page-class.js";
 import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
 import { latchedTeardownError, settleSandboxSession } from "../sandbox/session-context.js";
@@ -71,12 +78,16 @@ export type StageExecutionStore = Pick<
   | "completeRun"
   | "failRun"
   | "currentRunStage"
-  | "triggerRunEmails"
-  | "triggerWebhooks"
   | "seedReusedStageOutputs"
   | "finishShard"
+  | "pageBasisLedger"
+  | "markRunMilestone"
 > & {
+  admitVisionStageSpend?: Store["admitVisionStageSpend"];
   readonly pageTasks: Pick<Store["pageTasks"], "completed">;
+  readonly notifications: Pick<Store["notifications"], "triggerRunEmails">;
+  /** Whether every live worker advertises `capability` (Store.fleetAdvertises): a run's billing rules are pinned from it. */
+  fleetAdvertises: Store["fleetAdvertises"];
 };
 
 /** Orchestrator hooks injected per stage execution. */
@@ -155,7 +166,7 @@ export function coerceIndexingModeForFlag<T extends { pipeline: { indexingMode?:
 
 /** The one Run hydration path for every activity entry point. */
 export async function loadRunState(
-  store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState"> & {
+  store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState" | "pageBasisLedger"> & {
     /** Reads the run's stage checkpoints so they travel beside the run and document reads. */
     readStageStates?(runId: string): Promise<unknown>;
     /** The shared vision attempt ledger (page bound, rejection breaker, org bound). */
@@ -176,6 +187,9 @@ export async function loadRunState(
     ? [options.preloaded.run, options.preloaded.documents]
     : await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
   const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
+  // Every loaded state checks spend through the store's page basis, hydrated or not (a page task leaves state.store unset so
+  // it never flushes a stale run snapshot, but its OCR reads are still checked against the balance).
+  state.pageBasis = new PageBasis(state, store.pageBasisLedger);
   // A store-backed run never falls back to a per-process count: without the shared ledger, vision refuses.
   state.visionAttempts = store.visionAttempts ?? null;
   state.pageReaderBudget = store.pageReaderBudget ?? null;
@@ -260,12 +274,22 @@ export function createStageExecution(deps: {
     // Page billing rules, pinned the same way: a run without the pin (started by an earlier release) keeps that release's
     // completion charge for image files and scanned pages (db/page-base-fee.ts).
     const pageBillingRules = pinRunPageBillingRules(state);
+    // The OCR page class, pinned the same way: on only when every live worker advertises it (pipeline/ocr-page-class.ts).
+    const ocrPageClass = await pinRunOcrPageClass(state, async () => (await store.fleetAdvertises("billing.ocr-page-class")) === true);
 
     // Mark run as processing
     state.run.status = "processing";
     state.totalStages = input.totalStages;
     state.refreshStats();
-    await store.updateProgress(state, { executionGeneration: input.executionGeneration });
+    const documentIds = documents.map((document) => document.id);
+    const documentPages = documents.map((document) => Math.max(1, document.pageCount || 1));
+    const initialQuarantineDemand = input.initialQuarantineSharding
+      ? planDocumentShards(documentIds, documentPages, quarantineShardOptions(input.initialQuarantineSharding)).length
+      : 0;
+    await store.updateProgress(state, {
+      executionGeneration: input.executionGeneration,
+      ...(initialQuarantineDemand > 1 ? { shardDemand: initialQuarantineDemand } : {}),
+    });
 
     // Log cost forecast
     const forecast = forecastRunCost(documents, state.run.pipeline);
@@ -282,7 +306,7 @@ export function createStageExecution(deps: {
       `[temporal] run=${run.id} status=init docs=${documents.length} ` +
         `minCents=${forecast.minCents} maxCents=${forecast.maxCents} ` +
         `completedRunStages=${completedRunStages.length} completedDocStages=${completedDocStages.length} ` +
-        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion} pageBilling=${pageBillingRules}`,
+        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion} pageBilling=${pageBillingRules} ocrPageClass=${ocrPageClass}`,
     );
     if (completedRunStages.length > 0) {
       console.log(
@@ -295,15 +319,26 @@ export function createStageExecution(deps: {
       );
     }
 
+    // First pickup only (the stamp is conditional): start latency, split by whether this worker was already running.
+    // The same stamp records which models serve the run, per service: a record, never a reason to fail the run.
+    let resolvedModels: Record<string, unknown> | undefined;
+    try {
+      resolvedModels = resolvedRunModels(config, run.pipeline);
+    } catch (error) {
+      console.warn(`[run-models] run=${run.id} resolved models not recorded: ${error instanceof Error ? error.name : "error"}`);
+    }
+    await noteRunMilestone(store, run.id, "worker_started", { start: workerStartKind() }, { resolvedModels });
+
     // Log start event
     await store.appendEvent(
       buildRunStartedEvent(state, "temporal workflow started"),
     );
 
     return {
-      documentIds: documents.map((d) => d.id),
+      documentIds,
       artifacts: { ...state.artifacts },
-      documentPages: documents.map((d) => Math.max(1, d.pageCount || 1)),
+      documentPages,
+      ...(initialQuarantineDemand > 1 ? { initialQuarantineDemand } : {}),
       documentMimeTypes: documents.map((d) => d.mimeType ?? ""),
     };
   }
@@ -496,6 +531,10 @@ export function createStageExecution(deps: {
       state.stage = stageName;
       state.refreshStats();
 
+      if (stageName === "vision-extract" && !shard) {
+        await store.admitVisionStageSpend?.(state, { runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
+      }
+
       // startRunStage checkpoints progress in the same transaction.
       if (shard) {
         // The unsharded pass owns the stage checkpoint; a shard only does documents.
@@ -551,8 +590,13 @@ export function createStageExecution(deps: {
       const localObservation = buildAllocatedResourceObservation({
         profile: deploymentProfile,
         wallTimeMs: durationMs,
-        // A range shard does only its ranges; counting whole documents would inflate pages per minute and per $1.
-        pages: pageRanges ? [...pageRanges.values()].reduce((total, ranges) => total + pagesInRanges(ranges), 0) : documents.reduce((total, document) => total + Math.max(1, document.pageCount), 0),
+        // A range shard does only its ranges. A fully checkpointed stage
+        // incurs orchestration cost, but processes no new pages.
+        pages: pageRanges
+          ? [...pageRanges.values()].reduce((total, ranges) => total + pagesInRanges(ranges), 0)
+          : completedDocs.length === documents.length
+            ? 0
+            : documents.reduce((total, document) => total + Math.max(1, document.pageCount), 0),
         cold: false,
       });
       state.usageLedger.enqueue(buildLocalComputeUsageEvent({
@@ -606,6 +650,11 @@ export function createStageExecution(deps: {
         documents: documents.length,
         artifacts: Object.keys(state.artifacts).length,
         durationMs,
+        ...(state.visionStageSpendAdmitted ? {
+          runCostCapCents: state.run.pipeline.maxCostCents,
+          runBilledSpendCents: runSpentCents(state),
+          runCostCapOverrunCents: Math.max(0, runSpentCents(state) - (state.run.pipeline.maxCostCents ?? 0)),
+        } : {}),
         adaptiveTuning: {
           docConcurrency: tuning.docConcurrency,
           maxDocConcurrency: tuning.maxDocConcurrency,
@@ -657,6 +706,7 @@ export function createStageExecution(deps: {
         ...(completion?.preloaded ? { preloaded: completion.preloaded } : {}),
       };
     } catch (caught) {
+      if (caught instanceof StaleExecutionError) throw caught;
       // A stall abort surfaces as whatever the stage threw on abort; report the hang itself. A
       // command teardown failure (thrown, or latched on this activity and swallowed by the stage)
       // wins over both: it must end the activity as a non-retryable teardown, never a retry.
@@ -703,7 +753,7 @@ export function createStageExecution(deps: {
   }
 
   async function notifyTerminal(runId: string, event: "run.completed" | "run.failed"): Promise<void> {
-    await store
+    await store.notifications
       .triggerRunEmails(runId, event)
       .catch((err) =>
         console.error(
@@ -731,6 +781,7 @@ export function createStageExecution(deps: {
       const message = `All ${failed.length} ${noun} failed${detail}`;
       console.error(`[temporal] run=${input.runId} status=failed message=${message}`);
       await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
+      await noteRunOutcome(store, state.run, "failed", first?.[0] ?? state.stage);
       await notifyTerminal(input.runId, "run.failed");
       return;
     }
@@ -739,6 +790,7 @@ export function createStageExecution(deps: {
       `[temporal] run=${input.runId} status=completed failedDocuments=${failed.length}`,
     );
     await store.completeRun(state, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
+    await noteRunOutcome(store, state.run, failed.length > 0 ? "completed_with_failures" : "completed");
 
     await notifyTerminal(input.runId, "run.completed");
   }
@@ -761,6 +813,7 @@ export function createStageExecution(deps: {
     await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration },
       // The stage's infrastructure retries ran out: its unfinished documents say so publicly (real-Modal P3).
       { infrastructureRetriesExhausted: input.failureType === WORKER_INTERRUPTED });
+    await noteRunOutcome(store, state.run, "failed", stage);
 
     await notifyTerminal(input.runId, "run.failed");
   }

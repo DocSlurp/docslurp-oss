@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { qualityModeSchema } from "./quality.js";
+import { pipelineProfileIdSchema } from "./billing.js";
 import { defaultPipelineFeatures, pipelineFeaturesSchema } from "./pipeline.js";
 import { searchCitationSchema } from "./chunks.js";
 import {
@@ -172,7 +172,6 @@ export const aggregateProjectRagSearchRequestSchema = z
     mmrLambda: z.number().min(0).max(1).optional(),
     /** Relevance floor, 0..1; 0 disables it. Omitted: project default, else SEARCH_MIN_SCORE. */
     minScore: z.number().min(0).max(1).optional(),
-    compression: z.boolean().default(false),
     /** Provider-backed steps stay off unless requested, as on POST /v1/search. */
     queryRewrite: z.boolean().default(false),
     queryDecompose: z.boolean().default(false),
@@ -240,7 +239,8 @@ export type RunProcessingPreviewQualityLabel = z.infer<
 >;
 
 export const runProcessingPreviewScenarioSchema = z.object({
-  quality: qualityModeSchema,
+  /** The scenario's quality as a pricing profile: `fastest` or `smartest` (billing.ts QUALITY_MODE_ORDER). */
+  quality: pipelineProfileIdSchema,
   label: z.string(),
   estimatedCost: z.object({
     minCents: z.number(),

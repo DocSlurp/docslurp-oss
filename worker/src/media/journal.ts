@@ -2,8 +2,7 @@ import type { MediaAccounting } from "./accounting.js";
 import { videoPolicy } from "./video-policy.js";
 import { randomUUID } from "node:crypto";
 import type { Sql, JSONValue } from "postgres";
-import { isBillingExemptOrg } from "@docslurp/shared";
-import { jobCreditReserve } from "../db/chat-reserve.js";
+import { lockOrgAdmission, runSpendHeadroom } from "../db/spend-check.js";
 import type { MediaJournal, MediaReceipt } from "./types.js";
 
 type Row = { id: string; status: MediaReceipt["status"]; result_key: string | null; cost_cents: number | null };
@@ -23,7 +22,7 @@ export class PostgresMediaJournal implements MediaJournal {
       const [pricingHold] = await tx`select id from remote_media_jobs where provider = ${args.provider} and org_id = ${scope.orgId}
         and model = ${args.model} and pricing_uncertain = true limit 1`;
       if (pricingHold) throw new Error("Media provider pricing requires reconciliation before more admissions");
-      await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${scope.orgId}))`;
+      await lockOrgAdmission(tx as unknown as Sql<Record<string, unknown>>, scope.orgId);
       await this.assertCanSpend(tx as unknown as Sql<Record<string, unknown>>, args);
       const [totals] = await tx<{ inflight: number; daily: number; run_cost: number }[]>`
         select count(*) filter (where status <> 'completed')::int as inflight,
@@ -61,7 +60,7 @@ export class PostgresMediaJournal implements MediaJournal {
   }
   async admitVideo(scope: Parameters<NonNullable<MediaJournal["admitVideo"]>>[0], duration: number, frames: number) {
     await this.sql.begin(async tx => {
-      await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${scope.orgId}))`;
+      await lockOrgAdmission(tx as unknown as Sql<Record<string, unknown>>, scope.orgId);
       const [scoped] = await tx`select 1 from project_runs r join documents d on d.run_id=r.id
         where r.org_id=${scope.orgId} and r.id=${scope.runId} and r.project_id=${scope.projectId} and d.id=${scope.documentId}`;
       if (!scoped) throw new Error("Video admission scope mismatch");
@@ -79,16 +78,13 @@ export class PostgresMediaJournal implements MediaJournal {
     // Credit leases other runs hold (migration 0052) are spoken for; this
     // run's own lease is what its media spend draws from.
     // The chat reserve (migration 0053) is not for jobs either.
-    const [status] = await tx<{ funded: boolean | null; available: number; leased: number; project_in_org: boolean; org_budget_paused: boolean; project_budget_paused: boolean }[]>`
-      select s.*, org_outstanding_credit_leases(${args.scope.orgId}, 'run', ${args.scope.runId}) as leased
-      from org_spend_status(${args.scope.orgId}, ${args.scope.projectId}, 0) s`;
+    const spend = await runSpendHeadroom(tx, args.scope);
     const [pending] = await tx<{ reserved: number }[]>`select
       coalesce((select sum(case when usage_settled then greatest(reserve_cents-coalesce(charged_cost_cents,cost_cents,0),0) else greatest(reserve_cents,coalesce(charged_cost_cents,cost_cents,0)) end) from remote_media_jobs
         where org_id = ${args.scope.orgId} and (usage_settled = false or cost_state = 'disputed')), 0) +
       coalesce((select sum((case when status='deleted' then fixed_reserve_usd else reserved_usd end) * 100) from remote_capacity_leases
         where scope->>'orgId' = ${args.scope.orgId} and (status <> 'deleted' or fixed_reserve_usd > 0)), 0) as reserved`;
-    if (!status?.project_in_org || status.org_budget_paused || status.project_budget_paused ||
-      (Number(status.available) - Number(status.leased) - jobCreditReserve(status.funded) < args.reserveCents + Number(pending.reserved) && !isBillingExemptOrg(args.scope.orgId))) throw new Error("Media spend admission denied");
+    if (!spend.covers(args.reserveCents + Number(pending.reserved))) throw new Error("Media spend admission denied");
   }
   async complete(id: string, resultKey: string, costCents: number, pricingMismatch = false, accounting?: MediaAccounting, chargedCostCents = costCents) {
     await this.sql`update remote_media_jobs set status = 'completed', result_key = ${resultKey}, cost_cents = ${costCents}, charged_cost_cents = ${chargedCostCents}, pricing_uncertain = ${pricingMismatch}, accounting = ${accounting ? this.sql.json(accounting as unknown as JSONValue) : null}, cost_state = ${accounting?.state ?? 'estimated'}, updated_at = now()

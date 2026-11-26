@@ -15,7 +15,7 @@
 # Build stage: compile TypeScript, then produce a self-contained production
 # node_modules for the worker only (no pnpm store, no project-root deps).
 
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS builder
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS builder
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 WORKDIR /app
 RUN corepack enable
@@ -26,6 +26,10 @@ COPY worker/package.json worker/tsconfig.json worker/LICENSE ./worker/
 RUN \
     pnpm install --frozen-lockfile
 COPY worker/src ./worker/src
+# Optional trusted host source. Compile it in the same module graph as the worker.
+COPY vendor-artifact[s]/worker-host/host-entr[y].ts ./worker/src/temporal/
+COPY vendor-artifact[s]/worker-host/host-workflow[s].ts ./worker/src/temporal/
+COPY vendor-artifact[s]/worker-host/host-activitie[s].ts ./worker/src/temporal/
 COPY worker/scripts/copy-routing-assets.mjs ./worker/scripts/copy-routing-assets.mjs
 COPY worker/scripts/bundle-chart-guest.mjs worker/scripts/chart-guest-bundle.mjs worker/scripts/chart-export-worker.mjs ./worker/scripts/
 COPY scripts/lib/model-prices.json ./scripts/lib/model-prices.json
@@ -36,8 +40,11 @@ RUN \
     && node scripts/prune-worker-node-modules.mjs --dir /prod/worker --arch "$(node -p process.arch)"
 
 # Base Python parsers: wheel-only venv built against the runtime image's python3.
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS python-venv
-RUN apt-get update \
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS python-venv
+COPY scripts/configure-debian-build-snapshot.sh /tmp/configure-debian-build-snapshot.sh
+RUN sh /tmp/configure-debian-build-snapshot.sh && rm /tmp/configure-debian-build-snapshot.sh \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
 COPY worker/requirements-base.txt worker/requirements-base.lock.txt /tmp/req/
@@ -48,7 +55,7 @@ RUN bash /tmp/build-worker-venv.sh /app/.venv /tmp/req/requirements-base.lock.tx
 # tarball supplied in the build context (gitignored). Absent tarball = no-op (Poppler path).
 # DOCSLURP_NATIVE_PDF=1 requires it (missing or unloadable binding fails the build).
 # Installed in its own stage so the tarball itself never lands in an image layer.
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS native-pdf
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS native-pdf
 ARG DOCSLURP_NATIVE_PDF=
 WORKDIR /app
 COPY scripts/install-native-pdf.mjs ./scripts/install-native-pdf.mjs
@@ -62,7 +69,7 @@ RUN mkdir -p vendor-artifacts/native-pdf \
 # every file are sha256-pinned in scripts/fetch-native-pdf-assets.mjs.
 #   DOCSLURP_NATIVE_PDF_OCR_MODELS=1  PP-OCRv6 small OCR models (~30 MB, Apache-2.0)
 #   DOCSLURP_NATIVE_PDF_CJK_FONTS=1   Noto CJK fallback fonts (~54 MB, OFL-1.1)
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS native-pdf-assets
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS native-pdf-assets
 ARG DOCSLURP_NATIVE_PDF_OCR_MODELS=
 ARG DOCSLURP_NATIVE_PDF_CJK_FONTS=
 COPY scripts/fetch-native-pdf-assets.mjs /tmp/fetch-native-pdf-assets.mjs
@@ -72,7 +79,7 @@ RUN node /tmp/fetch-native-pdf-assets.mjs --out /opt/native-pdf \
 # landrun (Landlock sandbox provider, MIT, pinned by worker/sandbox-tools.json), built from its pinned commit with a fixed Go
 # toolchain (the v0.1.17 release binary was built with Go 1.26.5, which carries standard-library CVEs). The checkout must be
 # exactly the pinned commit, and module downloads are verified against the repository's go.sum. Static (CGO_ENABLED=0).
-FROM golang:1.27-trixie@sha256:af1bfc2614ebb1dbd31af514b78740fd678850e76498762b425ecee4c5c6ea80 AS landrun
+FROM golang:1.27.4-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d AS landrun
 ARG TARGETARCH=amd64
 COPY worker/sandbox-tools.json /tmp/sandbox-tools.json
 RUN set -e; \
@@ -87,7 +94,7 @@ RUN set -e; \
 # doppler-md / pdftomarkdown converter, from the public source pinned in worker/doppler.json (sha256-verified), installed under
 # /usr/lib/doppler, off PATH: every other host PDF tool stays Debian's poppler-utils. They run only as separate executables in
 # the parser sandbox, and only in customer-owned local PDF mode (DOCSLURP_PDF_MODE=local); a VM deployment runs Doppler in its VM.
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS doppler-src
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS doppler-src
 COPY worker/doppler.json /tmp/doppler.json
 RUN node -e ' \
       const fs = require("node:fs"); const crypto = require("node:crypto"); \
@@ -102,8 +109,10 @@ RUN node -e ' \
     && tar -xzf /tmp/doppler-src.tar.gz -C /src \
     && mv "/src/$(node -p 'require("/tmp/doppler.json").source.prefix')" /src/doppler
 
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS doppler-utils
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS doppler-utils
+COPY scripts/configure-debian-build-snapshot.sh /tmp/configure-debian-build-snapshot.sh
+RUN sh /tmp/configure-debian-build-snapshot.sh && rm /tmp/configure-debian-build-snapshot.sh \
+ && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build pkg-config ca-certificates \
       libfreetype-dev libfontconfig-dev libjpeg-dev libopenjp2-7-dev libpng-dev \
       libtiff-dev liblcms2-dev zlib1g-dev libboost-dev \
@@ -120,10 +129,10 @@ RUN cmake -S /src/doppler -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     && rm -rf /out/usr/lib/doppler/include /out/usr/lib/doppler/lib/pkgconfig /out/usr/lib/doppler/lib/cmake /out/usr/lib/doppler/share/man \
     && install -D -m 0644 /src/doppler/COPYING /out/usr/lib/doppler/share/doc/doppler/COPYING \
     && install -D -m 0644 /src/doppler/COPYING3 /out/usr/lib/doppler/share/doc/doppler/COPYING3 \
-    && printf 'Doppler (GPL-2.0-or-later). Corresponding source: https://github.com/DocSlurp/doppler/tree/79957e1a3e2addb1b0a964b8744fcd5ec78b5f7c (tarball: https://github.com/DocSlurp/doppler/releases/download/docslurp-79957e1/doppler-79957e1-src.tar.gz)\n' > /out/usr/lib/doppler/share/doc/doppler/SOURCE \
+    && printf 'Doppler (GPL-2.0-or-later). Corresponding source: https://github.com/DocSlurp/doppler/tree/a8af6284815b45d989f37b49b18adf22e703a98b (tarball: https://github.com/DocSlurp/doppler/releases/download/docslurp-a8af628/doppler-a8af628-src.tar.gz)\n' > /out/usr/lib/doppler/share/doc/doppler/SOURCE \
     && for tool in pdftotext pdftohtml pdfinfo pdfimages pdftoppm pdfseparate pdfunite pdfpagecount; do test -x "/out/usr/lib/doppler/bin/$tool"; done
 
-FROM rust:1.99-slim-trixie@sha256:7eab7ce19273ce785e0ca7578bdf7bc1fcbae621775a8197379a04c9f6e03cd5 AS doppler-md
+FROM rust:1.100.0-slim-trixie@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe AS doppler-md
 COPY --from=doppler-src /src/doppler/docslurp/doppler-md /src/doppler-md
 # From the crate's directory, so cargo reads its .cargo/config.toml (glibc linked statically, +crt-static).
 WORKDIR /src/doppler-md
@@ -132,7 +141,7 @@ RUN cargo build --release --locked --manifest-path /src/doppler-md/Cargo.toml \
     && install -D -m 0755 /src/doppler-md/target/release/pdftomarkdown /out/usr/lib/doppler/bin/pdftomarkdown
 
 # Production stage: runtime only (no TypeScript toolchain, pnpm store or devDeps)
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0
 # Node's bundled npm 11.19.1 carries undici 6.28.0 and brace-expansion 5.0.9 (Trivy HIGH); npm 11.21.2 bundles the fixed
 # versions. Installed from its registry tarball, checked against the pinned sha512 first. Nothing at runtime runs npm.
 RUN node -e ' \
@@ -148,7 +157,10 @@ ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 WORKDIR /app
 
 # System dependencies first: they change least often, so this layer is reused.
-RUN apt-get update \
+COPY scripts/configure-debian-build-snapshot.sh /tmp/configure-debian-build-snapshot.sh
+RUN sh /tmp/configure-debian-build-snapshot.sh && rm /tmp/configure-debian-build-snapshot.sh \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
        bash \
        bubblewrap \
@@ -227,6 +239,9 @@ COPY --from=native-pdf /app/vendor-artifacts ./vendor-artifacts
 # Optional extractor plugins a deployment stages into the build context; the worker loads only the ones
 # DOCSLURP_EXTRACTOR_PLUGINS names (docs/extraction/extractor-plugins.md). Absent by default.
 COPY vendor-artifact[s]/extractor-plugin[s] ./vendor-artifacts/extractor-plugins/
+# Optional operator config file a deployment stages into the build context (docs/self-host/operator-config.md); read only
+# when DOCSLURP_OPERATOR_CONFIG names it, and a set but missing file refuses startup. Absent by default.
+COPY vendor-artifact[s]/operator-confi[g] ./vendor-artifacts/operator-config/
 COPY --from=native-pdf-assets /opt/native-pdf /opt/native-pdf
 COPY worker/LICENSE ./worker/LICENSE
 COPY worker/scripts ./worker/scripts
@@ -277,9 +292,9 @@ RUN node scripts/write-component-provenance.mjs \
       --doppler worker/doppler.json --doppler-prefix /usr/lib/doppler \
       --engine-manifest /app/vendor-artifacts/native-pdf/manifest.json
 LABEL io.docslurp.doppler.source="https://github.com/DocSlurp/doppler" \
-      io.docslurp.doppler.commit="79957e1a3e2addb1b0a964b8744fcd5ec78b5f7c" \
+      io.docslurp.doppler.commit="a8af6284815b45d989f37b49b18adf22e703a98b" \
       io.docslurp.doppler.license="GPL-2.0-or-later" \
-      io.docslurp.doppler.corresponding-source="https://github.com/DocSlurp/doppler/tree/79957e1a3e2addb1b0a964b8744fcd5ec78b5f7c" \
+      io.docslurp.doppler.corresponding-source="https://github.com/DocSlurp/doppler/tree/a8af6284815b45d989f37b49b18adf22e703a98b" \
       io.docslurp.sbom.native-components="/usr/share/doc/docslurp/sbom/native-components.spdx.json"
 ENV NATIVE_PDF_OCR_MODEL_DIR=${DOCSLURP_NATIVE_PDF_OCR_MODELS:+/opt/native-pdf/ocr-models}
 ENV NATIVE_PDF_FONTS_DIR=${DOCSLURP_NATIVE_PDF_CJK_FONTS:+/opt/native-pdf/fonts}

@@ -5,6 +5,7 @@ import {
   runStatusSchema,
   stageExecutionStatusSchema,
 } from "./pipeline.js";
+import { qualityLevelSchema, visualsLevelSchema } from "./extraction-config.js";
 
 export const projectRunSchema = z.object({
   id: z.string(),
@@ -24,8 +25,34 @@ export const projectRunSchema = z.object({
   stage: runStageSchema,
   totalDocuments: z.number(),
   processedDocuments: z.number(),
+  /**
+   * Pages the run covers. Provisional until `pagesCountedAt` is set: intake estimates the pages of formats only the
+   * worker can count, and the total moves as documents are measured.
+   */
   pagesTotal: z.number(),
+  /**
+   * Page checkpoints of the extraction stages, capped at `pagesTotal`. It reaches `pagesTotal` when text extraction
+   * finishes, before routing, page reading and indexing have run: it is not how much of the run can be searched (see
+   * `pagesSearchable`).
+   */
   pagesProcessed: z.number(),
+  /**
+   * Pages of the run's documents that finished indexing and are served by search, at most `pagesTotal`. It advances
+   * one document at a time (a document is published to search whole), and on a completed run it is the pages of the
+   * documents that completed, so it stays below `pagesTotal` when documents failed or were withheld. Null or absent:
+   * not reported (an older server or worker, or a run that predates the field); fall back to `pagesProcessed`.
+   */
+  pagesSearchable: z.number().int().nonnegative().nullable().optional(),
+  /**
+   * When `pagesTotal` became final: every stage that measures page counts has finished, or the run completed. Null
+   * while documents are still being counted, so `pagesTotal` is a provisional total. Absent: not reported.
+   */
+  pagesCountedAt: z.string().nullable().optional(),
+  /**
+   * When a worker first picked the run up. Null while the run waits for a worker (queued, or a worker is starting),
+   * and it is not reset by a retry or resume. Absent: not reported. Stage states carry their own `startedAt`.
+   */
+  workerStartedAt: z.string().nullable().optional(),
   /**
    * Documents that failed a stage and were skipped. A Run with failed
    * Documents still completes (the rest were processed); clients show
@@ -47,6 +74,18 @@ export const projectRunSchema = z.object({
    */
   billedCostCents: z.number().nonnegative().default(0),
   pipeline: pipelineFeaturesSchema,
+  /**
+   * The quality and visuals this run executes, in the current names: its stamp (`pipeline.effective`, with any
+   * `capsApplied` lowering by privacy, switches or replay caps), or for a run stamped before this release its settings
+   * mapped on read with `legacy: true`. Stored snapshots are never rewritten.
+   */
+  extraction: z.object({
+    quality: qualityLevelSchema,
+    visuals: visualsLevelSchema,
+    readsPages: z.boolean(),
+    capsApplied: z.array(z.object({ field: z.enum(["quality", "visuals"]), from: z.string(), to: z.string(), reason: z.string() })),
+    legacy: z.boolean(),
+  }).optional(),
   stats: z.record(z.string(), z.unknown()).default({}),
   artifacts: z.record(z.string(), z.string()).default({}),
   error: z.string().nullable(),

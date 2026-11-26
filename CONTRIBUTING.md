@@ -1,12 +1,11 @@
 # Contributing to DocSlurp
 
-Thanks for your interest. DocSlurp is pre-release and moving quickly, so small, focused contributions that match the current direction are the easiest to merge. Please open an issue before starting anything large.
+Thanks for your interest. DocSlurp moves quickly, so small, focused contributions that match the current direction are the easiest to merge. Please open an issue before starting anything large.
 
 ## Layout
 
 `pnpm` monorepo:
 
-- `server/`: the Hono API (`@docslurp/server`), with Postgres migrations, seed and the migration runner in `server/db/`
 - `worker/`: the ingestion pipeline (TypeScript, Temporal)
 - `packages/*`: the SDK (with its `/embed` subpath), CLI, `contrib-*` integrations and compatibility clients; `packages/shared` holds shared contracts
 
@@ -15,18 +14,9 @@ Stack: TypeScript (strict), Hono, Postgres, MinIO/S3, Redis, Temporal. Node.js 2
 ## Development setup
 
 ```bash
-cp .env.example .env
 pnpm install
-pnpm db:up          # Postgres, Redis, MinIO and Temporal via Docker Compose
-pnpm db:migrate     # apply server/db/migrations
-pnpm db:seed        # local development users, one organization and one project (fixed UUID ids)
-pnpm dev:api        # standalone API on http://localhost:8787
-pnpm dev:worker     # worker, in a second terminal
+pnpm --filter @docslurp/worker build
 ```
-
-`pnpm db:seed` can be run again at any time. A database seeded before the seed ids became UUIDs (organization
-`seed-shared-org`) keeps its old ids and logs a warning: live updates need UUID ids, so that organization falls back to
-polling until you reset the database (`docker compose down -v`, then `pnpm db:up && pnpm db:migrate && pnpm db:seed`).
 
 Worker tests and local PDF mode count PDF pages with Doppler's `pdfpagecount` (under `prlimit`, from util-linux). Install the
 pinned Doppler utilities once per pin with `bash scripts/install-doppler.sh`: it verifies the source tarball pinned in
@@ -56,7 +46,7 @@ The web dashboard is not part of this repository, so there is no `pnpm dev` UI h
 
 Tests that need third-party PDFs fetch them on first use with `pnpm fixtures:fetch` into the gitignored `.cache/`; never commit them.
 
-Database schema changes go only through `server/db/migrations` (`pnpm db:generate`, or a hand-written `NNNN_name.sql` plus its `meta/_journal.json` entry). Tests build their databases by applying the migrations in order.
+Database schema changes go only through `server/db/migrations`: run `pnpm db:new <name>` and write the SQL in the `YYYYMMDDTHHMM_<name>.sql` file it creates (UTC). There is no journal to edit and no number to pick, so two branches never collide; the runner (`server/db/migration-runner.mjs`) applies every file a database has not recorded, in name order, one transaction per file. Tests build their databases by applying the migrations in order.
 
 ### Real Postgres and Redis tests
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { EXTRACTOR_PLUGIN_API_VERSION, registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedOcrProvider, type SandboxedOcrJob } from "../extractors/plugins.js";
+import { EXTRACTOR_PLUGIN_API_VERSION, registerExtractorPlugin, resetExtractorPluginsForTest, setExtractorRunBacklog, type SandboxedOcrProvider, type SandboxedOcrJob } from "../extractors/plugins.js";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import { CommandRunner } from "../tools/runner.js";
 
@@ -16,7 +16,7 @@ function register() {
 }
 
 describe("sandboxed OCR run context", () => {
-  afterEach(() => resetExtractorPluginsForTest());
+  afterEach(() => { resetExtractorPluginsForTest(); setExtractorRunBacklog(undefined); });
 
   it("passes the run's organization and document to the provider", async () => {
     const run = register();
@@ -26,7 +26,7 @@ describe("sandboxed OCR run context", () => {
       { runId: "r", orgId: "org-a", documentId: "doc-1", scope: "document", stageName: "ocr", pushPerformance: () => {} },
       () => runner.run(plan),
     );
-    expect(run).toHaveBeenCalledWith(job, undefined, { tenantKey: "org-a", affinityKey: "doc-1" });
+    expect(run).toHaveBeenCalledWith(job, undefined, { tenantKey: "org-a", affinityKey: "doc-1", runBacklog: expect.any(Function) });
   });
 
   it("does not leak another concurrent organization's context or trust affinity as ownership", async () => {
@@ -37,8 +37,8 @@ describe("sandboxed OCR run context", () => {
       async () => { await Promise.resolve(); await runner.run(await runner.sandboxedOcrRead(job)); },
     )));
     expect(run.mock.calls.map(call => call[2])).toEqual(expect.arrayContaining([
-      { tenantKey: "org-a", affinityKey: "same-document" },
-      { tenantKey: "org-b", affinityKey: "same-document" },
+      { tenantKey: "org-a", affinityKey: "same-document", runBacklog: expect.any(Function) },
+      { tenantKey: "org-b", affinityKey: "same-document", runBacklog: expect.any(Function) },
     ]));
     await runner.run(await runner.sandboxedOcrRead(job));
     expect(run.mock.calls[2]![2]).toEqual({});
@@ -49,5 +49,20 @@ describe("sandboxed OCR run context", () => {
     const runner = new CommandRunner();
     await runner.run(await runner.sandboxedOcrRead(job));
     expect(run.mock.calls[0]![2]).toEqual({});
+  });
+
+  it("reads the backlog of the job's own run, scoped to its organization, only when the provider asks", async () => {
+    const lookup = vi.fn(async (scope: { orgId: string; runId: string }) => (scope.orgId === "org-a" ? 42 : 0));
+    setExtractorRunBacklog(lookup);
+    const run = register();
+    const runner = new CommandRunner();
+    await runWithPerfContext(
+      { runId: "run-a", orgId: "org-a", documentId: "doc-1", scope: "document", stageName: "ocr", pushPerformance: () => {} },
+      async () => runner.run(await runner.sandboxedOcrRead(job)),
+    );
+    expect(lookup).not.toHaveBeenCalled();
+    const hint = await run.mock.calls[0]![2]!.runBacklog!();
+    expect(lookup).toHaveBeenCalledWith({ orgId: "org-a", runId: "run-a" });
+    expect(hint).toEqual({ queuedPages: 42, observedAt: expect.any(Number) });
   });
 });

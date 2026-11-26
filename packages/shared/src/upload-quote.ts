@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { isBillingEnforced, pipelineProfileIdSchema, pricingVersion } from "./billing.js";
+import { isBillingEnforced, pipelineProfileIdFor, pipelineProfileIdSchema, pricingVersion } from "./billing.js";
 import { fileProfileSchema, normalizeFileProfile, type FileProfile } from "./file-profile.js";
 import { type CostEstimate } from "./jobs.js";
 import type { UploadMediaEstimate, UploadMediaFile } from "./media-upload-estimate.js";
@@ -10,6 +10,9 @@ export * from "./upload-pages.js";
 import { profilePageEquivalentRange } from "./upload-pages.js";
 import { compilePipelinePlan, type PipelineFeatures } from "./pipeline.js";
 import { figuresEnabled } from "./doppler-figures.js";
+import { effectiveLadder, ladderShareBudget, pageReadingQuality } from "./auto-ladder.js";
+import { uploadMediaKind } from "./media-upload-estimate.js";
+import { quoteFilePageRange } from "./upload-pages.js";
 
 /*
  * Upload quotes without a database: what `POST /v1/uploads/estimate` returns. This module holds the generic parts (page
@@ -59,6 +62,11 @@ export const estimateProfileSchema = z.strictObject({
    */
   figures: z.boolean().optional(),
   billing: z.enum(["enforced", "disabled"]),
+  /**
+   * Auto ladder (`pipeline.ladder.maxEscalationShare.aboveFast`): the largest share of each document's pages a model may
+   * read. The quote caps its Rich pages at this share (capQuoteToLadderShare); the pricing provider never sees it.
+   */
+  aboveFastShare: z.number().finite().min(0).max(1).optional(),
 });
 export type EstimateProfile = z.infer<typeof estimateProfileSchema>;
 
@@ -75,7 +83,8 @@ export function estimateProfileFor(
   const stages = compilePipelinePlan(pipeline).stageOrder;
   return {
     pricingVersion: pricingVersion(),
-    quality: pipeline.quality,
+    // The pricing profile the pipeline reads with: Read scans off (the fast rung) is quoted as Fast.
+    quality: pipelineProfileIdFor(pipeline),
     documentFeatures: {
       documentSummary: stages.includes("document-summary"),
       structuredFields: stages.includes("structured-extract"),
@@ -87,7 +96,46 @@ export function estimateProfileFor(
     stageCount: stages.length,
     figures: figuresOn(pipeline as { figures?: boolean | null }, options.env),
     billing: isBillingEnforced(options.env) ? "enforced" : "disabled",
+    ...ladderShareProfile(pipeline),
   };
+}
+
+/** The ladder's above-fast share for an EstimateProfile, when Auto runs with one. */
+export function ladderShareProfile(pipeline: Pick<PipelineFeatures, "quality" | "ladder">): { aboveFastShare?: number } {
+  const ladder = effectiveLadder(pipeline);
+  return ladder.active && ladder.aboveFast !== undefined ? { aboveFastShare: ladder.aboveFast } : {};
+}
+
+/**
+ * Caps a quote's credits at the ladder's above-fast share: at most budget(share, pages) pages of each paged file are read
+ * (Rich), the rest bill Fast. `credits` is the provider's Auto price and `fastCredits` its Fast price for the same files;
+ * the surcharge per page is the provider's own (Auto minus Fast over the pages, so page equivalents and multi-page reads
+ * count as the provider counts them), and the cap is never above the uncapped quote. Prices are the provider's.
+ */
+export function capCreditsToLadderShare(args: {
+  credits: { low: number; high: number };
+  fastCredits: { low: number; high: number };
+  files: readonly QuoteFile[];
+  share: number;
+}): { low: number; high: number } {
+  let pagesLow = 0;
+  let pagesHigh = 0;
+  let allowedLow = 0;
+  let allowedHigh = 0;
+  for (const file of args.files) {
+    if (uploadMediaKind(file)) continue;
+    const range = quoteFilePageRange(file);
+    pagesLow += range.low;
+    pagesHigh += range.high;
+    // A multi-frame image is kept unread under a share by the worker, which classifies it by its sniffed type; the quote
+    // cannot see that, so it prices the share's budget for it like any file (never below what the worker can read).
+    allowedLow += ladderShareBudget(args.share, range.low);
+    allowedHigh += ladderShareBudget(args.share, range.high);
+  }
+  const perPage = (auto: number, fast: number, pages: number) => (pages > 0 ? Math.max(0, auto - fast) / pages : 0);
+  const cappedHigh = Math.min(args.credits.high, args.fastCredits.high + allowedHigh * perPage(args.credits.high, args.fastCredits.high, pagesHigh));
+  const cappedLow = Math.min(args.credits.low, args.fastCredits.low + allowedLow * perPage(args.credits.low, args.fastCredits.low, pagesLow), cappedHigh);
+  return { low: Math.max(0, cappedLow), high: Math.max(0, cappedHigh) };
 }
 
 /** One file to quote: name, size and type, a counted page count or duration when known, and the client's file profile. */
@@ -147,6 +195,21 @@ export function quoteUpload(args: {
   speedBoost?: boolean;
 }): { estimate: CostEstimate; media: UploadMediaEstimate | null } {
   // A profile from a newer server (unknown quality or feature) is refused rather than priced as something cheaper.
-  const profile = estimateProfileSchema.parse(args.profile);
-  return pricing().quoteUpload({ files: args.files.map(applyFileProfile), profile, speedBoost: args.speedBoost === true });
+  const { aboveFastShare, ...profile } = estimateProfileSchema.parse(args.profile);
+  const files = args.files.map(applyFileProfile);
+  const speedBoost = args.speedBoost === true;
+  const quote = pricing().quoteUpload({ files, profile, speedBoost });
+  if (aboveFastShare === undefined || (profile.quality !== "fastest" && profile.quality !== "smartest") || !quote.estimate.credits) return quote;
+  // Auto with an above-fast share (pipeline.ladder): pages beyond the share are not read, so they are not quoted Rich.
+  const fast = pricing().quoteUpload({ files, profile: { ...profile, quality: "fast" }, speedBoost });
+  if (!fast.estimate.credits) return quote;
+  const credits = capCreditsToLadderShare({ credits: quote.estimate.credits, fastCredits: fast.estimate.credits, files, share: aboveFastShare });
+  return {
+    ...quote,
+    estimate: {
+      ...quote.estimate,
+      credits,
+      basis: `${quote.estimate.basis}; at most ${Math.round(aboveFastShare * 1000) / 10}% of each document's pages read by a model (pipeline.ladder)`,
+    },
+  };
 }

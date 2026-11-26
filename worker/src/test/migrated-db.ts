@@ -1,58 +1,42 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { readdirSync, readFileSync } from "node:fs";
 
 import { PGlite } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 
-// The migrations live in the server package (server/db/migrations), which owns the
-// schema. The worker only reads the SQL files by relative path for its test
-// databases; it never imports server code (see scripts/lib/server-boundary.mjs).
-const migrationsDir = fileURLToPath(new URL("../../../server/db/migrations/", import.meta.url));
+import { testMigrationPath } from "./migration-path.js";
 
-export type MigrationJournalEntry = { idx: number; when: number; tag: string };
-
-export function readMigrationJournal(): MigrationJournalEntry[] {
-  return (JSON.parse(readFileSync(`${migrationsDir}meta/_journal.json`, "utf8")) as {
-    entries: MigrationJournalEntry[];
-  }).entries;
-}
+const MIGRATION_NAME = /^(?:\d{4}|2\d{7}T\d{4})_[a-z0-9][a-z0-9_]*$/;
 
 /**
- * drizzle-kit migrate (server/db/migrate.mjs) applies only entries whose `when` is
- * later than the newest one a database has already recorded, so an entry
- * stamped earlier than its predecessor is silently skipped on existing
- * databases while fresh ones apply it. Entries must therefore have contiguous
- * `idx` values and strictly increasing `when` stamps; server/db/migrate.mjs runs the
- * same check before migrating.
+ * The migration tags (file names without .sql) in the order they apply: plain name order, the numbered files before
+ * the UTC-timestamp ones. server/db/migration-runner.mjs is the production runner and owns the naming rules; this
+ * helper only reads the same directory the same way.
  */
-export function migrationJournalProblems(entries: MigrationJournalEntry[]): string[] {
-  const problems: string[] = [];
-  entries.forEach((entry, position) => {
-    if (entry.idx !== position) problems.push(`${entry.tag}: idx ${entry.idx}, expected ${position}`);
-    const previous = entries[position - 1];
-    if (previous && !(entry.when > previous.when)) {
-      problems.push(`${entry.tag}: when ${entry.when} is not after ${previous.tag} (${previous.when})`);
-    }
-  });
-  return problems;
+export function readMigrationTags(): string[] {
+  return readdirSync(testMigrationPath(), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
+    .map((entry) => entry.name.slice(0, -".sql".length))
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-/** A tag, or its name without the number prefix (survives renumbering at merge). */
+/** Tags whose names the production runner would refuse to list. */
+export function migrationNameProblems(tags: string[]): string[] {
+  return tags.filter((tag) => !MIGRATION_NAME.test(tag)).map((tag) => `${tag}: expected NNNN_name (frozen) or YYYYMMDDTHHMM_name`);
+}
+
+/** A tag, or its name without the number or timestamp prefix. */
 function findTag(tags: string[], name: string): number {
-  return tags.findIndex((tag) => tag === name || tag.replace(/^\d+_/, "") === name);
+  return tags.findIndex((tag) => tag === name || tag.replace(/^\d+(?:T\d+)?_/, "") === name);
 }
 
 /**
- * One transaction per migration, so a test can stop between two of them. This
- * is NOT how production applies them: server/db/migrate.mjs (drizzle's
- * migrator) runs every pending migration in a single transaction. There, a
- * lock a migration takes is held until the last pending migration commits, a
- * SET LOCAL lasts through the migrations after it, and an ON COMMIT DROP temp
- * table survives into them. Judge a migration's lock time by everything that
- * can be pending with it, not by its own statements.
+ * One transaction per migration, as production applies them
+ * (server/db/migration-runner.mjs): a lock a migration takes is released when
+ * that migration commits, and a SET LOCAL or an ON COMMIT DROP temp table ends
+ * with it.
  */
 export async function applyMigration(db: PGlite, tag: string): Promise<void> {
-  const sql = readFileSync(`${migrationsDir}${tag}.sql`, "utf8");
+  const sql = readFileSync(testMigrationPath(`${tag}.sql`), "utf8");
   await db.transaction(async (tx) => {
     for (const statement of sql.split("--> statement-breakpoint")) {
       if (statement.trim()) await tx.exec(statement);
@@ -60,35 +44,46 @@ export async function applyMigration(db: PGlite, tag: string): Promise<void> {
   });
 }
 
+const LEDGER = `create schema if not exists docslurp_migrations;
+  create table if not exists docslurp_migrations.applied (filename text primary key, sha256 text not null,
+    applied_at timestamptz not null default now(), source text not null default 'runner')`;
+
+/** Record tags in the runner's ledger (same shape as migration-runner.mjs), so code that reads it sees a real database. */
+async function recordApplied(db: PGlite, tags: string[]): Promise<void> {
+  await db.exec(LEDGER);
+  for (const tag of tags) {
+    await db.query("insert into docslurp_migrations.applied (filename, sha256, source) values ($1, '', 'test') on conflict do nothing", [`${tag}.sql`]);
+  }
+}
+
 /**
- * An in-memory Postgres (PGlite) built exactly as every real
- * database is: by applying server/db/migrations in journal order. server/db/migrations is the
- * only schema source; there is no snapshot to drift from it. Fails loudly on a
- * journal drizzle-kit would apply differently to an existing database.
+ * An in-memory Postgres (PGlite) built exactly as every real database is: by
+ * applying server/db/migrations in name order and recording each file in
+ * docslurp_migrations.applied. server/db/migrations is the only schema source;
+ * there is no snapshot to drift from it.
  *
- * `stopBefore` (a migration tag or its unnumbered name, e.g.
+ * `stopBefore` (a migration tag or its unprefixed name, e.g.
  * "usage_event_tenant_columns") stops before that migration, so a test can
  * seed rows in the older shape and apply the rest with
  * `applyRemainingMigrations` to check a backfill.
  */
 export async function createMigratedDatabase(options: { stopBefore?: string } = {}): Promise<PGlite> {
-  const journal = readMigrationJournal();
-  const problems = migrationJournalProblems(journal);
-  if (problems.length > 0) {
-    throw new Error(`server/db/migrations/meta/_journal.json is out of order:\n${problems.join("\n")}`);
-  }
-  const tags = journal.map((entry) => entry.tag);
+  const tags = readMigrationTags();
+  const problems = migrationNameProblems(tags);
+  if (problems.length > 0) throw new Error(`server/db/migrations has invalid file names:\n${problems.join("\n")}`);
   const stop = options.stopBefore ? findTag(tags, options.stopBefore) : tags.length;
   if (stop < 0) throw new Error(`Unknown migration ${options.stopBefore}`);
   const db = new PGlite({ extensions: { pgcrypto } });
   for (const tag of tags.slice(0, stop)) await applyMigration(db, tag);
+  await recordApplied(db, tags.slice(0, stop));
   return db;
 }
 
-/** Apply the migrations from `from` (a tag or its unnumbered name) onwards. */
+/** Apply the migrations from `from` (a tag or its unprefixed name) onwards. */
 export async function applyRemainingMigrations(db: PGlite, from: string): Promise<void> {
-  const tags = readMigrationJournal().map((entry) => entry.tag);
+  const tags = readMigrationTags();
   const start = findTag(tags, from);
   if (start < 0) throw new Error(`Unknown migration ${from}`);
   for (const tag of tags.slice(start)) await applyMigration(db, tag);
+  await recordApplied(db, tags.slice(start));
 }

@@ -55,9 +55,11 @@ def evaluation_identity(root,scorers,measure_path,ocr_binary_hash,ocr_language_h
     for command in ['pdftotext','pdfimages','qpdf']:
         r=subprocess.run([command,'--version'] if command=='qpdf' else [command,'-v'],capture_output=True,timeout=10)
         versions[command]=(r.stdout+r.stderr).decode().splitlines()[0]
+    scorer_root = Path(scorers)
+    scorer_files = [*scorer_root.glob('*.py'), *scorer_root.glob('raster_v1/*.py')]
     return {'datasetHash':file_hash(root/'manifest.json'),'datasetCanonicalHash':identity_hash(json.loads((root/'manifest.json').read_text())),'measureHash':file_hash(measure_path),
             'contractHash':file_hash(Path(__file__)),
-            'scorerHashes':{p.name:file_hash(p) for p in sorted(Path(scorers).glob('*.py'))},
+            'scorerHashes':{p.relative_to(scorer_root).as_posix():file_hash(p) for p in sorted(scorer_files)},
             'ocrBinaryHash':ocr_binary_hash,'ocrLanguageHash':ocr_language_hash,'pymupdf':render_version,
             'python':sys.version,'toolVersions':versions,'toolHashes':{tool:file_hash(shutil.which(tool)) for tool in versions},
             'dependencies':{name:importlib.metadata.version(name) for name in ['Pillow','latex2mathml','markdown-it-py','lxml']},'ocrSettings':[[150,6],[300,3]]}

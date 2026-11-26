@@ -273,6 +273,9 @@ export const vectorIndexes = pgTable(
     path: text().notNull(),
     embeddingModel: text("embedding_model").notNull(),
     dimension: integer().notNull(),
+    /** The exact embedding space as an `llm://` URI and the profile that chose it (migration 0192). Operator-facing. */
+    embeddingModelUri: text("embedding_model_uri"),
+    embeddingModelClass: text("embedding_model_class"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -307,21 +310,22 @@ export const usageEvents = pgTable(
     provider: text().notNull(),
     model: text().notNull(),
     metric: text().notNull(),
-    amount: numeric({ precision: 12, scale: 4 }).notNull(),
+    amount: numeric().notNull(),
     unit: text().notNull(),
     costCents: numeric("cost_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     metadata: jsonb().default({}).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
-    inputTokens: integer("input_tokens").default(0).notNull(),
-    outputTokens: integer("output_tokens").default(0).notNull(),
+    inputTokens: bigint("input_tokens", { mode: "number" }).default(0).notNull(),
+    outputTokens: bigint("output_tokens", { mode: "number" }).default(0).notNull(),
     // Stamped at write time, no FKs: spend outlives the run, project and key (migration 0041).
     orgId: text("org_id"),
     projectId: text("project_id"),
     apiKeyId: text("api_key_id"),
   },
   (table) => [
+    check("usage_events_amount_finite_range", sql`${table.amount} NOT IN ('Infinity'::numeric, '-Infinity'::numeric)`),
     index("usage_events_org_created_idx").on(table.orgId, table.createdAt),
     index("usage_events_project_created_idx").on(table.projectId, table.createdAt),
     index("usage_events_run_id_idx").using(
@@ -510,7 +514,7 @@ export const performanceLog = pgTable(
     stageName: text("stage_name").notNull(),
     metric: text().notNull(),
     pageNumber: integer("page_number"),
-    value: numeric({ precision: 16, scale: 4 }).notNull(),
+    value: numeric().notNull(),
     unit: text().notNull(),
     tags: text().array().default([""]).notNull(),
     metadata: jsonb().default({}).notNull(),
@@ -1093,10 +1097,6 @@ export const documentChunks = pgTable(
       "gin",
       table.tsContent.asc().nullsLast().op("tsvector_ops"),
     ),
-    index("document_chunks_ts_content_idx1").using(
-      "gin",
-      table.tsContent.asc().nullsLast().op("tsvector_ops"),
-    ),
     // Chunk ranges of one document (summary-tree guide mode), migration 0165.
     index("document_chunks_document_chunk_index_idx").using(
       "btree",
@@ -1104,11 +1104,6 @@ export const documentChunks = pgTable(
       table.chunkIndex.asc().nullsLast().op("int4_ops"),
     ),
     index("document_chunks_user_id_run_id_idx").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-      table.runId.asc().nullsLast().op("text_ops"),
-    ),
-    index("document_chunks_user_id_run_id_idx1").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
       table.runId.asc().nullsLast().op("text_ops"),
@@ -1240,16 +1235,7 @@ export const documentPages = pgTable(
       table.documentId.asc().nullsLast().op("int4_ops"),
       table.pageNumber.asc().nullsLast().op("int4_ops"),
     ),
-    index("document_pages_document_id_page_number_idx1").using(
-      "btree",
-      table.documentId.asc().nullsLast().op("int4_ops"),
-      table.pageNumber.asc().nullsLast().op("int4_ops"),
-    ),
     index("document_pages_run_id_idx").using(
-      "btree",
-      table.runId.asc().nullsLast().op("text_ops"),
-    ),
-    index("document_pages_run_id_idx1").using(
       "btree",
       table.runId.asc().nullsLast().op("text_ops"),
     ),
@@ -1387,11 +1373,6 @@ export const documentSummaries = pgTable(
       table.userId.asc().nullsLast().op("text_ops"),
       table.runId.asc().nullsLast().op("text_ops"),
     ),
-    index("document_summaries_user_id_run_id_idx1").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-      table.runId.asc().nullsLast().op("text_ops"),
-    ),
     foreignKey({
       columns: [table.documentId],
       foreignColumns: [documents.id],
@@ -1435,11 +1416,6 @@ export const searchSessions = pgTable(
       table.userId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
-    index("search_sessions_user_id_created_at_idx1").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-      table.createdAt.desc().nullsFirst().op("text_ops"),
-    ),
     foreignKey({
       columns: [table.userId],
       foreignColumns: [user.id],
@@ -1471,15 +1447,7 @@ export const searchSessionResults = pgTable(
       "btree",
       table.chunkId.asc().nullsLast().op("text_ops"),
     ),
-    index("search_session_results_chunk_id_idx1").using(
-      "btree",
-      table.chunkId.asc().nullsLast().op("text_ops"),
-    ),
     index("search_session_results_session_id_idx").using(
-      "btree",
-      table.sessionId.asc().nullsLast().op("text_ops"),
-    ),
-    index("search_session_results_session_id_idx1").using(
       "btree",
       table.sessionId.asc().nullsLast().op("text_ops"),
     ),
@@ -1601,10 +1569,6 @@ export const searchEvalFixtures = pgTable(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
     ),
-    index("search_eval_fixtures_user_id_idx1").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-    ),
     foreignKey({
       columns: [table.runId],
       foreignColumns: [projectRuns.id],
@@ -1643,18 +1607,9 @@ export const searchIndexStaleness = pgTable(
       "btree",
       table.runId.asc().nullsLast().op("text_ops"),
     ),
-    index("search_index_staleness_run_id_idx1").using(
-      "btree",
-      table.runId.asc().nullsLast().op("text_ops"),
-    ),
     index("search_index_staleness_user_id_detected_at_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("timestamptz_ops"),
-      table.detectedAt.desc().nullsFirst().op("text_ops"),
-    ),
-    index("search_index_staleness_user_id_detected_at_idx1").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
       table.detectedAt.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
@@ -1698,24 +1653,11 @@ export const documentPropositions = pgTable(
       "btree",
       table.documentId.asc().nullsLast().op("text_ops"),
     ),
-    index("document_propositions_document_id_idx1").using(
-      "btree",
-      table.documentId.asc().nullsLast().op("text_ops"),
-    ),
     index("document_propositions_ts_content_idx").using(
       "gin",
       table.tsContent.asc().nullsLast().op("tsvector_ops"),
     ),
-    index("document_propositions_ts_content_idx1").using(
-      "gin",
-      table.tsContent.asc().nullsLast().op("tsvector_ops"),
-    ),
     index("document_propositions_user_id_run_id_idx").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-      table.runId.asc().nullsLast().op("text_ops"),
-    ),
-    index("document_propositions_user_id_run_id_idx1").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
       table.runId.asc().nullsLast().op("text_ops"),
@@ -1794,11 +1736,6 @@ export const searchExperiments = pgTable(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
       table.active.asc().nullsLast().op("bool_ops"),
-    ),
-    index("search_experiments_user_id_active_idx1").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-      table.active.asc().nullsLast().op("text_ops"),
     ),
     foreignKey({
       columns: [table.userId],
@@ -2255,6 +2192,10 @@ export const uploadSessions = pgTable(
     lastError: text("last_error"),
     reconcileAttempts: integer("reconcile_attempts").default(0).notNull(),
     nextReconcileAt: timestamp("next_reconcile_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    /** A client completing its own files holds the reconciler off the session until then (migration 0196). */
+    clientFinalizingUntil: timestamp("client_finalizing_until", { withTimezone: true, mode: "string" }),
+    /** When the current run of client holds began; total hold time is capped from it (migration 0196). */
+    clientFinalizingSince: timestamp("client_finalizing_since", { withTimezone: true, mode: "string" }),
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).default(sql`now() + interval '24 hours'`).notNull(),
     tags: text().array().default([]).notNull(),
     id: text().primaryKey().notNull(),
@@ -2320,6 +2261,8 @@ export const uploadSessionFiles = pgTable(
     status: text().default("pending").notNull(),
     etag: text(),
     completedParts: jsonb("completed_parts").default([]).notNull(),
+    /** Set once the provider multipart upload of an aborted or failed session was aborted (migration 0196). */
+    multipartAbortedAt: timestamp("multipart_aborted_at", { withTimezone: true, mode: "string" }),
     sha256: text(),
     contentIdentity: jsonb("content_identity").$type<{ algorithm: "sha256"; digest: string }>(),
     canonicalId: text("canonical_id"),
@@ -2343,6 +2286,11 @@ export const uploadSessionFiles = pgTable(
       "btree",
       table.sourceKey.asc().nullsLast().op("text_ops"),
     ),
+    // Open multipart uploads still to abort (migration 0196).
+    index("upload_session_files_pending_multipart_abort_idx").using(
+      "btree",
+      table.sessionId.asc().nullsLast().op("text_ops"),
+    ).where(sql`(upload_id IS NOT NULL) AND (multipart_aborted_at IS NULL)`),
     foreignKey({
       columns: [table.sessionId],
       foreignColumns: [uploadSessions.id],
@@ -2363,10 +2311,15 @@ export const projectRuns = pgTable(
     blockedReason: text("blocked_reason"),
     jobId: text("job_id"),
     stage: text().notNull(),
-    totalDocuments: integer("total_documents").default(0).notNull(),
-    processedDocuments: integer("processed_documents").default(0).notNull(),
-    pagesTotal: integer("pages_total").default(0).notNull(),
-    pagesProcessed: integer("pages_processed").default(0).notNull(),
+    totalDocuments: bigint("total_documents", { mode: "number" }).default(0).notNull(),
+    processedDocuments: bigint("processed_documents", { mode: "number" }).default(0).notNull(),
+    pagesTotal: bigint("pages_total", { mode: "number" }).default(0).notNull(),
+    pagesProcessed: bigint("pages_processed", { mode: "number" }).default(0).notNull(),
+    /** Pages of documents that finished indexing; null when no release that reports it has written the run (migration 20261125T2042). */
+    pagesSearchable: bigint("pages_searchable", { mode: "number" }),
+    /** When pages_total stopped being provisional; null while documents are still being counted (migration 20261125T2042). */
+    pagesCountedAt: timestamp("pages_counted_at", { withTimezone: true, mode: "string" }),
+    spendUncheckedPages: bigint("spend_unchecked_pages", { mode: "number" }).default(0).notNull(),
     /** @deprecated Replaced by spentCents (migration 0056); no longer read or written, dropped in a later migration. */
     inputCostCents: numeric("input_cost_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     /** @deprecated Replaced by spentCents (migration 0056); no longer read or written, dropped in a later migration. */
@@ -2377,6 +2330,8 @@ export const projectRuns = pgTable(
      */
     spentCents: numeric("spent_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     pipeline: jsonb().default({}).notNull(),
+    /** Models that served the run per service, as resolved at its first pickup (migration 0192). Operator-facing. */
+    resolvedModels: jsonb("resolved_models"),
     /** Run origin from the authenticated principal: app (first-party session) or machine (migration 0141). */
     origin: text().default("machine").notNull(),
     stats: jsonb().default({}).notNull(),
@@ -2431,6 +2386,13 @@ export const projectRuns = pgTable(
       withTimezone: true,
       mode: "string",
     }),
+    // Run milestones, each stamped once (0183_run_milestones; worker/src/pipeline/run-milestones.ts).
+    workerStartedAt: timestamp("worker_started_at", { withTimezone: true, mode: "string" }),
+    firstPageExtractedAt: timestamp("first_page_extracted_at", { withTimezone: true, mode: "string" }),
+    firstPageCompletedAt: timestamp("first_page_completed_at", { withTimezone: true, mode: "string" }),
+    outcomeRecordedAt: timestamp("outcome_recorded_at", { withTimezone: true, mode: "string" }),
+    /** When the run last reached a terminal status (completed or failed); null while active (migration 0200 trigger). */
+    finishedAt: timestamp("finished_at", { withTimezone: true, mode: "string" }),
     workflowStartAttempts: integer("workflow_start_attempts").default(0).notNull(),
     workflowStartNextAt: timestamp("workflow_start_next_at", {
       withTimezone: true,
@@ -3438,7 +3400,7 @@ export const adminStats = pgMaterializedView("admin_stats", {
   pagesTotal: bigint("pages_total", { mode: "number" }),
   avgCostCents: numeric("avg_cost_cents"),
 }).as(
-  sql`SELECT date_trunc('hour'::text, created_at) AS hour, count(*) AS runs_count, sum(pages_total) AS pages_total, avg(output_cost_cents + input_cost_cents) AS avg_cost_cents FROM project_runs GROUP BY (date_trunc('hour'::text, created_at))`,
+  sql`SELECT date_trunc('hour'::text, created_at) AS hour, count(*) AS runs_count, sum(pages_total)::bigint AS pages_total, avg(output_cost_cents + input_cost_cents) AS avg_cost_cents FROM project_runs GROUP BY (date_trunc('hour'::text, created_at))`,
 );
 
 export const searchExperimentResults = pgView("search_experiment_results", {
@@ -3582,6 +3544,8 @@ export const documentPageStates = pgTable(
     mapped: boolean().default(false).notNull(),
     embeddedAt: timestamp("embedded_at", { withTimezone: true, mode: "string" }),
     embeddingModel: text("embedding_model"),
+    /** The exact embedding space as an `llm://` URI (migration 0192). Operator-facing. */
+    embeddingModelUri: text("embedding_model_uri"),
     state: text().default("unseen").notNull(),
     claimedByRun: text("claimed_by_run"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true, mode: "string" }),
@@ -3678,6 +3642,53 @@ export const documentAssets = pgTable("document_assets", {
   index("document_assets_storage_key_idx").on(table.documentId, table.storageKey).where(sql`storage_key IS NOT NULL`),
   index("document_assets_resumable_idx").on(table.orgId, table.documentId).where(sql`resumable`),
   index("document_assets_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
+]);
+
+/**
+ * Page extract records (migration 0188): how each page's text was produced, one row per (document, page, run, pass).
+ * Labels only; closed vocabularies and bounds are CHECK constraints in the migration (packages/shared page-extracts.ts).
+ */
+export const documentPageExtracts = pgTable("document_page_extracts", {
+  documentId: text("document_id").notNull(),
+  orgId: text("org_id").notNull(),
+  projectId: text("project_id").notNull(),
+  runId: text("run_id").notNull(),
+  pageNumber: integer("page_number").notNull(),
+  // Migration 0193 adds the contributing pass `video-frames` (a video's sampled-frame read), which is never final.
+  pass: text().notNull(),
+  method: text().notNull(),
+  engine: text(),
+  memberId: text("member_id"),
+  region: text(),
+  billedClass: text("billed_class"),
+  tags: text().array().default(sql`'{}'`).notNull(),
+  confidence: real(),
+  plausibility: real(),
+  textBytes: integer("text_bytes"),
+  finishReason: text("finish_reason"),
+  durationMs: integer("duration_ms"),
+  // Migration 0191: the model that served the pass as an llm:// URI, and the run's levels at the time (operator-facing).
+  modelUri: text("model_uri"),
+  modelClass: text("model_class"),
+  isFinal: boolean("is_final").default(false).notNull(),
+  supersededByPass: text("superseded_by_pass"),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.documentId, table.pageNumber, table.runId, table.pass], name: "document_page_extracts_pkey" }),
+  foreignKey({
+    columns: [table.documentId, table.projectId, table.orgId],
+    foreignColumns: [documents.id, documents.projectId, documents.orgId],
+    name: "document_page_extracts_document_id_fkey",
+  }).onDelete("cascade").onUpdate("cascade"),
+  foreignKey({ columns: [table.orgId], foreignColumns: [organizations.id], name: "document_page_extracts_org_id_fkey" }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.runId, table.projectId, table.orgId],
+    foreignColumns: [projectRuns.id, projectRuns.projectId, projectRuns.orgId],
+    name: "document_page_extracts_run_scope_fkey",
+  }).onDelete("cascade"),
+  index("document_page_extracts_run_idx").on(table.runId),
+  uniqueIndex("document_page_extracts_one_final_idx").on(table.documentId, table.pageNumber).where(sql`is_final`),
 ]);
 
 /** Whether a document's Markdown is committed and how far its images got (migration 0141); one row per document. */
@@ -3963,6 +3974,8 @@ export const documentPageVectors = pgTable(
     documentId: text("document_id").notNull(),
     pageNumber: integer("page_number").notNull(),
     model: text().notNull(),
+    /** The exact embedding space as an `llm://` URI (migration 0192). Operator-facing. */
+    modelUri: text("model_uri"),
     dims: integer().notNull(),
     bits: bytea().notNull(),
     int8: bytea().notNull(),

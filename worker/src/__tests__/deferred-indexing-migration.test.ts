@@ -3,8 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   createMigratedDatabase,
-  migrationJournalProblems,
-  readMigrationJournal,
+  migrationNameProblems,
+  readMigrationTags,
 } from "../test/migrated-db.js";
 
 describe("migration 0064 deferred indexing modes", () => {
@@ -27,8 +27,8 @@ describe("migration 0064 deferred indexing modes", () => {
     await db?.close();
   });
 
-  it("keeps the journal consistent", () => {
-    expect(migrationJournalProblems(readMigrationJournal())).toEqual([]);
+  it("keeps migration file names valid", () => {
+    expect(migrationNameProblems(readMigrationTags())).toEqual([]);
   });
 
   it("defaults indexing_mode to full and key policy to {}", async () => {

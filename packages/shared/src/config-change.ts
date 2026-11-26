@@ -1,7 +1,8 @@
 import { z } from "zod";
 
 import { QUALITY_RANK } from "./quality.js";
-import { expectedVisualExportCredits, FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, workerSlotsFor, type PipelineProfileId } from "./billing.js";
+import { applyLadderLimits, ladderAllowsMore, ladderChartExportTier, ladderEstimateMix, pageReadingQuality } from "./auto-ladder.js";
+import { expectedVisualExportCredits, FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, pipelineProfileIdFor, workerSlotsFor, type PipelineProfileId } from "./billing.js";
 import type { VisualCandidateStats } from "./chart-export.js";
 import { chartExportDefaults, chartExportModelsAvailable, CONSERVATIVE_CHART_EXPORT_DEFAULTS, effectiveTierFromDefaults, type ChartExportDefaults, type ChartExportTier, type RunOrigin } from "./chart-export.js";
 import { chartExportConfigOf, expectedBillableVisuals, type VisualExportModes } from "./chart-export-estimate.js";
@@ -12,6 +13,8 @@ import { costEstimateSchema, type CostEstimate } from "./jobs.js";
 import {
   affectedStages,
   compilePipelinePlan,
+  fieldRebuildStages,
+  pipelineFeatureOverridesSchema,
   pipelineStageOrder,
   pipelineValuesEqual,
   type PipelineFeatures,
@@ -80,6 +83,8 @@ export function indexConfigOf(features: PipelineFeatures): IndexConfig {
   const modelUri = embedding.modelUri ?? embeddingProfileCatalog[embedding.profile].config.modelUri;
   return {
     embeddingModel: modelUri,
+    // A private route (llm://private/...) has no catalog size and records null, as before private model mode: its full
+    // URI already keeps its identity apart from every hosted model.
     dims: embedding.dimensions ?? embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)]?.dimensions ?? null,
     normalize: embedding.normalize ?? embeddingProfileCatalog[embedding.profile].config.normalize,
     chunking: {
@@ -102,6 +107,20 @@ export function indexConfigHash(config: IndexConfig): string {
     [...config.vectorBackends].sort(),
     // Version the identity: legacy records did not record this material input.
     ["normalization-v1", config.normalize ?? null],
+  ])).slice(0, 32);
+}
+
+/**
+ * The identity documents were stamped with before normalization joined it. Read-only: it lets a backfill prove which
+ * stored run configuration produced a legacy `documents.index_config_hash`. New documents never carry it.
+ */
+export function legacyIndexConfigHash(config: IndexConfig): string {
+  const { chunking } = config;
+  return sha256Hex(JSON.stringify([
+    config.embeddingModel,
+    config.dims,
+    [chunking.chunkOverlap, chunking.contextualChunkPreambles, chunking.lateChunking, chunking.lateChunkingWindow],
+    [...config.vectorBackends].sort(),
   ])).slice(0, 32);
 }
 
@@ -156,6 +175,10 @@ export const PIPELINE_FIELD_IMPACT: Record<keyof PipelineFeatures, FieldImpact> 
   structuredExtraction: "reindex-recommended",
   outputSchema: "reindex-recommended",
   quality: (before, after) => (QUALITY_RANK[after.quality] > QUALITY_RANK[before.quality] ? "reindex-recommended" : "new-uploads"),
+  // Raising a limit (a higher rung, a larger share) reads more pages of old documents; lowering one only saves on new uploads.
+  ladder: (before, after) => (ladderAllowsMore(before, after) ? "reindex-recommended" : "new-uploads"),
+  // Turning page images off keeps the images already stored; turning them on renders them only for documents processed again.
+  pageImages: (before, after) => (after.pageImages !== false && before.pageImages === false ? "reindex-recommended" : "new-uploads"),
   documentExtraction: "reindex-recommended",
   vision: "reindex-recommended",
   visionFallback: toggled("visionFallback"),
@@ -241,11 +264,18 @@ export function analyzePipelineChange(
   let kind: ConfigChangeKind = "none";
   const reasons: ConfigChangeImpact["reasons"] = [];
   let reindexFields = 0;
+  // Identity fields whose change leaves `indexConfigHash` as it was (a reordered backend list, an explicit default,
+  // a request option the vectors do not depend on) never re-index.
+  const identityUnchanged = indexConfigHash(indexConfigOf(before)) === indexConfigHash(indexConfigOf(after));
   for (const field of Object.keys(PIPELINE_FIELD_IMPACT) as Array<keyof PipelineFeatures>) {
     if (pipelineValuesEqual(before[field], after[field])) continue;
     const rule = PIPELINE_FIELD_IMPACT[field];
     let fieldKind = typeof rule === "function" ? rule(before, after, ctx) : rule;
     let effect = FIELD_EFFECTS[field]?.[fieldKind] ?? EFFECTS[fieldKind] ?? "No effect on stored data.";
+    if (identityUnchanged && isIndexIdentitySetting(field)) {
+      fieldKind = "new-uploads";
+      effect = "Does not change how existing vectors are built; no re-index.";
+    }
     if (KIND_RANK[fieldKind] >= KIND_RANK["reindex-recommended"]) {
       // Only a field with an effective seed stage in the new config can re-index anything. Otherwise (e.g. the
       // embedding model changes while embedding is off) existing data is left as is and the field applies to
@@ -263,6 +293,94 @@ export function analyzePipelineChange(
   const stages: PipelineRunStage[] = reindexFields > 0 ? affectedStages(before, after) : [];
   return { kind, stages, reasons, documents: ctx.documents, pages: ctx.pages };
 }
+
+// ---------------------------------------------------------------------------
+// Index identity: settings locked once a project has ingested documents
+// ---------------------------------------------------------------------------
+
+/**
+ * The pipeline settings that define a project's search index: the embedding (profile, model, dimensions,
+ * normalization, task, late chunking), chunking (overlap, contextual preambles) and the vector backends. They are
+ * exactly the inputs of `indexConfigOf`. Vectors built under one value are not comparable with queries or chunks built
+ * under another, so once a project has ingested documents a plain settings update that changes any of them is refused
+ * with 409 `reindex_required`; `POST /v1/projects/:id/reindex` (or a PATCH with `apply: "reindex"`) applies the change
+ * and re-indexes the existing documents in one step.
+ */
+export const INDEX_IDENTITY_SETTINGS = ["embedding", "chunkOverlap", "contextualChunkPreambles", "vectorBackends"] as const satisfies readonly (keyof PipelineFeatures)[];
+export type IndexIdentitySetting = (typeof INDEX_IDENTITY_SETTINGS)[number];
+
+export function isIndexIdentitySetting(value: unknown): value is IndexIdentitySetting {
+  return typeof value === "string" && (INDEX_IDENTITY_SETTINGS as readonly string[]).includes(value);
+}
+
+/**
+ * The vector switches. Re-enabling either while existing vectors were built under another index config would leave the
+ * project serving two embedding spaces, so that is locked like an identity change (see `vectorsReenabled`).
+ */
+export const VECTOR_SWITCH_SETTINGS = ["embed", "indexVectors"] as const satisfies readonly (keyof PipelineFeatures)[];
+
+/** Every setting the reindex command takes and a `reindex_required` refusal may name. */
+export const REINDEX_SETTINGS = [...INDEX_IDENTITY_SETTINGS, ...VECTOR_SWITCH_SETTINGS] as const;
+export type ReindexSetting = (typeof REINDEX_SETTINGS)[number];
+
+export function isReindexSetting(value: unknown): value is ReindexSetting {
+  return typeof value === "string" && (REINDEX_SETTINGS as readonly string[]).includes(value);
+}
+
+/**
+ * The index-identity settings `after` changes, when the change actually alters the index identity (`indexConfigHash`
+ * differs): a reordered backend list, an explicit default or a field the vectors do not depend on changes nothing and is
+ * not listed. Listed even when no enabled stage uses the setting (embedding off): re-enabling it later would otherwise
+ * turn the change on silently. Pure; in `INDEX_IDENTITY_SETTINGS` order.
+ */
+export function changedIndexIdentitySettings(before: PipelineFeatures, after: PipelineFeatures): IndexIdentitySetting[] {
+  if (indexConfigHash(indexConfigOf(before)) === indexConfigHash(indexConfigOf(after))) return [];
+  return INDEX_IDENTITY_SETTINGS.filter((field) => !pipelineValuesEqual(before[field], after[field]));
+}
+
+/** The vector switches `after` turns back on. */
+export function vectorsReenabled(before: PipelineFeatures, after: PipelineFeatures): Array<(typeof VECTOR_SWITCH_SETTINGS)[number]> {
+  return VECTOR_SWITCH_SETTINGS.filter((field) => !before[field] && after[field]);
+}
+
+/**
+ * Refuses a change that alters the index identity, for writers that must never do so (ingest recommendations, graph
+ * settings). They change other settings only; a violation is a programming error, not a request to re-index.
+ */
+export function assertIndexIdentityUnchanged(before: PipelineFeatures, after: PipelineFeatures, writer: string): void {
+  const changed = changedIndexIdentitySettings(before, after);
+  if (changed.length > 0) throw new Error(`${writer} may not change index settings (${changed.join(", ")}); use the reindex command`);
+}
+
+/** The stages a plain index rebuild (no settings change) re-runs: those the index-identity settings feed, closed over data flow. */
+export function indexRebuildStages(features: PipelineFeatures): PipelineRunStage[] {
+  return fieldRebuildStages(features, INDEX_IDENTITY_SETTINGS);
+}
+
+/** An estimate signature: what `POST /v1/projects/:id/reindex` and a confirming PATCH accept as `confirmEstimate`. */
+export const reindexEstimateSignatureSchema = z.string().regex(/^[a-f0-9]{64}$/, "confirmEstimate must be the signature an estimate returned");
+
+/**
+ * `POST /v1/projects/:id/reindex` (and its `/estimate` twin): applies index-identity setting changes and re-indexes the
+ * project's existing documents in one step. `pipeline` takes only the index-identity settings (other settings change
+ * through PATCH) and the vector switches; omitted or empty, the command rebuilds the index under the current settings,
+ * re-running the embedding and indexing stages of every live document (billed like any re-index). `confirmEstimate` is the
+ * `signature` an estimate (or a `reindex_required` refusal) returned: the command is refused with 409 `estimate_stale`
+ * when the work or its price changed since.
+ */
+export const reindexProjectSchema = z.object({
+  pipeline: pipelineFeatureOverridesSchema.optional().superRefine((value, ctx) => {
+    for (const key of Object.keys(value ?? {})) {
+      if (!isReindexSetting(key)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: `Only index settings (${REINDEX_SETTINGS.join(", ")}) change through reindex; change '${key}' with PATCH /v1/projects/:id` });
+      }
+    }
+  }),
+  /** Explicit opt-in to speed-boosted processing for the re-index runs, as on PATCH. */
+  speedBoost: z.boolean().optional(),
+  confirmEstimate: reindexEstimateSignatureSchema.optional(),
+}).strict();
+export type ReindexProjectInput = z.infer<typeof reindexProjectSchema>;
 
 /** Search and chat settings apply immediately; there is never a job. */
 export function analyzeSearchSettingsChange(
@@ -347,7 +465,8 @@ export function freeChartTierSeconds(documents: number, workerSlots: number): { 
   return { low: pass / slots, high: (pass + vm) / slots };
 }
 
-const profileFor = (features: PipelineFeatures): PipelineProfileId => features.quality;
+/** The pricing profile the run reads pages with (pipelineProfileIdFor): Read scans off is estimated as Fast. */
+const profileFor = (features: PipelineFeatures): PipelineProfileId => pipelineProfileIdFor(features);
 
 /** Stages whose run re-exports charts and diagrams: the generator runs at the end of vision-extract (worker chart-export/stage.ts). */
 export const CHART_EXPORT_CHARGING_STAGES: readonly string[] = ["vision-extract"];
@@ -440,22 +559,24 @@ export function estimatePipelineWork(args: {
     knowledgeGraph: selected.includes("graph-enrich") && Boolean(args.features.graphRag),
     propositions: selected.includes("proposition-index"),
   };
+  // A page beyond the ladder's above-fast share is never estimated as a read page (ladderEstimateMix).
   const run = (mix: { text: number; complex: number; scanned: number }) =>
-    estimateIngest({ pages, documents: Math.max(1, documents), mix, profile, features, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
+    estimateIngest({ pages, documents: Math.max(1, documents), mix: ladderEstimateMix(mix, args.features), profile, features, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
   const priced = (estimate: ReturnType<typeof run>) =>
     (estimate.credits.totalCredits - estimate.credits.breakdown.features) * share + estimate.credits.breakdown.features;
   const low = run({ text: 1, complex: 0, scanned: 0 });
   const high = run({ text: 0.2, complex: 0.3, scanned: 0.5 });
   // Chart & diagram export is charged per visual a model read whenever a charging stage runs (not by stage share).
   const visuals = chartExportCredits({
-    features: args.features,
+    // Below the intelligent rung no chart is read by a model (applyLadderLimits): the free tier prices nothing.
+    features: applyLadderLimits(args.features),
     stages: selected,
     pages,
     documents: Math.max(1, documents),
     env: args.env,
     visualStats: args.visualStats ?? null,
     ...(args.chartExportModes ? { modes: args.chartExportModes } : {}),
-    ...(args.chartExportTier ? { tier: args.chartExportTier } : {}),
+    ...(args.chartExportTier ? { tier: ladderChartExportTier(args.features, args.chartExportTier) } : {}),
   });
   const scaleSeconds = (wall: number) => (share > 0 && pages > 0 ? Math.max(0, wall - FIXED_OVERHEAD_SECONDS) * share + FIXED_OVERHEAD_SECONDS : 0);
   // The free chart tier bills nothing but takes time: its pass and parser-VM runs (only when vision-extract runs at free).

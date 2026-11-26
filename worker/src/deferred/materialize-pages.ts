@@ -9,12 +9,18 @@ import type { JSONValue, Sql } from "postgres";
 import {
   buildPricedAiUsageLedgerEvent,
   calculateAiUsageCostCents,
+  embeddingRequestConfig,
+  embeddingRouteSpaceUri,
+  modelRecordUri,
   pageCredits,
+  ladderAllowsOffPlanReads,
+  ladderForbidsVision,
+  pageReadingQuality,
   qualityAllowsPageReading,
-  qualityReadsEveryPage,
   richPagesForOutputTokens,
   type MaterializePagesInput,
   type PipelineFeatures,
+  switchDisabled,
   isPageWithheld,
   PII_BLOCKED_DOCUMENT_STATUS,
 } from "@docslurp/shared";
@@ -23,6 +29,7 @@ import type { Config } from "../config.js";
 import type { Store } from "../db/store.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
 import { runLocalArtifactCommand } from "../extractors/local-artifact-adapters.js";
+import { readPdfTextLayer } from "../processor/pdf-text-layer.js";
 import { createPiiTextScanner } from "../lib/pii-redaction.js";
 import type { Document, EmbeddingProfile } from "../models.js";
 import { chunkTextWithMeta, htmlTableSources } from "../pipeline/chunking.js";
@@ -42,15 +49,21 @@ import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-wri
 import type { CommandRunner } from "../tools/runner.js";
 import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
 import type { ArtifactStore } from "../tools/storage.js";
+import { readWithOcr } from "../ocr/engine.js";
+import { recordOcrReads } from "../ocr/ledger.js";
 import { executeVisionRuntime, visionRenderLongEdge, type VisionPrimaryFailure } from "../tools/vision-runtime.js";
 import { guardedVisionCall, priceVisionResult, type GuardedVisionOutcome } from "../lib/guarded-vision-call.js";
 import { recordVisionRead, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import { DocumentNotFoundError } from "../db/missing-document.js";
 import { billLockedMaterializedPages, lockPageRows } from "../db/page-base-fee.js";
 import { markPages } from "./page-ledger.js";
+import { OcrInfrastructureError } from "../ocr/mode.js";
+import { finalizePageExtracts, logFinalizeOutcome, materializedPageRecords, pageExtractStatements, recordPageExtracts, type PageExtractState } from "../pipeline/page-extracts.js";
 
 /** Failure reason for a page Fast left unread because it has no text layer (kept as its page image). */
 export const KEPT_AS_IMAGE_REASON = "kept-as-image";
+/** A query-time read found no words on the page (final when the OCR engine read it). */
+export const EMPTY_PAGE_REASON = "empty-page";
 /** Pages with fewer non-space characters than this have no usable text layer. */
 export const MIN_TEXT_LAYER_CHARS = 40;
 /** Chunks per embedding call. */
@@ -80,6 +93,11 @@ export interface PageMaterializerOps {
   /** Rasterize + vision-OCR one page. */
   /** `gate` admits every vision request the read sends (the run's vision attempt guard). */
   ocrPage(document: Document, page: number, ctx: { runId: string; pipeline: PipelineFeatures; signal?: AbortSignal; gate: VisionRequestGate }): Promise<OcrPageResult>;
+  /**
+   * Fastest's query-time read: the OCR engine (no model) reads PDF pages without a text layer. Charges every page it
+   * read with words as one OCR page on `usage` (recordOcrReads) and returns those pages in `charged`.
+   */
+  readPagesWithOcrEngine(document: Document, pages: number[], ctx: { usage: PipelineUsageEventLedger; signal?: AbortSignal }): Promise<{ pages: Array<{ pageNumber: number; text: string }>; charged: number[] }>;
   embed(args: {
     chunks: string[];
     profile: EmbeddingProfile;
@@ -132,11 +150,9 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
       const count = range.last - range.first + 1;
       if (document.mimeType !== "application/pdf") return Array.from({ length: count }, () => "");
       const sourcePath = await raster().sourcePath(document);
-      const out = await runLocalArtifactCommand(
-        "pdftotext",
-        ["-f", String(range.first), "-l", String(range.last), "-layout", "-enc", "UTF-8", sourcePath, "-"],
-        TEXT_LAYER_MAX_BYTES,
-        TEXT_LAYER_TIMEOUT_MS,
+      const out = await readPdfTextLayer(
+        runLocalArtifactCommand, sourcePath, range,
+        { maxBytes: TEXT_LAYER_MAX_BYTES, timeoutMs: TEXT_LAYER_TIMEOUT_MS },
         signal,
       );
       // pdftotext separates pages with a form feed.
@@ -144,8 +160,8 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
       return Array.from({ length: count }, (_, i) => pages[i] ?? "");
     },
     async ocrPage(document, page, ctx) {
-      // Fail closed: Fast never sends a page to a vision model.
-      if (!qualityAllowsPageReading(ctx.pipeline.quality)) throw new Error(`quality fast does not read page ${page}`);
+      // Fail closed: Fastest (and Read scans off) never sends a page to a vision model.
+      if (!qualityAllowsPageReading(ctx.pipeline.quality) || ladderForbidsVision(ctx.pipeline)) throw new Error(`quality fastest does not read page ${page} with a vision model`);
       const [artifact] = await raster().renderSelectedPages({
         document, runId: ctx.runId, pageNumbers: [page], dpi: OCR_DPI,
         ...(visionRenderLongEdge(ctx.pipeline.vision) !== undefined ? { maxLongEdgePx: visionRenderLongEdge(ctx.pipeline.vision)! } : {}),
@@ -180,6 +196,17 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
       } finally {
         await rm(`${imagePath}.vision.json`, { force: true });
         await rm(path.dirname(imagePath), { recursive: true, force: true });
+      }
+    },
+    async readPagesWithOcrEngine(document, pages, ctx) {
+      if (document.mimeType !== "application/pdf") return { pages: [], charged: [] };
+      const source = await raster().sourcePath(document);
+      const outcome = await readWithOcr(deps.runner as never, { source, kind: "pdf", pages, escalation: false, ...(ctx.signal ? { signal: ctx.signal } : {}) });
+      try {
+        const charged = recordOcrReads(ctx.usage, document.id, outcome, { stage: "materialize", kind: "pdf" });
+        return { pages: outcome.pages.map((page) => ({ pageNumber: page.pageNumber, text: page.text })), charged };
+      } finally {
+        await outcome.dispose();
       }
     },
     async embed(args) {
@@ -349,8 +376,12 @@ export async function materializePageRange(
   const prepared = new Map<number, PreparedPage>();
   /** Pages a model read with non-empty content, and the Rich pages each read is worth. */
   const modelReads = new Map<number, number>();
+  // The model that read each page here, as its usage row names it, for the page extract record.
+  const readModelUris = new Map<number, string>();
   /** Customer credits of each page's read (Rich charges buffered in the ledger). */
   const readCents = new Map<number, number>();
+  /** Pages the OCR engine read here (Fastest): kept like a model read so a retry does not read them again. */
+  const ocrReads = new Set<number>();
   /** Read text of pages this call read with no PII match, kept on the page row if the page then fails. */
   const keptReads = new Map<number, string>();
   let spentCents = 0;
@@ -360,14 +391,24 @@ export async function materializePageRange(
   // 0. Pages an earlier run read (one Rich charge, committed) and then failed after the read: index the kept read,
   // with no model call and no new charge (billLockedMaterializedPages stamps them without one). Retention purge,
   // a PII block and a human correction clear read_text; a purged run's documents never reuse one either way.
-  const storedReads = new Map((await deps.sql<{ page_number: number; read_text: string }[]>`
-    select s.page_number, s.read_text from document_page_states s
+  // The model that made a kept read is the one its reading run's usage row names (`metadata.modelUri`, stamped on every
+  // model call): it goes on this publication's page extract record. Only kept reads look it up (by run id, indexed).
+  const storedRows = await deps.sql<{ page_number: number; read_text: string; read_model_uri: string | null }[]>`
+    select s.page_number, s.read_text, (
+      select au.metadata ->> 'modelUri' from usage_attribution au
+      where au.run_id = s.read_billed_run and au.metadata ->> 'documentId' = s.document_id
+        and au.metadata ->> 'pageNumber' = s.page_number::text and au.metadata ? 'modelUri'
+      order by au.created_at desc limit 1
+    ) as read_model_uri
+    from document_page_states s
     join documents d on d.id = s.document_id
     join project_runs r on r.id = d.run_id
     where s.document_id = ${documentId} and s.page_number = any(${pages}::int[])
       and s.read_billed_run is not null and s.read_text is not null and s.state <> 'blocked-pii'
       and r.artifacts_purged_at is null
-  `).map((row) => [row.page_number, row.read_text]));
+  `;
+  const storedReads = new Map(storedRows.map((row) => [row.page_number, row.read_text]));
+  const storedModelUris = new Map(storedRows.flatMap((row) => row.read_model_uri ? [[row.page_number, row.read_model_uri] as const] : []));
 
   // 1. Text layer per contiguous range, then OCR only pages without one.
   const texts = new Map<number, string>();
@@ -382,11 +423,20 @@ export async function materializePageRange(
       console.warn(`[materialize] text layer failed for ${documentId} p${range.first}-${range.last}: ${reason}`);
     }
   }
-  // Quality decides which pages a model reads, as in the eager pipeline: Fast reads none (pages without a text layer
-  // stay unread, kept as page images that render on demand), Good reads every page, Auto only pages without text.
-  const readsPages = qualityAllowsPageReading(pipeline.quality);
-  const readsEveryPage = qualityReadsEveryPage(pipeline.quality);
+  // Quality decides how pages without a text layer are read here: Smartest by vision transcription, Fastest by the OCR
+  // engine (never a model), and Fastest with Read scans off not at all (kept as page images that render on demand).
+  // An Auto ladder above-fast share (pipeline.ladder.maxEscalationShare.aboveFast) is planned per document at ingest; query-time reads
+  // have no document-wide plan to count against, so they read no page under one (fail closed: the page stays an image). Query-time reads are plain transcription (the
+  // ocr rung), so maxRung and the above-ocr share change nothing here.
+  // DOCSLURP_DISABLE: `ai` stops every model read here; `ai-rescue` stops reads of pages without a text layer.
+  const offPlanReads = ladderAllowsOffPlanReads(pipeline).pageReads && !switchDisabled(process.env, "ai-rescue");
+  const readsPages = qualityAllowsPageReading(pipeline.quality) && !ladderForbidsVision(pipeline) && offPlanReads;
+  const ocrEngineReads = !readsPages && ladderForbidsVision(pipeline) && qualityAllowsPageReading(pageReadingQuality(pipeline))
+    && offPlanReads && document.mimeType === "application/pdf";
   const ocrPages: number[] = [];
+  const ocrEnginePages: number[] = [];
+  // Pages the OCR engine read and found empty: final (an OCR read is not charged, so a re-read would be free VM work).
+  const ocrEmptyPages = new Set<number>();
   const keptUnread: number[] = [];
   for (const page of pages) {
     const stored = storedReads.get(page);
@@ -397,9 +447,9 @@ export async function materializePageRange(
     const text = texts.get(page) ?? "";
     const hasTextLayer = text.replace(/\s+/g, "").length >= MIN_TEXT_LAYER_CHARS;
     // Text-layer pages bill as Fast pages (charged by billLockedMaterializedPages as they turn indexed).
-    if (readsEveryPage) ocrPages.push(page);
-    else if (hasTextLayer) prepared.set(page, { page, text });
+    if (hasTextLayer) prepared.set(page, { page, text });
     else if (readsPages) ocrPages.push(page);
+    else if (ocrEngineReads) ocrEnginePages.push(page);
     else keptUnread.push(page);
   }
   for (const page of keptUnread) failed.set(page, KEPT_AS_IMAGE_REASON);
@@ -407,6 +457,45 @@ export async function materializePageRange(
   // Every OCR request passes the run's vision attempt guard (page bound, rejection breaker, the org's
   // rolling uncharged-attempt bound), beside this materialization's own credit budget.
   const guardHost = { run, visionAttempts: deps.store?.visionAttempts ?? null };
+  // Fastest: the OCR engine reads what the credit budget covers at the OCR page price; the rest stay claimable.
+  if (ocrEnginePages.length > 0) {
+    const ocrCost = pageCredits("ocr", 1);
+    const affordable = Number.isFinite(budgetCents) ? Math.max(0, Math.floor((budgetCents - spentCents) / ocrCost)) : ocrEnginePages.length;
+    const reading = ocrEnginePages.slice(0, affordable);
+    for (const page of ocrEnginePages.slice(affordable)) {
+      released.push(page);
+      failed.set(page, "credit-limit");
+    }
+    if (reading.length > 0) {
+      try {
+        const read = await ops.readPagesWithOcrEngine(document, reading, { usage: deps.usage });
+        const charged = new Set(read.charged);
+        const returned = new Map(read.pages.map((page) => [page.pageNumber, page.text]));
+        for (const page of reading) {
+          if (charged.has(page)) {
+            spentCents += ocrCost;
+            readCents.set(page, ocrCost);
+          }
+          const text = returned.get(page);
+          if (text === undefined) failed.set(page, "ocr-unread");
+          else if (text.replace(/\s+/g, "").length === 0) {
+            failed.set(page, EMPTY_PAGE_REASON);
+            ocrEmptyPages.add(page);
+          }
+          else {
+            prepared.set(page, { page, text });
+            ocrReads.add(page);
+          }
+        }
+      } catch (error) {
+        // An OCR boundary that could not run (capacity, a timeout) is retried by the activity, never a permanent kept page.
+        if (error instanceof OcrInfrastructureError) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        console.warn(`[materialize] OCR engine read failed for ${documentId} pages ${reading.join(",")}: ${reason.slice(0, 300)}`);
+        for (const page of reading) failed.set(page, KEPT_AS_IMAGE_REASON);
+      }
+    }
+  }
   await mapLimit(ocrPages, OCR_CONCURRENCY, async (page) => {
     if (spentCents >= budgetCents) {
       released.push(page);
@@ -423,7 +512,7 @@ export async function materializePageRange(
         record: (usage) => deps.usage.record(usage),
         metadata: { materializedBy: input.reason, sessionId: input.sessionId },
         call: (gate) => ops.ocrPage(document, page, { runId: input.runId, pipeline, gate }),
-        // Customer credits: an OCR-read page bills Rich (the usage ledger charges it, once per run and
+        // Customer credits: a page the vision model transcribed here bills Rich (the usage ledger charges it, once per run and
         // page); that request leaves the org's uncharged count. Provider cost is ours.
         onResult: (ocr, gate) => {
           recordVisionRead(deps.usage, gate, { documentId, pageNumber: page }, {
@@ -461,6 +550,8 @@ export async function materializePageRange(
     else {
       prepared.set(page, { page, text: ocr.text });
       modelReads.set(page, richPages);
+      const uri = modelRecordUri({ provider: ocr.provider ?? "vision-runtime", model: ocr.model });
+      if (uri) readModelUris.set(page, uri);
     }
   });
 
@@ -539,7 +630,7 @@ export async function materializePageRange(
     if (i === 0) {
       prepared.delete(entry.page);
       failed.set(entry.page, "empty-page");
-    } else if (modelReads.has(entry.page) && !piiMatched.has(entry.page)) {
+    } else if ((modelReads.has(entry.page) || ocrReads.has(entry.page)) && !piiMatched.has(entry.page)) {
       // A redacted read is not kept: a later block_indexing policy could not find the PII it removed.
       keptReads.set(entry.page, entry.text);
     }
@@ -570,7 +661,8 @@ export async function materializePageRange(
               provider: profile.provider, model: profile.model, metric: "embedding-tokens",
               amount: inputTokens, unit: "token", inputTokens, costCents: priced.costCents,
               metadata: { ...priced.metadata, documentId, runtime: "remote", dimensions: profile.dimensions, chunks: n,
-                tokenSource: "api", materializedBy: input.reason, sessionId: input.sessionId },
+                tokenSource: "api", materializedBy: input.reason, sessionId: input.sessionId,
+                modelConfig: embeddingRequestConfig({ ...profile, batchSize: EMBED_BATCH_CHUNKS }), modelClass: { embeddingProfile: profile.profile } },
             });
           },
         });
@@ -588,7 +680,8 @@ export async function materializePageRange(
             amount: tokens, unit: "token", inputTokens: tokens,
             costCents: profile.runtime === "remote" ? undefined : 0,
             metadata: { documentId, runtime: profile.runtime, dimensions: profile.dimensions, chunks: batch.length,
-              tokenSource: embedded.totalTokens !== undefined ? "api" : "estimate", materializedBy: input.reason, sessionId: input.sessionId },
+              tokenSource: embedded.totalTokens !== undefined ? "api" : "estimate", materializedBy: input.reason, sessionId: input.sessionId,
+              modelConfig: embeddingRequestConfig({ ...profile, batchSize: EMBED_BATCH_CHUNKS }), modelClass: { embeddingProfile: profile.profile } },
           });
         }
       }
@@ -637,7 +730,9 @@ export async function materializePageRange(
       const client = tx as unknown as Sql;
       // A document deleted meanwhile took its ledger rows with it: stop the range (the activity reports it), never
       // mistake the missing rows for a lost claim.
-      const [exists] = await client`select materialization_generation, source_materialization_blocked from documents where id = ${documentId} for share`;
+      // FOR NO KEY UPDATE, the lock a completion's documents UPDATE takes: this publication (and its page extract finalization)
+      // serializes with the document's completion. Lock order: the document row, then its page rows, then extract rows.
+      const [exists] = await client`select materialization_generation, source_materialization_blocked from documents where id = ${documentId} for no key update`;
       if (!exists) throw new DocumentNotFoundError(documentId);
       const sourceInvalidated = exists.source_materialization_blocked || exists.materialization_generation !== sourceVersion.materialization_generation;
       // The revocation is durable even if subsequent page locking/refusal fails.
@@ -712,7 +807,7 @@ export async function materializePageRange(
       // its billing decision committed (set below by billLockedMaterializedPages); 0 until then, and for full-index
       // pages, which the run completion fee bills.
       const moved = await markPages(client, documentId, publishedPages.map((p) => p.page), "indexed",
-        { costCredits: 0, embeddingModel: profile.model, claimedBy });
+        { costCredits: 0, embeddingModel: profile.model, embeddingModelUri: embeddingRouteSpaceUri(profile, profile.dimensions), claimedBy });
       const ownedBlocked = blocked.filter((page) => held.has(page));
       if (ownedBlocked.length > 0) await markPages(client, documentId, ownedBlocked, "blocked-pii", { failureReason: "pii-policy", claimedBy });
       const byReason = new Map<string, number[]>();
@@ -720,10 +815,36 @@ export async function materializePageRange(
         if (!held.has(page) || released.includes(page)) continue;
         byReason.set(reason, [...(byReason.get(reason) ?? []), page]);
       }
-      for (const [reason, group] of byReason) await markPages(client, documentId, group, "failed", { failureReason: reason, claimedBy });
+      // An OCR-engine read that found an empty page is final: re-reading it would only spend VM time for no charge. An
+      // empty vision read stays claimable (its one charge is recorded; a later read adds none).
+      for (const [reason, group] of byReason) {
+        const final = group.filter((page) => ocrEmptyPages.has(page));
+        const retry = group.filter((page) => !ocrEmptyPages.has(page));
+        if (final.length > 0) await markPages(client, documentId, final, "failed", { failureReason: reason, claimedBy, exhausted: true });
+        if (retry.length > 0) await markPages(client, documentId, retry, "failed", { failureReason: reason, claimedBy });
+      }
       const ownedReleased = released.filter((page) => held.has(page));
       if (ownedReleased.length > 0) await markPages(client, documentId, ownedReleased, "unseen", { claimedBy });
       owned = moved.sort((a, b) => a - b);
+      // Page extract records for the pages this run holds, and their final rows: the query-time read publishes them now.
+      if (run.orgId) {
+        const extracts: PageExtractState = { run: { id: claimedBy, orgId: run.orgId, projectId: run.projectId },
+          pendingPageExtracts: [], pendingPageExtractTags: [] };
+        recordPageExtracts(extracts, document, materializedPageRecords({
+          published: owned, modelRead: (page) => modelReads.has(page) || storedReads.has(page),
+          blocked: ownedBlocked, failed: [...failed].filter(([page]) => held.has(page) && !released.includes(page)),
+          keptAsImageReason: KEPT_AS_IMAGE_REASON,
+          // A kept read from an earlier claim is named by its reading run's usage row (looked up with the kept text).
+          readModelUri: (page) => readModelUris.get(page) ?? storedModelUris.get(page),
+        }));
+        if (extracts.pendingPageExtracts.length > 0) {
+          for (const statement of pageExtractStatements(client as unknown as Sql<Record<string, unknown>>, extracts.pendingPageExtracts, [])) await statement;
+          const finalizeScope = { orgId: run.orgId, runId: claimedBy, documentIds: [documentId], pages: extracts.pendingPageExtracts.map((row) => row.page_number) };
+          const [demote, promote] = finalizePageExtracts(client as unknown as Sql<Record<string, unknown>>, finalizeScope);
+          await demote;
+          logFinalizeOutcome(await promote, finalizeScope);
+        }
+      }
       // markPages cleared the kept reads of pages it indexed or blocked.
 
       const lost = rangePages.filter((page) => !held.has(page));

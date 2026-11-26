@@ -37,6 +37,13 @@ export interface SandboxLimits {
   timeoutMs: number;
   rssBudgetMb?: number;
   cpu?: number;
+  /**
+   * The most output bytes this command may hand back, per file and in total (a command-wide transfer budget). A remote
+   * provider checks every changed file's declared size before reading any of it and stops each transfer at what is
+   * left of the budget, so an oversized result is never buffered on the host (SandboxOutputLimitError). Unset: the
+   * provider's general limits.
+   */
+  maxOutputBytes?: number;
 }
 
 export interface SandboxCommand {
@@ -70,10 +77,7 @@ export interface SandboxCommand {
    * provider stages it once per VM, readable but not writable by the command, and maps paths under it.
    */
   readOnlyAssetDir?: string;
-  /**
-   * The organization the command's document belongs to. A scanner session (SandboxSessionContext.scanner) runs only
-   * commands of its own organization and refuses any other, or one without it.
-   */
+  /** The organization the command's document belongs to: accounting and fairness only, never a placement restriction. */
   tenantKey?: string;
   /** The command needs the scanner VM's malware daemon: only a scanner session may run it; any other refuses. */
   requiresScanner?: boolean;
@@ -111,6 +115,14 @@ export class SandboxOutputError extends SandboxRunError {
   constructor(message: string, usage?: UsageEvent, options?: { cause?: unknown }) {
     super(message, usage, options);
     this.name = "SandboxOutputError";
+  }
+}
+
+/** Output refused for its size (a per-file, command-wide or transfer limit): the job produced more than it may. */
+export class SandboxOutputLimitError extends SandboxOutputError {
+  constructor(message: string, usage?: UsageEvent, options?: { cause?: unknown }) {
+    super(message, usage, options);
+    this.name = "SandboxOutputLimitError";
   }
 }
 
@@ -239,16 +251,16 @@ export interface ParserSandboxProvider<C = Record<string, unknown>> {
    * loaded yet, and under the service profile pricing() refuses until it is.
    */
   openSession(config: C, context: SandboxSessionContext): Promise<SandboxSession>;
+  /** Stop warm compute the provider keeps between sessions (worker shutdown, after activities drained). Optional. */
+  drain?(): Promise<void>;
 }
 
 /**
  * A malware scanner session (quarantine fast path): its VMs are restored from a clean memory snapshot in which the malware
- * daemon has already loaded the named signature set. The snapshot is taken before any job input exists; every VM restored
- * from it serves one organization and is terminated when the session closes.
+ * daemon has already loaded the named signature set. The snapshot is taken before any job input exists; a session may
+ * scan documents of any run or organization (AGENTS.md: no per-organization or per-job compute isolation).
  */
 export interface ScannerSessionSpec {
-  /** The only organization whose commands this session runs (SandboxCommand.tenantKey). */
-  tenantKey: string;
   /** Host directory holding exactly the signature files to load (stageClamDefinitions), read by the snapshot build only. */
   definitionsDir: string;
   /** sha256 over the signature files' names and contents: the snapshot's cache key. */

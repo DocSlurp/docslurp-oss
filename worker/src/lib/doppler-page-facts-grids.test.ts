@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import { parseDopplerPageFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
-import { pageLayoutFactsFromDopplerFacts } from "./doppler-page-facts-layout.js";
+import { pageLayoutFactsFromDopplerFacts } from "./page-evidence-doppler.js";
 import { dopplerFactsCoverEvidence, pageImageEvidenceFromDopplerFacts } from "./doppler-page-facts-evidence.js";
 import { buildPageImageEvidence, findSparsePages, summarizeImageListing, type PageImageEvidence } from "./page-image-evidence.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
@@ -63,28 +63,6 @@ describe("doppler page facts: ruled grids", () => {
     const layout = layoutOf(page({ vectors: { hRules: 4, vRules: 1, grids: [TABLE], gridsTruncated: false } }));
     expect(layout.grids).toEqual([]);
     expect(layout.tableCoverage).toBe(0);
-  });
-
-  it("truncation gives unknown, never []", () => {
-    for (const grids of [[], [TABLE]]) {
-      const layout = layoutOf(page({ vectors: { grids, gridsTruncated: true } }));
-      expect(layout.grids).toBeNull();
-      expect(layout.tableCoverage).toBeNull();
-    }
-    // The flag alone (grouping cut short) is unknown too.
-    expect(layoutOf(page({ vectors: { gridsTruncated: true } })).grids).toBeNull();
-    // At the drawing cap.
-    expect(layoutOf(page({ vectors: { grids: [], gridsTruncated: false, limitHit: true } })).grids).toBeNull();
-  });
-
-  it("absent (an older build) gives unknown, unless the rule counts prove there is no grid", () => {
-    const known = layoutOf(page());
-    expect(known.grids).toBeNull();
-    expect(known.tableCoverage).toBeNull();
-    expect(layoutOf(page({ vectors: { hRules: 1 } })).grids).toEqual([]);
-    expect(layoutOf(page({ vectors: { hRules: 1 } })).tableCoverage).toBeNull();
-    const { vectors: _v, ...noVectors } = page();
-    expect(layoutOf(noVectors).grids).toBeNull();
   });
 
   it("hostile: a bad list, a grid off the page, or a list without its flag makes vectors unknown", () => {
@@ -196,15 +174,9 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     expect(layoutOf(many).images).toBeNull();
   });
 
-  it("xref-repaired-earlier: the page keeps only its size; images, words, grids are unknown, so nothing on it selects a read", () => {
-    const scanLike = { visibleWordsInside: 0, invisibleWordsInside: 0, bytesPerPixel: 0.02, bbox: [67, 302, 535, 602], coverage: 0.29, px: [1950, 1250], dpi: [300, 300], filter: "dct" };
-    const vectorsWithGrid = { grids: [TABLE], gridsTruncated: false };
-    const ok = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid }));
-    expect([ok.images![0]!.widthPx, ok.images![0]!.heightPx, ok.images![0]!.ppi, ok.images![0]!.bytesPerPixel, ok.images![0]!.wordsInside]).toEqual([1950, 1250, [300, 300], 0.02, null]);
-    expect(ok.grids).toBeNull();
-    const low = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid, extra: { parseWarnings: ["xref-repaired-earlier"] } }));
-    expect(low).toEqual({ images: null, tables: null, words: null, grids: null, tableCoverage: null, widthPt: 612, heightPt: 792 });
-    // An unknown warning value is still dropped, as the contract asks.
+  // Truncated, capped and older-build grids, and a low-confidence page (only its size kept), are page-evidence edge cases:
+  // lib/page-evidence.test.ts asserts each once against its decisions and the layout form.
+  it("xref-repaired-earlier is kept as a warning (an unknown warning value is still dropped, as the contract asks)", () => {
     expect(one(page({ extra: { parseWarnings: ["xref-repaired-earlier", "from-the-future"] } })).pages.get(1)!.parseWarnings).toEqual(["xref-repaired-earlier"]);
   });
 

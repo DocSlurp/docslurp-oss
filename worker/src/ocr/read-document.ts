@@ -18,6 +18,7 @@ import { imageTooManyFramesError } from "./image-frames.js";
 import { recordOcrReads } from "./ledger.js";
 import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
 import { OcrRefusedError, resolveOcrMode } from "./mode.js";
+import { ladderForbidsVision } from "@docslurp/shared";
 import { ocrPageReaderKeepFrames, ocrPageReaderMode, readOcrPagesWithConfiguredReader, type PageReaderSummary } from "./page-reader.js";
 
 export interface OcrDocumentInput {
@@ -51,6 +52,8 @@ export interface OcrDocumentInput {
   refuseUnfundedFrames?: (budget: number) => Promise<never>;
   /** Ask the boundary for a bounded rendition of every frame (visual indexing); returned as bytes on each page. */
   rendition?: { maxLongEdge: number; maxBytes: number };
+  /** The PDF's measured shape (SandboxedOcrJob.pdfShape): host routing only. */
+  pdfShape?: "scanned" | "mixed";
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
 }
@@ -59,6 +62,10 @@ export interface OcrDocumentPage {
   pageNumber: number;
   text: string;
   reader: string;
+  /** The recogniser's mean confidence for the page in [0, 1], when it reported one and its read was kept. */
+  confidence?: number | null;
+  /** Why an escalation candidate kept its first read (escalation.ts). */
+  escalationHeld?: "capped" | "unfunded";
   /** The boundary's validated rendition of the frame (raw RGB with its header), read before its scratch directory is removed. */
   rendition?: { bytes: Buffer; width: number; height: number };
   /** The frame's decoded pixel size (page area equivalents of an uploaded image). */
@@ -79,14 +86,24 @@ export interface OcrDocumentResult {
   pageReader?: PageReaderSummary | null;
 }
 
+/** True when the run's quality forbids a Vision read of a page (Fastest: the ladder never reaches the intelligent rung). */
+export function runForbidsModelReads(run: { pipeline?: unknown } | null | undefined): boolean {
+  if (!run?.pipeline) return false;
+  return ladderForbidsVision(run.pipeline as Parameters<typeof ladderForbidsVision>[0]);
+}
+
 export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentResult> {
   const env = input.env ?? process.env;
   const mode = resolveOcrMode(env);
   if (mode === "off") throw new OcrRefusedError("OCR is off (DOCSLURP_OCR_MODE=off)", "off");
+  // Hosted mode is the operator's OCR engine (one flat Scan page per read), so Fastest keeps it.
   if (mode === "hosted") return await hostedDocument(input);
   let outcome: OcrReadOutcome | null = null;
-  const pageReaderMode = ocrPageReaderMode(env);
-  const hostedEscalation = Boolean(input.hostedReader) && ocrEscalationEnabled(env);
+  // Fastest (a ladder capped below the intelligent rung) never upgrades an OCR read to a model read: no hosted escalation
+  // and no page reader (both bill Vision), whatever the deployment's OCR env says. The recogniser's read stands.
+  const modelReadsForbidden = runForbidsModelReads(input.state.run);
+  const pageReaderMode = modelReadsForbidden ? "off" : ocrPageReaderMode(env);
+  const hostedEscalation = !modelReadsForbidden && Boolean(input.hostedReader) && ocrEscalationEnabled(env);
   const keepFrames = ocrPageReaderKeepFrames(pageReaderMode);
   const budget = input.kind === "image" && input.frameBudget ? Math.max(1, Math.min(OCR_DEFAULT_MAX_FRAMES, await input.frameBudget(OCR_DEFAULT_MAX_FRAMES))) : null;
   const run = input.state.run;
@@ -108,6 +125,7 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       escalation: hostedEscalation,
       ...(keepFrames ? { keepFrames } : {}),
       ...(input.rendition ? { rendition: input.rendition } : {}),
+      ...(input.kind === "pdf" && input.pdfShape ? { pdfShape: input.pdfShape } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       env,
     });
@@ -144,7 +162,10 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       // The rendition was validated by header and exact size (engine.ts); its bytes are carried as-is.
       const rendition = page.rendition ? { bytes: await readFile(page.rendition.imagePath), width: page.rendition.width, height: page.rendition.height } : undefined;
       if (rendition && input.rendition && rendition.bytes.length > input.rendition.maxBytes) throw new Error("OCR rendition grew past its cap");
+      const firstRead = !page.recogniser.startsWith("page-reader:") && !page.recogniser.startsWith("escalated:");
       pages.push({ pageNumber: page.pageNumber, text: page.text, reader: page.recogniser, ...(rendition ? { rendition } : {}),
+        ...(firstRead && typeof page.meanConfidence === "number" ? { confidence: page.meanConfidence } : {}),
+        ...(page.escalationHeld ? { escalationHeld: page.escalationHeld } : {}),
         ...(page.sourceWidth && page.sourceHeight ? { sourceWidth: page.sourceWidth, sourceHeight: page.sourceHeight } : {}) });
     }
     // A page reader or hosted escalation read may hold model HTML tables: read in the parser VM (one job per document) and rebuilt.

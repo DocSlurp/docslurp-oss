@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Document } from "../models.js";
 import {
@@ -17,6 +17,7 @@ import {
   parsePdfPageSizes,
   runLanes,
 } from "../pipeline/pdf-asset-cache.js";
+import { isReadOnlySource } from "../sandbox/paths.js";
 import { probePidNamespace, spawnContained } from "../sandbox/teardown.js";
 import { CommandRunner } from "../tools/runner.js";
 import { selectRasterPagesFromClassification } from "../stages/render-images.js";
@@ -46,6 +47,7 @@ function makeDocument(): Document {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -76,6 +78,64 @@ describe("PdfSourceCache", () => {
     expect(first.cacheHit).toBe(false);
     expect(concurrent.cacheHit).toBe(true);
     expect(later.cacheHit).toBe(true);
+    await cache.clear();
+  });
+
+  it("keeps an extraction source available across batches while concurrent downloads exceed the cache limit", async () => {
+    const cache = new PdfSourceCache({
+      async downloadToTempFile(key) {
+        const root = await mkdtemp(path.join(tmpdir(), "source-cache-test-"));
+        tempRoots.push(root);
+        const filePath = path.join(root, "source.pdf");
+        await writeFile(filePath, key);
+        return filePath;
+      },
+    }, 1);
+    const document = makeDocument();
+    const [source, shared] = await Promise.all([cache.acquire(document), cache.acquire(document)]);
+    try {
+      const others = await Promise.all(["other.pdf", "third.pdf"].map((name) =>
+        cache.get({ ...document, sourceKey: `sources/${name}` }),
+      ));
+      expect(others.every((other) => other.path !== source.path)).toBe(true);
+      expect(shared.path).toBe(source.path);
+      expect(await readFile(source.path, "utf8")).toBe(document.sourceKey);
+      await cache.clear();
+      await shared.release();
+      expect(isReadOnlySource(source.path)).toBe(true);
+      expect(await readFile(source.path, "utf8")).toBe(document.sourceKey);
+    } finally {
+      await cache.clear();
+      await shared.release();
+      await source.release();
+    }
+    expect(existsSync(source.path)).toBe(false);
+    expect(isReadOnlySource(source.path)).toBe(false);
+  });
+
+  it("never serves a cached source to another organization's run or another run, even under the same storage key", async () => {
+    let downloads = 0;
+    const storage = {
+      async downloadToTempFile(_key: string, pattern: string) {
+        downloads += 1;
+        const root = await mkdtemp(path.join(tmpdir(), "source-cache-test-"));
+        tempRoots.push(root);
+        const filePath = path.join(root, pattern.replace("*", "fixture"));
+        await writeFile(filePath, "same pdf bytes");
+        return filePath;
+      },
+    };
+    const cache = new PdfSourceCache(storage as any, 8);
+    // A run belongs to one organization; another organization's user is another requester, its run another run.
+    const orgA = await cache.get({ ...makeDocument(), userId: "user-a", runId: "run-1" });
+    const orgB = await cache.get({ ...makeDocument(), userId: "user-b", runId: "run-1" });
+    const otherRun = await cache.get({ ...makeDocument(), userId: "user-a", runId: "run-2" });
+    const sameRun = await cache.get({ ...makeDocument(), userId: "user-a", runId: "run-1" });
+    expect(downloads).toBe(3);
+    expect(new Set([orgA.path, orgB.path, otherRun.path]).size).toBe(3);
+    expect(orgB.cacheHit).toBe(false);
+    expect(otherRun.cacheHit).toBe(false);
+    expect(sameRun).toMatchObject({ path: orgA.path, cacheHit: true });
     await cache.clear();
   });
 
@@ -154,7 +214,15 @@ describe("PdfRasterCache", () => {
     await sourceCache.clear();
   });
 
-  it.each([1, 2, 3])("reuses requested raster pages with %i-digit Poppler filenames", async (digits) => {
+  it.each([
+    { digits: 1, failure: null },
+    { digits: 2, failure: null },
+    { digits: 3, failure: null },
+    { digits: 1, failure: "missing" },
+    { digits: 1, failure: "malformed" },
+    { digits: 1, failure: "cancelled" },
+  ])("renders bounded pairs (digits=$digits, failure=$failure)", async ({ digits, failure }) => {
+    const controller = new AbortController();
     const sourceStorage = {
       async downloadToTempFile(_key: string, pattern: string) {
         const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
@@ -170,10 +238,17 @@ describe("PdfRasterCache", () => {
       async putBytes(key: string, bytes: Uint8Array) { artifacts.set(key, bytes); },
       uri(key: string) { return `s3://test/${key}`; },
     };
+    const sourceCache = new PdfSourceCache(sourceStorage as any);
+    let clearedDuringRender = false;
     const ranges: Array<[number, number]> = [];
     const runner = {
       async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
       async renderPdfPageRange(_source: string, prefix: string, first: number, last: number) {
+        if (!clearedDuringRender) {
+          clearedDuringRender = true;
+          await sourceCache.clear();
+        }
+        expect(await readFile(_source, "utf8")).toBe("pdf bytes");
         ranges.push([first, last]);
         return { binary: "pdftoppm", args: [prefix, String(first), String(last)], available: true };
       },
@@ -181,14 +256,30 @@ describe("PdfRasterCache", () => {
         if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
         const [prefix, firstText, lastText] = plan.args;
         for (let page = Number(firstText); page <= Number(lastText); page += 1) {
-          await writeFile(`${prefix}-${String(page).padStart(digits, "0")}.png`, `page ${page}`);
+          if (page === 3 && failure === "missing") continue;
+          const header = Buffer.alloc(24);
+          header.writeUInt32BE(0x89504e47);
+          header.write("IHDR", 12);
+          header.writeUInt32BE(1200, 16);
+          header.writeUInt32BE(page === 3 && failure === "malformed" ? 4000 : 1600, 20);
+          await writeFile(`${prefix}-${String(page).padStart(digits, "0")}.png`, header);
         }
+        if (failure === "cancelled") controller.abort(new Error("test cancelled"));
         return { stdout: "", stderr: "" };
       },
     };
-    const sourceCache = new PdfSourceCache(sourceStorage as any);
     const cache = new PdfRasterCache(runner as any, storage as any, sourceCache);
 
+    vi.stubEnv("DOCSLURP_PDF_RASTER_BATCHING", "on");
+    if (failure) {
+      await expect(cache.renderSelectedPages({
+        document: makeDocument(), runId: "run-1", pageNumbers: [2, 3], signal: controller.signal,
+      })).rejects.toThrow();
+      expect(ranges).toEqual([[2, 3]]);
+      expect(artifacts.size).toBe(0);
+      await sourceCache.clear();
+      return;
+    }
     const first = await cache.renderSelectedPages({
       document: makeDocument(),
       runId: "run-1",
@@ -201,13 +292,13 @@ describe("PdfRasterCache", () => {
     });
 
     // Lanes create their own directories first, so they reach the planner in any order.
-    expect(ranges.sort((a, b) => a[0] - b[0])).toEqual([[2, 2], [3, 3], [5, 5]]);
+    expect(ranges.sort((a, b) => a[0] - b[0])).toEqual([[2, 3], [5, 5]]);
     expect(first.map((page) => page.pageNumber)).toEqual([2, 3, 5]);
     expect(first.every((page) => !page.cacheHit)).toBe(true);
     expect(second.every((page) => page.cacheHit)).toBe(true);
     expect(artifacts.size).toBe(3);
-    expect(first.map((page) => page.sizeBytes)).toEqual([6, 6, 6]);
-    expect(second.map((page) => page.sizeBytes)).toEqual([6, 6, 6]);
+    expect(first.map((page) => page.sizeBytes)).toEqual([24, 24, 24]);
+    expect(second.map((page) => page.sizeBytes)).toEqual([24, 24, 24]);
     await sourceCache.clear();
   });
 
@@ -248,7 +339,7 @@ describe("PdfRasterCache", () => {
       },
     };
     const sourceCache = new PdfSourceCache(sourceStorage as any);
-    const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { pdftoppmConcurrency: 3 });
+    const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { pdftoppmConcurrency: 3, pageSizeReuse: false });
     const pages = await cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 20 }, runId: "run-1", pageNumbers: [9, 2, 4, 7, 5, 11] });
 
     expect(calls.filter((call) => call.startsWith("pdfinfo")).sort()).toEqual(["pdfinfo:11", "pdfinfo:2", "pdfinfo:5", "pdfinfo:7", "pdfinfo:9"]);
@@ -574,7 +665,7 @@ describe("PdfRasterCache", () => {
     await sourceCache.clear();
   });
 
-  it("sizes distant selected pages with one pdfinfo call each, not one call over their span", async () => {
+  it("sizes distant selected pages in separate bounded pdfinfo blocks", async () => {
     const sourceStorage = {
       async downloadToTempFile(_key: string, pattern: string) {
         const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
@@ -598,7 +689,7 @@ describe("PdfRasterCache", () => {
     const sourceCache = new PdfSourceCache(sourceStorage as any);
     const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { rasterSlots: new Semaphore(4) });
     await cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 40_000 }, runId: "run-1", pageNumbers: [1, 2, 3, 40_000] });
-    expect(sized.sort((a, b) => a[0] - b[0])).toEqual([[1, 3], [40_000, 40_000]]);
+    expect(sized.sort((a, b) => a[0] - b[0])).toEqual([[1, 4_096], [36_865, 40_000]]);
     await sourceCache.clear();
   });
 

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { migrateStoredModelSettings } from "./stored-model-settings.js";
 import { dropRetiredExtractorIds, normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
 import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema } from "./quality.js";
+import { defaultPipelineLadder, effectiveLadder, pipelineLadderSchema } from "./auto-ladder.js";
 import {
   defaultDocumentExtractionConfig,
   documentExtractionConfigSchema,
@@ -17,6 +18,11 @@ import {
   inferenceLaneSchema,
   vectorBackendSchema,
   visionConfigSchema,
+  embeddingModelCatalogByUri,
+  llmModelUriSchema,
+  visionModelCatalog,
+  visionModelRefusal,
+  visionModelUriProblem,
   parseLlmModelUri,
 } from "./embedding.js";
 import { isProviderCallAllowed } from "./privacy.js";
@@ -29,6 +35,7 @@ import {
 import { isPrivateModelUri, parsePrivateModelUri } from "./private-endpoints.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
 import { chartExportConfigSchema, defaultChartExportConfig, upgradeStoredPipelineChartExport } from "./chart-export.js";
+import { convertExtractionConfigInput, ExtractionConfigConflictError, isVisualsLevel, normalizeQualityLevel, qualityLevelOfPipeline, UnsupportedConfigVersionError } from "./extraction-config.js";
 import {
   defaultSummaryTreePipelineConfig,
   summaryTreeEnabled,
@@ -486,7 +493,7 @@ export class PipelineSpeedBoostRequiredError extends Error {
   constructor() { super("Configured Nitro models require explicit speedBoost: true"); this.name = "PipelineSpeedBoostRequiredError"; }
 }
 
-export const pipelineFeaturesSchema = z
+const pipelineFeaturesObjectSchema = z
   .object({
     // Deferred indexing: `full` indexes eagerly; `map`/`visual` defer parsing until a query needs pages.
     speedBoost: z.boolean().default(false),
@@ -514,10 +521,16 @@ export const pipelineFeaturesSchema = z
       .default({ route: "auto", coarseFallback: false }),
     inferenceLane: inferenceLaneSchema.default("standard"),
     textGeneration: textGenerationConfigSchema.default(defaultTextGenerationConfig),
-    // Processing quality (fast / auto / good): the one public extraction knob. The worker derives its internal
-    // parser playbook and vision page selection from it. Retired `parserPlaybook` and `vision.forceAllPages`
-    // inputs are mapped onto it by migrateLegacyQualitySettings.
+    // Stored processing quality (`auto`; `fast` on older rows). The public level (`fastest` / `smartest`,
+    // extraction-config.ts) lives in the ladder's highest rung below. Retired `good`, `parserPlaybook` and
+    // `vision.forceAllPages` inputs are mapped by migrateLegacyQualitySettings.
     quality: qualityModeSchema.default(DEFAULT_QUALITY_MODE),
+    // Auto ladder (auto-ladder.ts): the highest rung a page may be read on (`fast` Fastest, the default; `ocr` Auto;
+    // `intelligent` Smartest) and per-document escalation share caps. Ignored outside `auto`.
+    ladder: pipelineLadderSchema.default({ ...defaultPipelineLadder, maxRung: "fast" }),
+    // Page images (thumbnails, the reader and cited-page previews): `false` keeps no viewer page image. OCR and vision
+    // still render the pages they read, in scratch only.
+    pageImages: z.boolean().default(true),
     documentExtraction: documentExtractionConfigSchema.default(
       defaultDocumentExtractionConfig,
     ),
@@ -732,6 +745,27 @@ export const pipelineFeaturesSchema = z
       });
     }
   });
+/**
+ * The project/run pipeline. Accepts both extraction shapes (extraction-config.ts): the new `quality` words
+ * (`fastest`/`balanced`/`smart`) and `visuals` are rewritten onto the legacy fields R0 stores, and a `visuals` that
+ * disagrees with `figures` or `chartExport.tier` in the same object is a validation error.
+ */
+export const pipelineFeaturesSchema = z.preprocess((value, ctx) => {
+  if (isPlainRecord(value) && "visuals" in value && value.visuals !== null && value.visuals !== undefined && !isVisualsLevel(value.visuals)) {
+    ctx.addIssue({ code: "custom", path: ["visuals"], message: "visuals must be one of none, figures, charts, charts-ai", input: value });
+    return value;
+  }
+  try {
+    // A whole pipeline (create, PATCH) carries the stored legacy fields: visuals wins over them.
+    return convertExtractionConfigInput(value, { preferNew: true }).value;
+  } catch (error) {
+    if (!(error instanceof ExtractionConfigConflictError) && !(error instanceof UnsupportedConfigVersionError)) throw error;
+    ctx.addIssue({ code: "custom", path: [error instanceof UnsupportedConfigVersionError ? "configVersion" : error.field], message: error.message, input: value });
+    return value;
+  }
+}, pipelineFeaturesObjectSchema);
+/** The pipeline object schema itself (no shape conversion), for introspection. */
+export const pipelineFeaturesShape = pipelineFeaturesObjectSchema.shape;
 export type PipelineFeatures = z.infer<typeof pipelineFeaturesSchema>;
 
 export const defaultPipelineFeatures: PipelineFeatures = {
@@ -745,6 +779,8 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   inferenceLane: "standard",
   textGeneration: defaultTextGenerationConfig,
   quality: DEFAULT_QUALITY_MODE,
+  ladder: { ...defaultPipelineLadder, maxRung: "fast" },
+  pageImages: true,
   documentExtraction: defaultDocumentExtractionConfig,
   visionFallback: true,
   vision: defaultVisionConfig,
@@ -1015,8 +1051,9 @@ export const pipelineStageLabels: Record<RunStage, string> = {
 
 export type PipelineFeatureOverrides = Omit<
   Partial<PipelineFeatures>,
-  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "textGeneration" | "graph" | "structuredExtraction" | "webhooks" | "chartExport"
+  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "textGeneration" | "graph" | "structuredExtraction" | "webhooks" | "chartExport" | "ladder"
 > & {
+  ladder?: Partial<PipelineFeatures["ladder"]> | null;
   chartExport?: Partial<PipelineFeatures["chartExport"]> | null;
   structuredExtraction?: Partial<PipelineFeatures["structuredExtraction"]> | null;
   webhooks?: Partial<ProjectWebhookSettings> | null;
@@ -1031,7 +1068,7 @@ export type PipelineFeatureOverrides = Omit<
 export function normalizePipelineFeatures(
   source?: PipelineFeatureOverrides | PipelineFeatures | null,
 ): PipelineFeatures {
-  source = migrateLegacyQualitySettings(migrateStoredModelSettings(source));
+  source = convertExtractionConfigInput(migrateLegacyQualitySettings(migrateStoredModelSettings(source))).value;
   // Privacy-only configuration must never opt into a hosted embedding call.
   // Explicit model/profile selections still pass through the privacy validator.
   const fallbackEmbedding = source?.privacyMode && source.privacyMode !== "standard"
@@ -1061,6 +1098,10 @@ export function normalizePipelineFeatures(
     textGeneration: {
       ...defaultTextGenerationConfig,
       ...(source?.textGeneration ?? {}),
+    },
+    ladder: {
+      ...defaultPipelineFeatures.ladder,
+      ...(source?.ladder ?? {}),
     },
     vision: {
       ...visionBase,
@@ -1127,11 +1168,28 @@ export function normalizePipelineFeatures(
     },
     // The tree's root is the document summary, so the tree turns summaries on; `summarize` never implies the tree.
     ...(summaryTreeEnabled(source) ? { summarize: true } : {}),
-    // Good means a vision model reads every page, so it turns vision on: `{ quality: "good", visionFallback: false }`
-    // would otherwise bill as Good while skipping vision. A run cost cap (maxCostCents) can still stop vision early.
-    ...(source?.quality === "good" ? { visionFallback: true } : {}),
+    // Smartest reads every page the text layer cannot carry with the vision model and skips OCR, so it turns vision on:
+    // with vision off its scans would be read by nothing. A run cost cap (maxCostCents) can still stop vision early.
+    ...(source && qualityLevelOfPipeline(source).quality === "smartest" ? { visionFallback: true } : {}),
+    // Smartest always keeps page images: the reader and cited-page previews show what the vision model read.
+    ...(source && smartestLocksPageImages(source) ? { pageImages: true } : {}),
   });
 }
+
+/**
+ * True when Smartest overrides `pageImages: false` (Smartest always stores page images). Callers that accept a request
+ * report it as a warning (`pageImagesForcedWarning`); normalizePipelineFeatures applies it.
+ */
+export function smartestLocksPageImages(source: { quality?: unknown; ladder?: unknown; pageImages?: unknown } | null | undefined): boolean {
+  return !!source && source.pageImages === false && qualityLevelOfPipeline(source).quality === "smartest";
+}
+
+/** The response warning for a request whose `pageImages: false` Smartest kept on. */
+export const PAGE_IMAGES_FORCED_WARNING = {
+  code: "page_images_forced",
+  field: "pageImages",
+  message: "Smartest always stores page images; pageImages stays true.",
+} as const;
 
 /** `value` with its `documentExtraction` extractor ids aliased to their canonical ids (extractor-aliases.ts). */
 function withCanonicalExtractorIds<T>(value: T): T {
@@ -1159,31 +1217,136 @@ export function normalizeStoredPipelineFeatures(
  * other detectors stay). New writes stay strict.
  */
 export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
-  if (!isPlainRecord(stored)) return stored;
+  const report = sanitizeStoredPipelineReport(stored, source);
+  if (report.log) logStoredReadOnce(`${source}|${report.dropped.join(",")}`, report.log);
+  return report.value;
+}
+
+/** One log line per stored row and outcome per process: a degraded row is read on most requests, the log should not be. */
+const loggedStoredReads = new Set<string>();
+function logStoredReadOnce(key: string, message: string): void {
+  if (loggedStoredReads.has(key)) return;
+  if (loggedStoredReads.size > 5_000) loggedStoredReads.clear();
+  loggedStoredReads.add(key);
+  console.error(message);
+}
+
+/**
+ * sanitizeStoredPipeline without logging: the value, the dotted paths it dropped (for logs; never shown to callers as
+ * is), the settings it set to their strictest value (`restricted`), and the log line for the caller to write once.
+ */
+function sanitizeStoredPipelineReport<T>(stored: T, source: string): { value: T; dropped: string[]; restricted: string[]; log: string | null } {
+  if (!isPlainRecord(stored)) return { value: stored, dropped: [], restricted: [], log: null };
+  const restricted: string[] = [];
   // Canonical ids drop retired extractors silently; a stored read reports what they named.
   const retired = isPlainRecord(stored.documentExtraction) ? dropRetiredExtractorIds(stored.documentExtraction).dropped : [];
   // Legacy chart export keys (rows from before migration 0151 or from an older API during a deploy): mapped, not dropped.
-  let next: Record<string, unknown> = upgradeStoredPipelineChartExport(withCanonicalExtractorIds(stored));
+  let next: Record<string, unknown> = readStoredExtractionShape(upgradeStoredPipelineChartExport(withCanonicalExtractorIds(stored)), source);
   const dropped: string[] = retired.map((entry) => `documentExtraction.${entry}`);
+  // Reason codes for the log (no stored values): what kind of setting stopped validating.
+  const reasons = new Set<string>(retired.length > 0 ? ["extractor-retired"] : []);
   if (isPlainRecord(next.documentExtraction)) {
     const extraction = sanitizeStoredDocumentExtraction(next.documentExtraction);
     if (extraction.dropped.length > 0) {
       next = { ...next, documentExtraction: extraction.value };
       dropped.push(...extraction.dropped);
+      reasons.add("extraction-setting-invalid");
     }
+  }
+  // A vision model that was allowed when the row was written and is not usable now (refused for its hosting region or
+  // image-token bound, removed from the catalog, repriced past the cap, a Pro/Ultra tier): the setting is dropped, so
+  // the row reads with its profile's or the default model. No page is sent to such a model either way; without this one
+  // such row fails every read. Rows name the model as a URI, or (older rows) as a catalog id in `model`/`remoteFallbackModel`.
+  if (isPlainRecord(next.vision)) {
+    const vision = { ...next.vision } as Record<string, unknown>;
+    // A URI that names its own endpoint (a `baseUrl`, or an operator's private route) was a deliberate destination: it
+    // is never swapped for the default hosted model. Such a row keeps failing, as before.
+    const pinsEndpoint = (value: string) => {
+      // Judged on the decoded text as well, so a percent-encoded key or separator is not a way around it.
+      let decoded = value;
+      try { decoded = decodeURIComponent(value); } catch { /* keep the raw text */ }
+      return [value, decoded].some((text) => /baseurl\s*=/i.test(text) || /^\s*llm:\/\/private\//i.test(text));
+    };
+    const unusableUri = (value: unknown) => typeof value === "string" && !pinsEndpoint(value)
+      && (!llmModelUriSchema.safeParse(value).success || visionModelUriProblem(value) !== null);
+    const unusableId = (value: unknown) => typeof value === "string" && (visionModelRefusal(value) !== null || !visionModelCatalog.some((spec) => spec.id === value));
+    const refused = [
+      ...(["modelUri", "remoteFallbackModelUri"] as const).filter((key) => unusableUri(vision[key])),
+      ...(["model", "remoteFallbackModel"] as const).filter((key) => unusableId(vision[key])),
+    ] as string[];
+    if (refused.length > 0) {
+      // A row that pinned its own endpoint is not rerouted to the default one: it keeps failing, as it did before.
+      const customEndpoint = typeof vision.baseUrl === "string" && vision.baseUrl !== ""
+        && vision.baseUrl.replace(/\/$/, "") !== "https://openrouter.ai/api/v1";
+      if (!(refused.includes("model") && customEndpoint)) {
+        for (const key of refused) delete vision[key];
+        // The stored target described the dropped model; the profile's or the default model brings its own.
+        if (refused.includes("model") || refused.includes("modelUri")) delete vision.target;
+        if (refused.includes("model")) {
+          // The legacy shape is converted only while `model` is present (stored-model-settings.ts): finish it here.
+          delete vision.runtime;
+          delete vision.baseUrl;
+          // A fallback id still here is in the catalog and admitted (an unusable one was dropped above).
+          const fallback = visionModelCatalog.find((spec) => spec.id === vision.remoteFallbackModel);
+          if (fallback) vision.remoteFallbackModelUri ??= fallback.uri;
+          delete vision.remoteFallbackModel;
+        }
+        next = { ...next, vision };
+        dropped.push(...refused.map((key) => `vision.${key}`));
+        reasons.add("vision-model-refused");
+      }
+    }
+  }
+  // The same for an older row's embedding model named by an id the catalog no longer has (or not by a string at all):
+  // the profile decides. The stored dimensions and target described that model, so they go with it.
+  if (isPlainRecord(next.embedding) && "model" in next.embedding
+    && !Object.values(embeddingModelCatalogByUri).some((spec) => spec.model === (next.embedding as Record<string, unknown>).model)) {
+    const { model: _model, runtime: _runtime, provider: _provider, batchSize: _batchSize, dimensions: _dimensions, target: _target, ...rest } = next.embedding as Record<string, unknown>;
+    next = { ...next, embedding: rest };
+    dropped.push("embedding.model");
+    reasons.add("embedding-model-unknown");
   }
   if (isPlainRecord(stored.piiPolicy) && Array.isArray(stored.piiPolicy.patterns)) {
     const patterns = stored.piiPolicy.patterns;
     const known = patterns.filter((pattern) => piiPatternTypeSchema.safeParse(pattern).success);
     if (known.length !== patterns.length) {
       const unknown = patterns.filter((pattern) => !piiPatternTypeSchema.safeParse(pattern).success);
-      next = { ...next, piiPolicy: { ...stored.piiPolicy, patterns: known } };
       dropped.push(...unknown.map((pattern) => `piiPolicy.patterns[${typeof pattern === "string" ? pattern.slice(0, 64) : typeof pattern}]`));
+      // A detector list that is not all names, or an enabled policy left with no detector, is not a narrower policy
+      // but an unreadable one: every detector, matches kept out of the index (the strictest policy).
+      if (patterns.some((pattern) => typeof pattern !== "string") || (stored.piiPolicy.enabled !== false && known.length === 0)) {
+        next = { ...next, piiPolicy: strictestPiiPolicy() };
+        restricted.push("piiPolicy");
+        reasons.add("pii-policy-unreadable");
+      } else {
+        next = { ...next, piiPolicy: { ...stored.piiPolicy, patterns: known } };
+        reasons.add("pii-pattern-unknown");
+      }
     }
   }
-  if (dropped.length === 0) return next as T;
-  console.error(`[pipeline] stored pipeline of ${source} has settings the schema rejects; dropped ${dropped.join(", ")}`);
-  return next as T;
+  if (dropped.length === 0) return { value: next as T, dropped, restricted, log: null };
+  return { value: next as T, dropped, restricted, log: `[pipeline] stored pipeline of ${source} has settings the schema rejects; dropped ${dropped.join(", ")} reasons=${[...reasons].join(",")}` };
+}
+
+/** The strictest PII policy: every detector, pages with a match kept out of the index. */
+function strictestPiiPolicy(): Record<string, unknown> {
+  return { enabled: true, action: "block_indexing", patterns: [...piiPatternTypeSchema.options] };
+}
+
+/**
+ * A stored row in either extraction shape, read onto the legacy fields (extraction-config.ts). A row holding both names
+ * that disagree keeps its legacy fields and logs (never a raise from the newer name). An unsupported `configVersion`
+ * throws (fail closed).
+ */
+function readStoredExtractionShape(stored: Record<string, unknown>, source: string): Record<string, unknown> {
+  try {
+    return convertExtractionConfigInput(stored).value;
+  } catch (error) {
+    if (!(error instanceof ExtractionConfigConflictError)) throw error;
+    console.error(`[pipeline] stored pipeline of ${source} has conflicting extraction names; kept the legacy fields: ${error.message}`);
+    const { visuals: _visuals, ...rest } = stored;
+    return convertExtractionConfigInput(rest).value;
+  }
 }
 
 /** Keys whose override value replaces the base value instead of merging into it. */
@@ -1216,7 +1379,16 @@ export function mergePipelineFeatures(
   overrides?: PipelineFeatureOverrides | null,
 ): PipelineFeatures {
   const normalizedBase = normalizePipelineFeatures(base ?? defaultPipelineFeatures);
-  overrides = migrateLegacyQualitySettings(overrides);
+  // New names (`quality` words, `visuals`) become legacy fields; `visuals: null` unsets the base's chart tier.
+  const migratedOverrides = migrateLegacyQualitySettings(overrides);
+  // `readScans` alone toggles the base's level: it reads the base's highest rung, so Read scans on a Smartest project
+  // keeps Smartest and Read scans off lowers it to Fastest without scans.
+  const rungContext = isPlainRecord(migratedOverrides) && "readScans" in migratedOverrides && migratedOverrides.quality !== "auto" && normalizeQualityLevel(migratedOverrides.quality) === null
+    && !(isPlainRecord(migratedOverrides.ladder) && migratedOverrides.ladder.maxRung !== undefined)
+    ? { ...migratedOverrides, ladder: { ...(isPlainRecord(migratedOverrides.ladder) ? migratedOverrides.ladder : {}), maxRung: normalizedBase.ladder.maxRung } }
+    : migratedOverrides;
+  const converted = convertExtractionConfigInput(rungContext);
+  overrides = converted.value;
   // The summary tree is never an override: the base's stored value always wins (summary-tree.ts). An upload, a chat
   // proposal or a report recommendation that names it changes nothing.
   if (overrides && "summaryTree" in overrides) {
@@ -1227,6 +1399,10 @@ export function mergePipelineFeatures(
   // A profile override changes the model: the base's model URI and target (its old profile's, or an admin override of
   // it) go, so the new profile's default applies, unless the override names its own.
   const baseRecord = { ...(normalizedBase as unknown as Record<string, unknown>) };
+  if (converted.tierUnset && isPlainRecord(baseRecord.chartExport)) {
+    const { tier: _tier, ...chartExport } = baseRecord.chartExport;
+    baseRecord.chartExport = chartExport;
+  }
   for (const section of ["embedding", "vision"] as const) {
     const override = (overrides as Record<string, unknown>)[section] as Record<string, unknown> | undefined;
     const current = baseRecord[section] as Record<string, unknown> | undefined;
@@ -1244,14 +1420,39 @@ export function mergePipelineFeatures(
   );
 }
 
-const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(["outputSchema", "restartFromStage"]));
+// `readScans` is input-only: mergePipelineFeatures converts it against the project (it is never stored).
+const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(["outputSchema", "restartFromStage", "readScans"]));
 
 /**
  * Validates partial pipeline overrides (as sent with an upload) without
  * filling in defaults, so they can be merged onto the project pipeline.
  */
 export const pipelineFeatureOverridesSchema = z
-  .preprocess((value) => withCanonicalExtractorIds(migrateLegacyQualitySettings(value as never)), z.record(z.string(), z.unknown()))
+  .preprocess((value, ctx) => {
+    const migrated = withCanonicalExtractorIds(migrateLegacyQualitySettings(value as never)) as unknown;
+    // A per-request override (upload, extract, publication patch) merges onto the project and cannot express "reset to
+    // the default": `visuals: null` is refused, like any value outside the ladder.
+    if (isPlainRecord(migrated) && "visuals" in migrated && migrated.visuals !== undefined && !isVisualsLevel(migrated.visuals)) {
+      ctx.addIssue({ code: "custom", path: ["visuals"], message: "visuals must be one of none, figures, charts, charts-ai (omit it for the project's setting)", input: value });
+      const { visuals: _visuals, ...rest } = migrated;
+      return rest;
+    }
+    // `readScans: true` alone keeps the project's level (Smartest stays Smartest), which only the merge onto the
+    // project can tell: it stays in the override for mergePipelineFeatures to convert against the base.
+    const deferReadScans = isPlainRecord(migrated) && migrated.readScans === true && migrated.quality !== "auto" && normalizeQualityLevel(migrated.quality) === null
+      && !(isPlainRecord(migrated.ladder) && migrated.ladder.maxRung !== undefined);
+    try {
+      if (deferReadScans) {
+        const { readScans: _readScans, ...rest } = migrated as Record<string, unknown>;
+        return { ...(convertExtractionConfigInput(rest).value as Record<string, unknown>), readScans: true };
+      }
+      return convertExtractionConfigInput(migrated).value;
+    } catch (error) {
+      if (!(error instanceof ExtractionConfigConflictError) && !(error instanceof UnsupportedConfigVersionError)) throw error;
+      ctx.addIssue({ code: "custom", path: [error instanceof UnsupportedConfigVersionError ? "configVersion" : error.field], message: error.message, input: value });
+      return migrated;
+    }
+  }, z.record(z.string(), z.unknown()))
   .superRefine((value, ctx) => {
     const unknownKeys = Object.keys(value).filter((key) => !pipelineFeatureKeys.has(key));
     for (const key of unknownKeys) {
@@ -1524,7 +1725,7 @@ export function withoutStageSelection<T extends { restartFromStage?: unknown; st
  * `indexingMode`/`materialization`/`visualPages`, so switching modes (or the
  * new `visualPages` default appearing on stored pipelines) never marks chunks stale.
  * `summaryTree` is dropped too: the tree is a separate index built from the chunks, so
- * turning it on or off (or the key appearing on stored pipelines) changes no chunk.
+ * turning it on or off (or the key appearing on stored pipelines) changes no chunk. `ladder` is dropped at its defaults.
  * The stored pipeline keeps those fields (use `withoutStageSelection` there).
  */
 export function pipelineVersionFeatures<T extends object>(
@@ -1539,6 +1740,14 @@ export function pipelineVersionFeatures<T extends object>(
     summaryTree: _summaryTree,
     ...rest
   } = features as T & Record<string, unknown>;
+  // The Auto ladder at its defaults (no limit) changes no output: dropped, so the key appearing on stored pipelines never
+  // changes a version hash. A limit stays in the hash.
+  if ("ladder" in rest) {
+    // Hashed as its effective limits, so equal limits written differently (an explicit null, a share of 1) hash alike.
+    const { active, ...limits } = effectiveLadder({ quality: "auto", ladder: rest.ladder as never });
+    if (active) (rest as Record<string, unknown>).ladder = limits;
+    else delete (rest as Record<string, unknown>).ladder;
+  }
   return rest as Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages" | "summaryTree">;
 }
 
@@ -1657,35 +1866,352 @@ export function compilePipelinePlan(
 }
 
 /**
+ * Why a stored setting was reset on read. Generic on purpose: callers see the setting's top-level name and one of
+ * these, never the stored value or the validation text (which can name a model or an extractor).
+ * - `retired`: it named something no longer offered (a model, an extractor, a PII detector); the default applies.
+ * - `invalid`: it no longer validates; the product default applies.
+ * - `restricted`: it restricts privacy, egress or spend and no longer validates; the strictest value applies.
+ */
+export type StoredSettingsRepairReason = "retired" | "invalid" | "restricted";
+export interface StoredSettingsRepair {
+  /** `pipeline.<setting>` (top-level setting only), or `pipeline` when the whole stored value was unreadable. */
+  path: string;
+  reason: StoredSettingsRepairReason;
+}
+export interface StoredPipelineRead {
+  /** The settings to use: every stored value that validates, with a fallback for each one that does not. */
+  features: PipelineFeatures;
+  /** One entry per reset top-level setting; empty when the stored value read as is. */
+  repairs: StoredSettingsRepair[];
+  /** The exact dotted paths dropped, for logs only (may include stored ids). */
+  dropped: string[];
+  /** One log line describing the reset, or null; the reader never logs, callers write it once per row. */
+  log: string | null;
+}
+
+/**
  * Read a stored pipeline snapshot (a run's, or an old project row) that may
  * predate the current schema: retired keys and nulls where values are now
  * required. Each validation pass drops exactly the fields the schema reports
  * so defaults fill them; a list of historical runs never fails on one row.
  */
 export function parseStoredPipelineFeatures(stored: unknown, sourceName = "a stored pipeline"): PipelineFeatures {
-  let source = structuredClone(sanitizeStoredPipeline((stored ?? null) as Record<string, unknown> | null, sourceName));
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  const read = readStoredPipelineSettings(stored, sourceName);
+  if (read.log) logStoredReadOnce(`${sourceName}|${read.dropped.join(",")}`, read.log);
+  return read.features;
+}
+
+const RESTRICTED_LOCAL_PROFILE = "cheapest-local";
+
+/**
+ * The one reader for a stored pipeline (project rows, run snapshots, project version snapshots). It never throws
+ * because a stored field no longer validates: each such field is dropped and replaced, and reported in `repairs`.
+ * A field that validates is kept as stored. Writes stay strict (normalizePipelineFeatures on the request).
+ *
+ * Fallbacks for a field that does not validate. A setting that restricts privacy, egress or spend is never replaced
+ * by a value weaker than any valid value it could have held:
+ *
+ * | Setting                     | Fallback when unreadable                                                         |
+ * |-----------------------------|----------------------------------------------------------------------------------|
+ * | privacyMode                 | "strict-privacy" (no hosted calls, every blocked call audited)                   |
+ * | piiPolicy                   | enabled, every detector, action "block_indexing"                                 |
+ * | webTools                    | false (no web search or fetch)                                                   |
+ * | webhooks                    | { enabled: false, events: [] } (no deliveries)                                   |
+ * | maxCostCents                | a positive number is floored (at least 1); anything else is a 1 cent cap.        |
+ * |                             | 0 and null mean "no cap" to the worker, so neither is ever the fallback.         |
+ * | ladder                      | { maxRung: "fast" } (Auto never escalates a page to a billed rung)               |
+ * | visionFallback              | false (no vision reads unless quality "good" turns them on)                      |
+ * | mediaVideo                  | { enabled: false } (no frame reads)                                              |
+ * | pageRouter                  | the default router: no mode, free feature routing (no decision-model spend)      |
+ * | embedding, vision (section  | under a restricted privacy mode: profile "cheapest-local" (never a hosted model) |
+ * |   or profile)               | under "standard": the product default                                            |
+ * | quality                     | "fast" (the cheapest reading level); "auto" when the row indexes in visual mode,  |
+ * |                             | which refuses Fast                                                               |
+ * | contextualChunkPreambles    | false (no model call per chunk)                                                  |
+ * | figures                     | false (no figure pass or chart reads)                                            |
+ * | pii patterns                | unknown names dropped; a list with a non-name, or an enabled policy left with   |
+ * |                             | none, is the strictest policy                                                    |
+ * | embed vs graph features     | the graph features go off; a stored false is never deleted to resolve a conflict |
+ * | Nitro model w/o Speed boost | the Nitro model goes (deployment default), Speed boost stays off                 |
+ * | textGeneration,             | the product default: the deployment's default text model (hosted text calls are |
+ * |   inferenceLane             | refused at call time under a restricted privacy mode), the "standard" lane       |
+ * | anything else               | the product default (embed, indexVectors, summaryTree off, ...)                  |
+ *
+ * A stored value that is not an object at all (a string, a number, a list) reads as defaults with every guarded
+ * setting above at its strictest value, and local profiles. `null`/absent reads as plain defaults (nothing stored).
+ */
+export function readStoredPipelineSettings(stored: unknown, sourceName = "a stored pipeline"): StoredPipelineRead {
+  const repairs = new Map<string, StoredSettingsRepairReason>();
+  const dropped: string[] = [];
+  const rank: Record<StoredSettingsRepairReason, number> = { retired: 0, invalid: 1, restricted: 2 };
+  const note = (path: string, reason: StoredSettingsRepairReason) => {
+    dropped.push(path);
+    const top = path === "" ? "pipeline" : `pipeline.${path.split(/[.[]/)[0]}`;
+    const previous = repairs.get(top);
+    if (previous === undefined || rank[reason] > rank[previous]) repairs.set(top, reason);
+  };
+  const result = (read: PipelineFeatures): StoredPipelineRead => {
+    let features = read;
+    // A restricted privacy mode never reads with a hosted vision model when the row's vision or privacy setting was
+    // reset (the schema admits a hosted vision profile there; calls are refused at run time, the page must not show it).
+    const touched = ["pipeline", "pipeline.vision", "pipeline.privacyMode"].some((path) => repairs.has(path));
+    if (touched && features.privacyMode !== "standard" && features.vision.target !== "local") {
+      try {
+        features = normalizePipelineFeatures({ ...features, vision: { profile: RESTRICTED_LOCAL_PROFILE } } as PipelineFeatureOverrides);
+        note("vision", "restricted");
+      } catch {
+        // Keep the read; the run-time privacy gate still refuses hosted vision calls.
+      }
+    }
+    const list = [...repairs].map(([path, reason]) => ({ path, reason }));
+    return {
+      features,
+      repairs: list,
+      dropped,
+      log: list.length === 0 ? null : `[pipeline] stored pipeline of ${sourceName} has settings that no longer validate; reset ${list.map((repair) => `${repair.path}(${repair.reason})`).join(", ")} (dropped ${dropped.map((path) => path || "pipeline").join(", ")})`,
+    };
+  };
+
+  if (stored === null || stored === undefined) return result(normalizePipelineFeatures(null));
+  if (!isPlainRecord(stored)) {
+    // Not an object at all: nothing in it can be read, so every guarded setting is at its strictest.
+    note("", "restricted");
+    return result(strictestStoredPipelineFeatures());
+  }
+
+  let sanitized: Record<string, unknown>;
+  try {
+    const report = sanitizeStoredPipelineReport(stored, sourceName);
+    sanitized = structuredClone(report.value);
+    for (const path of report.dropped) note(path, "retired");
+    for (const path of report.restricted) note(path, "restricted");
+  } catch (error) {
+    // A `configVersion` this build does not know was written by a newer one: its fields cannot be read with this
+    // build's meanings, so the read fails closed. Callers that list rows show such a row with every guarded setting at
+    // its strictest (strictestStoredPipelineFeatures) and refuse to save over it.
+    if (error instanceof UnsupportedConfigVersionError) throw error;
+    sanitized = structuredClone(stored);
+  }
+  try {
+    return result(normalizePipelineFeatures(sanitized as PipelineFeatureOverrides));
+  } catch {
+    // Fall through to the per-field pass.
+  }
+
+  // Settings that restrict what may happen to a customer's content are never replaced by a weaker default: an
+  // unreadable value becomes the strictest one.
+  const guarded = guardedStoredSettings(sanitized);
+  for (const key of guarded.replaced) note(key, "restricted");
+  // The row holds a privacy mode whenever `guarded` does; absent means the default, "standard".
+  const restrictedPrivacy = guarded.values.privacyMode !== undefined && guarded.values.privacyMode !== "standard";
+  const source: Record<string, unknown> = { ...sanitized, ...guarded.values };
+  const section = (key: string): Record<string, unknown> => (isPlainRecord(source[key]) ? { ...source[key] } : {});
+  const setFalse = (key: string): boolean => {
+    if (source[key] === false) return false;
+    source[key] = false;
+    note(key, "invalid");
+    return true;
+  };
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     try {
-      return normalizePipelineFeatures(source as PipelineFeatureOverrides | null);
+      return result(normalizePipelineFeatures(source as PipelineFeatureOverrides));
     } catch (error) {
       const issues = (error as { issues?: Array<{ code: string; path: PropertyKey[]; keys?: string[] }> }).issues;
-      if (!issues?.length || !source) break;
+      if (!issues?.length) {
+        // Not a validation issue: the stored-model migration refused a legacy model it cannot place (not a catalog id,
+        // or a model on an endpoint of its own). The model goes and the section reads with the local profile, never the
+        // default hosted model (a row that pinned its own endpoint is never rerouted to ours).
+        let stripped = false;
+        for (const head of ["vision", ...(restrictedPrivacy ? ["embedding"] : [])]) {
+          const current = section(head);
+          const legacy = ["model", "remoteFallbackModel", "runtime", "baseUrl", "provider"].filter((key) => Object.hasOwn(current, key));
+          if (legacy.length === 0) continue;
+          for (const key of [...legacy, "modelUri", "target", "remoteFallbackModelUri", "dimensions", "batchSize"]) delete current[key];
+          source[head] = { ...current, profile: RESTRICTED_LOCAL_PROFILE };
+          note(`${head}.model`, "restricted");
+          stripped = true;
+        }
+        if (stripped) continue;
+        break;
+      }
+      let changed = false;
       for (const issue of issues) {
+        const path = issue.path.map(String);
+        const head = path[0];
+        // Guarded settings were made valid above; an issue on one is a conflict with another field, which goes instead.
+        if (path.length === 1 && Object.hasOwn(guarded.values, head!)) continue;
+        // Under a restricted privacy mode an unreadable model section, profile or sub-key goes, and the section reads
+        // with the local profile (never the hosted default, and never a stored model URI).
+        if (restrictedPrivacy && (head === "embedding" || head === "vision")) {
+          const current = path.length === 1 && issue.code !== "unrecognized_keys" ? {} : section(head);
+          for (const key of [...(issue.code === "unrecognized_keys" ? issue.keys ?? [] : []), ...(path.length >= 2 ? [path[1]!] : []),
+            "modelUri", "target", "remoteFallbackModelUri", "model", "remoteFallbackModel", "runtime", "baseUrl"]) delete current[key];
+          const local = { ...current, profile: RESTRICTED_LOCAL_PROFILE };
+          if (JSON.stringify(source[head]) !== JSON.stringify(local)) {
+            source[head] = local;
+            note(head, "restricted");
+            changed = true;
+          }
+          continue;
+        }
+        if (issue.code === "custom") {
+          // Refinements that relate two settings: narrow the dependent one, never re-enable what the row turned off.
+          if (path.length === 1 && head === "embed") {
+            // Graph features need embeddings; a row with embeddings off loses them rather than turning embedding on.
+            for (const key of ["graphRag", "graphCommunitySummaries", "entityIndex"]) if (setFalse(key)) changed = true;
+            continue;
+          }
+          if (path.length === 1 && head === "indexVectors") {
+            if (setFalse("indexVectors")) changed = true;
+            continue;
+          }
+          if (head === "summaryTree") {
+            const tree = section("summaryTree");
+            if (tree.enabled !== false) {
+              source.summaryTree = { ...tree, enabled: false };
+              note("summaryTree", "invalid");
+              changed = true;
+            }
+            continue;
+          }
+          if (path.length === 1 && head === "speedBoost") {
+            // A Nitro model without Speed boost: the Nitro model goes (the deployment default applies), Speed boost stays off.
+            const nitro = (value: unknown) => typeof value === "string" && value.trim().endsWith(":nitro");
+            for (const key of ["vision", "textGeneration", "pageRouter"]) {
+              const record = section(key);
+              let edited = false;
+              for (const field of ["model", "modelUri", "remoteFallbackModelUri"]) if (nitro(record[field])) { delete record[field]; edited = true; }
+              if (isPlainRecord(record.models)) {
+                const models = { ...record.models };
+                for (const [operation, model] of Object.entries(models)) if (nitro(model)) { delete models[operation]; edited = true; }
+                record.models = models;
+              }
+              if (Array.isArray(record.decisionModel) && record.decisionModel.some(nitro)) { delete record.decisionModel; edited = true; }
+              if (nitro(record.decisionModel)) { delete record.decisionModel; edited = true; }
+              if (edited) { source[key] = record; note(`${key}.model`, "invalid"); changed = true; }
+            }
+            continue;
+          }
+          // A stored `false` named by a refinement is the narrower value: it is never deleted (the default may be on).
+          if (path.length === 1 && source[head!] === false) continue;
+        }
         let node: unknown = source;
         for (const segment of issue.path.slice(0, -1)) node = (node as Record<PropertyKey, unknown> | undefined)?.[segment];
         if (!node || typeof node !== "object") continue;
-        const target = issue.code === "unrecognized_keys"
-          ? (issue.path.length ? (node as Record<PropertyKey, unknown>)[issue.path.at(-1)!] : node)
-          : node;
         if (issue.code === "unrecognized_keys") {
-          if (target && typeof target === "object") for (const key of issue.keys ?? []) delete (target as Record<string, unknown>)[key];
+          const target = issue.path.length ? (node as Record<PropertyKey, unknown>)[issue.path.at(-1)!] : node;
+          if (!target || typeof target !== "object") continue;
+          for (const key of issue.keys ?? []) {
+            if (!Object.hasOwn(target, key)) continue;
+            delete (target as Record<string, unknown>)[key];
+            note([...path, key].join("."), "invalid");
+            changed = true;
+          }
         } else if (issue.path.length) {
-          delete (node as Record<PropertyKey, unknown>)[issue.path.at(-1)!];
+          const key = issue.path.at(-1)!;
+          if (Object.hasOwn(node, key)) {
+            delete (node as Record<PropertyKey, unknown>)[key];
+            note(path.join("."), "invalid");
+            changed = true;
+          } else if (path.length === 1 && issue.code === "custom") {
+            // A conflict on a setting the row does not hold: the narrower value, never the default that keeps conflicting.
+            if (setFalse(String(key))) changed = true;
+          }
         }
       }
+      if (!changed) break;
     }
   }
-  return normalizePipelineFeatures(null);
+  // Nothing else is readable. Keep the guarded settings, with the local profiles a restricted privacy mode requires;
+  // if even that does not validate the row is unreadable, and a row with guarded settings never reads as plain defaults.
+  note("", "invalid");
+  const kept = { ...guarded.values, ...(restrictedPrivacy ? { embedding: { profile: RESTRICTED_LOCAL_PROFILE }, vision: { profile: RESTRICTED_LOCAL_PROFILE } } : {}) };
+  if (Object.keys(kept).length === 0) return result(normalizePipelineFeatures(null));
+  try {
+    return result(normalizePipelineFeatures(kept as PipelineFeatureOverrides));
+  } catch {
+    return result(normalizePipelineFeatures({ ...kept, embedding: { profile: RESTRICTED_LOCAL_PROFILE }, vision: { profile: RESTRICTED_LOCAL_PROFILE } } as PipelineFeatureOverrides));
+  }
+}
+
+/**
+ * Defaults with every guarded setting at its strictest value and local model profiles: what a stored pipeline that
+ * cannot be read at all (not an object, or written by a newer build) reads as wherever it must be shown.
+ */
+export function strictestStoredPipelineFeatures(): PipelineFeatures {
+  return normalizePipelineFeatures(strictestGuardedSettings() as PipelineFeatureOverrides);
+}
+
+/** The strictest value of every guarded setting (readStoredPipelineSettings' table), with local model profiles. */
+function strictestGuardedSettings(): Record<string, unknown> {
+  return {
+    privacyMode: "strict-privacy",
+    piiPolicy: strictestPiiPolicy(),
+    webTools: false,
+    webhooks: { enabled: false, events: [] },
+    maxCostCents: 1,
+    ladder: { maxRung: "fast" },
+    visionFallback: false,
+    mediaVideo: { enabled: false },
+    pageRouter: {},
+    quality: "fast",
+    contextualChunkPreambles: false,
+    figures: false,
+    embedding: { profile: RESTRICTED_LOCAL_PROFILE },
+    vision: { profile: RESTRICTED_LOCAL_PROFILE },
+  };
+}
+
+/** A stored cost cap that does not validate: never "no cap" (null or 0). A positive number is floored, else 1 cent. */
+function fallbackCostCap(value: unknown): number {
+  const numeric = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : Number.NaN;
+  return Number.isFinite(numeric) && numeric >= 1 ? Math.min(Math.floor(numeric), Number.MAX_SAFE_INTEGER) : 1;
+}
+
+/**
+ * The stored settings a tolerant read must not weaken, each made valid: kept when it validates on its own, otherwise
+ * the strictest value (readStoredPipelineSettings' table). Only settings the row actually holds are returned;
+ * `replaced` names the ones that did not validate.
+ */
+function guardedStoredSettings(stored: Record<string, unknown>): { values: Record<string, unknown>; replaced: string[] } {
+  const values: Record<string, unknown> = {};
+  const replaced: string[] = [];
+  const strictest = strictestGuardedSettings();
+  const validAlone = (key: string, value: unknown) => {
+    try { normalizePipelineFeatures({ [key]: value } as PipelineFeatureOverrides); return true; } catch { return false; }
+  };
+  const guard = (key: string, valid: (value: unknown) => boolean, fallback: (value: unknown) => unknown) => {
+    if (stored[key] === undefined) return;
+    if (valid(stored[key])) {
+      values[key] = stored[key];
+    } else {
+      values[key] = fallback(stored[key]);
+      replaced.push(key);
+    }
+  };
+  // Same reading as the request-time gates: a mode that is not recognized is the strictest one.
+  guard("privacyMode", (value) => privacyModeSchema.safeParse(value).success, () => strictest.privacyMode);
+  // Unreadable: every detector on, and pages with a match kept out of the index.
+  guard("piiPolicy", (value) => isPlainRecord(value) && validAlone("piiPolicy", value), () => strictest.piiPolicy);
+  guard("webTools", (value) => typeof value === "boolean", () => false);
+  // A webhook setting that does not validate delivers nothing (dropping only a bad `events` list would widen it to all).
+  guard("webhooks", (value) => isPlainRecord(value) && validAlone("webhooks", value), () => strictest.webhooks);
+  guard("maxCostCents", (value) => value === null || validAlone("maxCostCents", value), fallbackCostCap);
+  // Auto ladder limits exist only to cap spend: an unreadable one is the lowest rung.
+  guard("ladder", (value) => isPlainRecord(value) && validAlone("ladder", value), () => strictest.ladder);
+  guard("visionFallback", (value) => typeof value === "boolean", () => false);
+  // Its per-document limits cap frame reads: an unreadable section reads no frames rather than the preset maximum.
+  guard("mediaVideo", (value) => isPlainRecord(value) && validAlone("mediaVideo", value), () => strictest.mediaVideo);
+  // Its per-document budget caps decision-model spend: an unreadable section is the default router (no mode, free
+  // feature routing), never a default budget under a stored paid mode.
+  guard("pageRouter", (value) => isPlainRecord(value) && validAlone("pageRouter", value), () => strictest.pageRouter);
+  // Quality decides how many pages a billed reader sees: an unreadable level is the cheapest one, never Auto or Good.
+  guard("quality", (value) => validAlone("quality", value), () => (stored.indexingMode === "visual" ? "auto" : strictest.quality));
+  // One model call per chunk: an unreadable switch is off.
+  guard("contextualChunkPreambles", (value) => typeof value === "boolean", () => false);
+  // The figure pass and its chart reads: an unreadable switch is off.
+  guard("figures", (value) => typeof value === "boolean", () => false);
+  return { values, replaced };
 }
 
 /**
@@ -1703,6 +2229,8 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   inferenceLane: [],
   textGeneration: [],
   quality: ["extract-markdown", "vision-extract"],
+  ladder: ["extract-markdown", "vision-extract"],
+  pageImages: ["render-images"],
   documentExtraction: ["extract-markdown"],
   visionFallback: ["vision-extract"],
   vision: ["vision-extract"],
@@ -1759,6 +2287,19 @@ export function affectedStages(before: PipelineFeatures, after: PipelineFeatures
   }
   if (seeds.size === 0) return [];
   const { selected } = closeStageSelection(seeds, enabled, after, false);
+  return enabled.filter((stage) => selected.has(stage));
+}
+
+/**
+ * The stages that rebuild what `fields` feed, for an unchanged configuration: their enabled seed stages plus the later
+ * stages that consume their outputs, in pipeline order. A plain index rebuild uses the index-identity settings.
+ */
+export function fieldRebuildStages(features: PipelineFeatures, fields: readonly (keyof PipelineFeatures)[]): PipelineRunStage[] {
+  const enabled = pipelineStagePlan.filter((item) => item.isEnabled(features)).map((item) => item.stage);
+  const seeds = new Set<PipelineRunStage>();
+  for (const field of fields) for (const stage of FIELD_SEED_STAGES[field]) if (enabled.includes(stage)) seeds.add(stage);
+  if (seeds.size === 0) return [];
+  const { selected } = closeStageSelection(seeds, enabled, features, false);
   return enabled.filter((stage) => selected.has(stage));
 }
 

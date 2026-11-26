@@ -1,6 +1,6 @@
 import "./env.js";
 import { warnChartExportSwitch } from "./chart-export/config.js";
-import { summaryTreeSwitchWarnings } from "@docslurp/shared";
+import { summaryTreeSwitchWarnings, switchDisabled } from "@docslurp/shared";
 
 import { existsSync } from "node:fs";
 import { defaultDocConcurrency, resolveActivityConcurrency } from "./concurrency.js";
@@ -309,7 +309,8 @@ export function fromEnv(): Config {
       process.env.VISION_DENSITY_THRESHOLD ?? "0.25",
     ),
     visionStreaming: readBoolean(process.env.VISION_STREAMING, true),
-    pageRouterMode: readPageRouterMode(process.env.PAGE_ROUTER_MODE),
+    // DOCSLURP_DISABLE=router (or `ai`): deterministic rules only, as PAGE_ROUTER_MODE=off.
+    pageRouterMode: switchDisabled(process.env, "router") ? "off" : readPageRouterMode(process.env.PAGE_ROUTER_MODE),
     visionModelSwapPolicy: readEnv(process.env.VISION_MODEL_SWAP_POLICY)?.toLowerCase() === "fail" ? "fail" : "warn",
     pythonPoolSize: readNumber(process.env.WORKER_PYTHON_POOL_SIZE, 2),
     parserArtifactTimeoutMs: readNumber(

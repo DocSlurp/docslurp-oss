@@ -36,6 +36,42 @@ Migration 0112 requires coordinated downtime, not a rolling release. Follow the
 [enforced migration preconditions and drain procedure](generation-rollout.md)
 before deploying a fleet that uses execution generations.
 
+## How migrations are applied
+
+`node server/db/migrate.mjs` (the release command, the Compose `migrate` service and `RUN_STARTUP_MIGRATIONS`) takes the
+migration advisory lock on one direct owner connection and runs `server/db/migration-runner.mjs`:
+
+- **Files, not a journal.** Every `*.sql` file in `server/db/migrations` that the database has not recorded in
+  `docslurp_migrations.applied` (by file name) is applied, in name order. The numbered `NNNN_` files are frozen; new ones
+  are `YYYYMMDDTHHMM_name.sql` in UTC (`pnpm db:new <name>`) and sort after them. A migration that merges after a
+  later-named one was already applied still runs, and the log says so.
+- **One transaction per file.** A lock a migration takes is released when that file commits. A failure rolls back that
+  file only: the files before it stay applied and recorded, and a re-run continues from the failed file. Because of this
+  every migration must be safe to run twice and must keep the previous release working (the expand/contract gate,
+  `scripts/check-migration-safety.mjs`, and `worker/src/__tests__/migrations-idempotent.test.ts`).
+- **Bounded lock waits.** Each file starts with `lock_timeout` set to `MIGRATION_STATEMENT_LOCK_TIMEOUT_MS` (15 s) and is
+  retried `MIGRATION_LOCK_RETRIES` times (3) when the wait times out or deadlocks, so a migration blocked by a long
+  transaction fails fast instead of queueing the site behind it.
+- **Databases migrated by Drizzle** (every database before this runner) are mapped once, on the first run: the files the
+  Drizzle ledger counted as applied are recorded by name and not re-run. The mapping refuses a ledger whose newest stamp
+  it does not know. `drizzle.__drizzle_migrations` is kept, marked as mapped, and stays current for the numbered files,
+  so a rollback to the previous release still reads its schema as applied. A database first created by this runner has
+  no Drizzle ledger: it cannot be rolled back to a release that used Drizzle's migrator.
+- **The ledgers are trusted only when the migration owner owns them** (schema and table) and they are plain tables with
+  no triggers, rules, row-level security or inheritance. Anything else stops the run before a migration is applied.
+- **A migration cannot end its transaction or change role.** The CI gate refuses `BEGIN`, `COMMIT`, `ROLLBACK`,
+  `SET ROLE` and session-level `SET search_path` in a migration, and the runner checks both after each file.
+- **The generation cutover (0112) stays all or nothing.** A database from before it is upgraded in one transaction, as
+  before, because its downtime barrier is verified once for that run.
+- **Grants.** Role grants are reconciled after the run, and also after a failed run that committed some files.
+- **Changed files.** An applied file whose contents no longer match the recorded hash is reported with a warning and
+  never re-run. Put the change in a new migration.
+- **A lost ledger** is refused, not replayed and not mapped from Drizzle a second time: see
+  `MIGRATION_ASSUME_APPLIED_THROUGH` in [configuration](self-host/configuration.md). Unset it once the run succeeds.
+
+Readiness (`/ready`), the `migrations-not-at-head` alert and `predeploy-check.mjs` compare the files a build ships with
+the ledger file by file. The application and worker roles can read the ledger and cannot write it.
+
 ## Migrations 0121-0127
 
 These migrations ship in one release. 0125 and 0127 delete rows (pre-release data: webhooks and API keys without exactly one
@@ -43,3 +79,18 @@ organization, and memberships beyond one per user), and the only rollback is a d
 Run `node server/db/predeploy-check.mjs --strict` from the new image first, snapshot, migrate as a standalone step (not a
 `release_command`), then build the folded keyword index with `node server/db/folded-search-index.mjs`. The order, what is
 deleted and not rollback-safe, the mixed-version window and SigNoz signals are in [rollout-0121-0127.md](rollout-0121-0127.md).
+
+## Extraction config compatibility release (R0) and cutover (R1)
+
+`DOCSLURP_PROFILE` and `DOCSLURP_DISABLE` ([Deployment profile](self-host/deployment-profile.md)) replace
+`DOCSLURP_SERVICE_PROFILE` and several older variables in two releases:
+
+- **R0 (compatibility).** Reads both the old and the new names: a warning when they agree, a startup refusal when they
+  disagree. A worker outside development refuses to start with no profile on either name. Knows the whole `DOCSLURP_DISABLE` vocabulary. Workers advertise `extraction.config-v1` and their posture
+  digest (migration 0182, additive); `GET /ops/worker-fleet` shows whether the whole fleet enforces the switches.
+- **R1 (cutover).** Retired variables refuse startup. Deploy R1 only after R0 runs everywhere and every deployment's
+  configuration has moved to the new names.
+
+Rollback is an image, environment and configuration bundle, never an image alone, and goes from R1 to R0 only: R0
+understands both name sets and every switch, so it never meets an unknown token. Roll out app first, worker first or as
+a mixed fleet in either order; the API applies its own switch lowering whatever the fleet runs.

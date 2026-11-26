@@ -15,6 +15,8 @@
 
 import { TEXT_LAYER_AGREEMENT_MIN, type PageInput } from "@docslurp/shared";
 
+import { PAGE_MATH_GLYPHS, mathGlyphsWithholdTrust, textLayerUnreliable } from "../lib/page-evidence.js";
+
 export const TRUST_RULE = {
   /**
    * Minimum agreement (the lesser of precision and recall, in reading order) of an OCR layer with a fresh OCR of a
@@ -22,12 +24,10 @@ export const TRUST_RULE = {
    */
   ocrLayerAgreementMin: TEXT_LAYER_AGREEMENT_MIN,
   /**
-   * Pages with at least this share of math glyphs (mathematical alphanumerics, operators and symbols; Greek letters
-   * are prose and unit symbols) are not accept-text-only. The one math threshold: triage and planner derive theirs
-   * from it. PROVISIONAL: chosen after seeing the TL1 development/calibration data (0.01 separated its math pages);
-   * it has not been validated on independently collected pages and should be re-fit when more data exists.
+   * Pages with at least this share of math glyphs are not accept-text-only: page evidence's one math-glyph gate
+   * (lib/page-evidence.ts PAGE_MATH_GLYPHS, which also sets triage's and the planner's math need).
    */
-  mathGlyphRatio: 0.01,
+  mathGlyphRatio: PAGE_MATH_GLYPHS.gate,
   /** Insets covering less than this are logos/decoration; no paid question (matches inset-triage minCoverage floor). */
   insetCoverageMin: 0.02,
   /** Insets covering at least this are page scans; the page-level logic owns them. */
@@ -59,7 +59,7 @@ export function freeTrustVerdict(page: PageInput): FreeTrustVerdict {
   const { textFacts: tf, features: f } = page;
   let trusted: boolean;
   let reason: TrustRuleReason;
-  if (f.native.garbled || f.native.unmappedGlyphRatio > 0.1) {
+  if (textLayerUnreliable(f.native)) {
     trusted = false;
     reason = "garbled-text-layer";
   } else if (tf.textLayerStatus === "ok") {
@@ -84,7 +84,7 @@ export function freeTrustVerdict(page: PageInput): FreeTrustVerdict {
     trusted = false;
     reason = "text-layer-suspect";
   }
-  if (trusted && f.native.mathGlyphRatio >= TRUST_RULE.mathGlyphRatio) {
+  if (trusted && mathGlyphsWithholdTrust(f.native.mathGlyphRatio)) {
     return { trusted: false, reason: "math-glyphs", mathGated: true };
   }
   return { trusted, reason, mathGated: false };

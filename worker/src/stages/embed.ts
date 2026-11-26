@@ -1,9 +1,10 @@
-import { hasVmHtmlTableWork, withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
-import { htmlTableSources } from "../pipeline/chunking.js";
+import { hasVmHtmlTableWork, TableCellRetention, withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
+import { embedHtmlTableSources, readTableCellsArtifact, reportUnknownGuest, tableCellsArtifactKey, tableCellsCacheActive, tableCellsGeneration, tableCellsGuestVersion, type TableCellsLookup } from "../pipeline/html-table-cells-cache.js";
+import { recordDocumentMilestone } from "../pipeline/run-milestones.js";
 import { createHash } from "node:crypto";
 
 import { RunPolicyError } from "../lib/document-failure.js";
-import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, resolveAllowedPipelineTextModel, pipelineVersionFeatures } from "@docslurp/shared";
+import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, embeddingRequestConfig, resolveAllowedPipelineTextModel, pipelineVersionFeatures } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
@@ -18,7 +19,6 @@ import { projectVectorLocation } from "./lancedb-location.js";
 import { detectLanguage, detectScript, resolveEmbeddingModel, resolveVectorBackends } from "../embeddings/resolver.js";
 import { chunkTokenBudget, embeddingInputTokenLimit } from "../embeddings/input-limits.js";
 import {
-  asEmbeddingReuseStore,
   documentContextKey,
   EMBEDDING_REUSE_KEY_VERSION,
   embeddingInputKey,
@@ -43,30 +43,6 @@ import {
   type EmbeddingArtifact
 } from "./embedding-runtime.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
-
-type ChunkInsertStore = {
-  insertChunks: (chunks: Array<{
-    id: string;
-    documentId: string;
-    runId: string;
-    userId: string;
-    chunkIndex: number;
-    text: string;
-    headingPath: string[];
-    pageNumber?: number;
-    tokenEstimate: number;
-    metadata: Record<string, unknown>;
-    contentHash?: string;
-    pipelineVersion?: string;
-  }>) => Promise<void>;
-  /** The document's chunk ids outside the replacement set (a retry that produced fewer chunks). */
-  staleDocumentChunkIds?: (documentId: string, keepChunkIds: readonly string[]) => Promise<string[]>;
-  /** Drops the document's chunk rows outside the replacement set; returns their ids. */
-  deleteStaleDocumentChunks?: (documentId: string, keepChunkIds: readonly string[]) => Promise<string[] | void>;
-  markDocumentLexicalSearchable?: (documentId: string) => Promise<void>;
-  /** deleteStaleDocumentChunks and markDocumentLexicalSearchable as one transaction in one round trip. */
-  finalizeDocumentChunks?: (documentId: string, keepChunkIds: readonly string[], markSearchable: boolean) => Promise<void>;
-};
 
 const DEFAULT_MAX_EMBED_WINDOW_PAGES = 100;
 const DEFAULT_MAX_EMBED_WINDOW_CHUNKS = 128;
@@ -150,7 +126,12 @@ export class EmbedStage implements Stage {
           const chunkMaxTokens = chunkTokenBudget(profile.modelUri);
           const lateChunkingEnabled = embeddingConfig.lateChunking === true;
           const lateChunkingWindow = Math.max(1, embeddingConfig.lateChunkingWindow ?? 2);
-          const reuseStore = asEmbeddingReuseStore(state.store);
+          // The request settings every embedding call of this document ran with (`metadata.modelConfig`) and its level.
+          const embeddingCallRecord = {
+            modelConfig: embeddingRequestConfig({ ...tunedProfile, lateChunking: lateChunkingEnabled }, { inputTokenLimit }),
+            modelClass: { embeddingProfile: tunedProfile.profile },
+          };
+          const reuseStore = state.store?.content;
           const reuseLookup = new EmbeddingReuseLookup({
             storage: this.storage,
             store: reuseStore,
@@ -200,31 +181,14 @@ export class EmbedStage implements Stage {
           // synchronous chunking and hashing run beside the remote call.
           let contextTask: Promise<DocumentContext> | undefined;
           // HTML tables are parsed into cells in a parser VM before chunking (a fresh VM per
-          // embed activity: ~4.8 s p50 in production, 2026-11-11). `auto` overlaps the summary
-          // call with that round trip and keeps the inline order when there is nothing to wait on.
-          const tableSources = [
-            ...(extracted.canonicalDocument?.blocks.flatMap(block => [block.text.trim(), ...htmlTableSources(block.text)]) ?? []),
-            ...htmlTableSources(extracted.text),
-          ];
-          const preambleMode = embedPreambleMode();
-          const startContextEarly = preambleMode === "concurrent"
-            || (preambleMode === "auto" && hasVmHtmlTableWork(tableSources));
-          if (preamblesEnabled && startContextEarly) {
-            await lookupReusableContext();
-            contextTask = resolveDocumentContext({
-              textGeneration: state.run.pipeline.textGeneration,
-              privacyMode: state.run.pipeline.privacyMode,
-              documentTitle: document.filename,
-              documentText: extracted.text,
-              config: this.config,
-              signal,
-              reusedDocumentContext,
-            });
-            // It never rejects today; guard the macrotask turn below anyway so a
-            // future rejection cannot surface as unhandled before it is awaited.
-            contextTask.catch(() => undefined);
-            await new Promise<void>((resolve) => setImmediate(resolve));
-          }
+          // embed activity: ~4.8 s p50 in production, 2026-11-11). extract-markdown and
+          // vision-extract store those cells from their already-warm VM lanes
+          // (DOCSLURP_TABLE_CELLS_CACHE); only tables missing from that artifact go to a VM here.
+          // `auto` overlaps the summary call with any VM round trip left and keeps the inline
+          // order when there is nothing to wait on.
+          const tableSources = embedHtmlTableSources(extracted);
+          let tableCells: TableCellsLookup | undefined;
+          const cachedCellRetention = new TableCellRetention();
           let contextRecorded = false;
           const recordContextUsage = (context: DocumentContext, chunkCount: number, extra: Record<string, unknown> = {}) => {
             contextRecorded = true;
@@ -263,13 +227,67 @@ export class EmbedStage implements Stage {
           let existingUri: string | undefined;
           let prepFailed = true;
           try {
+            // Never on a PII-policy run (tableCellsCacheActive): stored cells predate pii-detect's redaction or block.
+            if (hasVmHtmlTableWork(tableSources) && tableCellsCacheActive(state.run.pipeline) && document.runId === state.run.id) {
+              const lookupStarted = Date.now();
+              const guest = tableCellsGuestVersion();
+              if (guest.version === null) reportUnknownGuest(guest.reason);
+              tableCells = await readTableCellsArtifact({
+                storage: this.storage,
+                key: tableCellsArtifactKey(state.run, document),
+                runId: state.run.id,
+                documentId: document.id,
+                // Bound to exactly what embed read: an artifact written for other content (an older write landing late) is refused.
+                generation: tableCellsGeneration(tableSources),
+                guestVersion: guest.version,
+                sources: tableSources,
+                retention: cachedCellRetention,
+                signal,
+              });
+              const reason = "reason" in tableCells ? tableCells.reason : null;
+              // `stale` (written for other table sources, e.g. a late older write) is expected and logged at info.
+              (tableCells.status === "invalid" || tableCells.status === "unavailable" ? console.warn : console.log)(
+                `[table-cells] embed document=${document.id} status=${tableCells.status} hits=${tableCells.hits} ` +
+                  `misses=${tableCells.misses}${reason ? ` reason=${reason}` : ""} ms=${Date.now() - lookupStarted}`,
+              );
+              state.pendingPerformance.push({
+                documentId: document.id,
+                scope: "document",
+                stageName: this.name,
+                metric: "table-cells-reuse",
+                value: tableCells.hits,
+                unit: "table",
+                tags: ["document", "tables"],
+                metadata: { status: tableCells.status, hits: tableCells.hits, misses: tableCells.misses, ...(reason ? { reason } : {}), lookupMs: Date.now() - lookupStarted },
+              });
+            }
+            const tableVmWork = hasVmHtmlTableWork(tableSources) && (tableCells === undefined || tableCells.misses > 0);
+            const preambleMode = embedPreambleMode();
+            const startContextEarly = preambleMode === "concurrent"
+              || (preambleMode === "auto" && tableVmWork);
+            if (preamblesEnabled && startContextEarly) {
+              await lookupReusableContext();
+              contextTask = resolveDocumentContext({
+                textGeneration: state.run.pipeline.textGeneration,
+                privacyMode: state.run.pipeline.privacyMode,
+                documentTitle: document.filename,
+                documentText: extracted.text,
+                config: this.config,
+                signal,
+                reusedDocumentContext,
+              });
+              // It never rejects today; guard the macrotask turn below anyway so a
+              // future rejection cannot surface as unhandled before it is awaited.
+              contextTask.catch(() => undefined);
+              await new Promise<void>((resolve) => setImmediate(resolve));
+            }
             chunkDrafts = await withPreparedHtmlTables(tableSources, this.runner, async () => extracted.canonicalDocument
               ? buildCanonicalChunksFromDocument(extracted.canonicalDocument, document.filename, {
                   chunkOverlap: state.run.pipeline.chunkOverlap,
                   maxTokens: chunkMaxTokens,
                   sourceKind: document.mimeType.startsWith("image/") ? "image" : null
                 })
-              : await fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap, chunkMaxTokens, signal), signal);
+              : await fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap, chunkMaxTokens, signal), signal, { cached: tableCells?.cached });
             contentHash = hashContent(
               JSON.stringify({
                 documentTitle: document.filename,
@@ -285,6 +303,8 @@ export class EmbedStage implements Stage {
             existingUri = checkDedup(state, contentHash, artifactSlot);
             prepFailed = false;
           } finally {
+            tableCells?.cached.clear();
+            cachedCellRetention.release();
             // A summary call already started is paid for even when this
             // document stops here (an in-run duplicate or a chunking error).
             if (contextTask && (prepFailed || existingUri)) {
@@ -489,7 +509,7 @@ export class EmbedStage implements Stage {
             if (stopped) throw stopError;
             progress?.check();
             if (isCostCapExceeded(state)) throw new RunPolicyError("Embedding cost cap reached before sending an embedding batch");
-            if (progress && state.store?.creditLeaseWouldExhaust?.(state)) {
+            if (progress && state.store?.creditLeaseWouldExhaust(state)) {
               leaseFlush ??= progress.flush().finally(() => { leaseFlush = null; });
               await leaseFlush;
               if (stopped) throw stopError;
@@ -550,7 +570,7 @@ export class EmbedStage implements Stage {
                     metric: "embedding-tokens", amount: inputTokens, unit: "token", logOutputTokens: false,
                     inputTokens, costCents: priced.costCents,
                     metadata: { ...priced.metadata, documentId: document.id, runtime: "remote",
-                      dimensions: tunedProfile.dimensions, chunks, tokenSource: "api", windowIndex },
+                      dimensions: tunedProfile.dimensions, chunks, tokenSource: "api", windowIndex, ...embeddingCallRecord },
                   });
                   // Throws a refused spend check from an earlier background write.
                   progress?.request();
@@ -753,6 +773,7 @@ export class EmbedStage implements Stage {
                 tokenSource,
                 estimatedTokens,
                 ...pricedEmbedding.metadata,
+                ...embeddingCallRecord,
               }
             },
           );
@@ -849,7 +870,7 @@ export class EmbedStage implements Stage {
     chunks: EmbeddingArtifact["chunks"],
     documentContextKey: string | undefined,
   ): Promise<void> {
-    const store = asEmbeddingReuseStore(state.store);
+    const store = state.store?.content;
     if (!store || !state.run.orgId) return;
     const refs: EmbeddingReuseRef[] = [];
     for (const chunk of chunks) {
@@ -953,7 +974,8 @@ export class EmbedStage implements Stage {
     /** The embedding space the document's LanceDB rows live in. */
     vectorSpace?: { model: string; dimensions: number };
   }): Promise<void> {
-    if (!args.state.store || !("insertChunks" in args.state.store)) {
+    // Unbound states (unit tests, a page task) persist no chunks; every stage activity's state is bound (loadRunState).
+    if (!args.state.store) {
       return;
     }
 
@@ -971,7 +993,8 @@ export class EmbedStage implements Stage {
       contentHash: args.contentHash,
       pipelineVersion: args.pipelineVersion
     }));
-    const store = args.state.store as ChunkInsertStore;
+    const store = args.state.store.content;
+    const scope = { orgId: args.state.run.orgId ?? null, runId: args.state.run.id, documentId: args.document.id };
     // Ids are `<document>-<index>`, so a retry with fewer or zero chunks leaves the old
     // tail behind; drop it before the marker makes the set servable.
     const keep = dbChunks.map((chunk) => chunk.id);
@@ -981,9 +1004,9 @@ export class EmbedStage implements Stage {
     // the retry deletes them again. The stale read does not depend on the insert
     // (kept ids are excluded from it), so both go out in one round trip.
     const [, stale] = await Promise.all([
-      store.insertChunks(dbChunks),
+      store.insertChunks(scope, dbChunks),
       args.vectorSpace && args.state.run.orgId
-        ? store.staleDocumentChunkIds?.(args.document.id, keep).then((ids) => ids ?? [])
+        ? store.staleDocumentChunkIds(scope, keep)
         : undefined,
     ]).then(([inserted, ids]) => [inserted, ids ?? []] as const);
     if (stale.length > 0 && args.vectorSpace && args.state.run.orgId) {
@@ -992,12 +1015,8 @@ export class EmbedStage implements Stage {
       args.state.staleVectorIds.set(args.document.id, stale);
     }
     // Keyword search can serve the chunks from here on, ahead of the index stage.
-    if (store.finalizeDocumentChunks) {
-      await store.finalizeDocumentChunks(args.document.id, keep, dbChunks.length > 0);
-      return;
-    }
-    await store.deleteStaleDocumentChunks?.(args.document.id, keep);
-    if (dbChunks.length > 0) await store.markDocumentLexicalSearchable?.(args.document.id);
+    await store.finalizeDocumentChunks(scope, keep, dbChunks.length > 0);
+    if (dbChunks.length > 0) recordDocumentMilestone(args.state.run, "lexical_searchable", args.document.pageCount);
   }
 }
 

@@ -372,6 +372,20 @@ describe("generator model selection", () => {
   beforeEach(() => installTestPricing(DISTINCT_TEST_PRICING));
   afterEach(() => resetPricingProviderForTests());
 
+  it("skips a candidate whose chart read misses the automatic-call margin at its current price and takes the next", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const live = catalog.map((t) => t.ref.modelUri === "llm://openrouter/openai/gpt-6-luna" ? { ...t, pricing: { ...t.pricing, inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 } } : t);
+    expect(selectGeneratorModel({ kind: "chart", catalog: live })?.modelUri).toBe("llm://openrouter/openai/gpt-6-luna");
+    // A billed value no chart read can cover: every candidate is skipped, none is called.
+    installTestPricing({ ...DISTINCT_TEST_PRICING, automaticCallValueUsd: () => 1e-9 });
+    expect(selectGeneratorModel({ kind: "chart", catalog: live })).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/\[automatic-margin\] skipped label=chart generator kind=chart-read/));
+    // Luna's read alone misses it: the next admitted candidate is taken.
+    installTestPricing({ ...DISTINCT_TEST_PRICING, automaticCallValueUsd: ({ model }) => (model === "openai/gpt-6-luna" ? 1e-9 : 1) });
+    expect(selectGeneratorModel({ kind: "chart", catalog: live })?.modelUri).not.toBe("llm://openrouter/openai/gpt-6-luna");
+    warn.mockRestore();
+  });
+
   it("picks the first admitted candidate in preference order and refuses overrides outside the allowlist or ceiling", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     // The test catalog prices GPT-6 Luna at $10/M output: over the ceiling, so the next admitted candidate wins (the test
@@ -387,7 +401,8 @@ describe("generator model selection", () => {
     // Gemini 3.1 Flash Lite is admitted by the routing catalog but is no longer a chart generator (2026-11-13).
     expect(CHART_GENERATOR_CANDIDATES).not.toContain("llm://openrouter/google/gemini-3.1-flash-lite");
     expect(selectGeneratorModel({ kind: "chart", catalog, envModel: "google/gemini-3.1-flash-lite" })?.reason).toBe("preferred-candidate");
-    // DeepSeek V4.1 Flash is never selected automatically: not a candidate, and refused as an override even when admitted.
+    // DeepSeek V4.1 Flash is not a chart generator candidate (no denylist since 2026-11-15; the margin gate prices
+    // candidates), so it is refused as an override even when admitted: the allowlist decides.
     expect(CHART_GENERATOR_CANDIDATES.some((uri) => isAutomaticSelectionDenied(uri))).toBe(false);
     expect(DIAGRAM_GENERATOR_CANDIDATES.some((uri) => isAutomaticSelectionDenied(uri))).toBe(false);
     const withDeepSeek = [...catalog, { ...catalog.find((t) => t.ref.modelUri === "llm://openrouter/z-ai/glm-5.3-flash")!,
@@ -455,7 +470,7 @@ describe("generator model selection", () => {
     ]);
     expect(chartExportReasoning("llm://openrouter/anthropic/claude-haiku-5.5")).toEqual({ enabled: false });
     // Haiku is a priced, bounded vision catalog model: the worker can weigh and admit it.
-    expect(visionModelTokenPricing("anthropic/claude-haiku-5.5")).toMatchObject({ inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5 });
+    expect(visionModelTokenPricing("anthropic/claude-haiku-5.5")).toMatchObject({ inputUsdPerMillion: 0.11, outputUsdPerMillion: 0.55 });
     expect(visionImageTokens("anthropic/claude-haiku-5.5", null)).toBe(4_784);
   });
 

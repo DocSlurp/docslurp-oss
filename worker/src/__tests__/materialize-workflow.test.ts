@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import { billLockedMaterializedPages, lockPageRows, pinRunPageBillingRules, recordMaterializedPageFee, recordPageBaseFee } from "../db/page-base-fee.js";
 import { Store } from "../db/store.js";
+import { Maintenance } from "../db/maintenance.js";
 import { completeMaterializeRun, runMaterializeRange } from "../deferred/materialize-activity.js";
 import { claimPages, ensurePageRows, markPages } from "../deferred/page-ledger.js";
 import type { PageMaterializerOps } from "../deferred/materialize-pages.js";
@@ -36,9 +37,11 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    -- Saved on Smartest: materialize runs are capped at the project's quality (extraction-config.ts); query-time reads
+    -- (vision transcription of pages without a text layer) run on Smartest only.
+    insert into projects(id, org_id, user_id, name, pipeline) values ('w', 'o1', 'u1', 'W', '{"quality":"auto","ladder":{"maxRung":"intelligent"}}');
     insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-      values (100, 'up', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{"indexingMode":"map"}', 2),
+      values (100, 'up', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{"indexingMode":"map","ladder":{"maxRung":"intelligent"}}', 2),
              (100, 'm1', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1),
              (100, 'm2', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
@@ -192,7 +195,7 @@ describe("flag coercion", () => {
 describe("worker run start", () => {
   it("coerces a stored map pipeline to full when the flag is off", async () => {
     delete process.env.DOCSLURP_DEFERRED_PROFILES;
-    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map"}'::jsonb where id = 'up'`);
+    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map","ladder":{"maxRung":"intelligent"}}'::jsonb where id = 'up'`);
     let seen: string | undefined;
     const fake = {
       loadRun: (id: string) => store.loadRun(id),
@@ -205,7 +208,7 @@ describe("worker run start", () => {
     const exec = createStageExecution({ store: fake as never, stages: [], config: { workerDocConcurrency: 1 } as never });
     await exec.startRun({ runId: "up", totalStages: 1 } as never);
     expect(seen).toBe("full");
-    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map"}'::jsonb where id = 'up'`);
+    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map","ladder":{"maxRung":"intelligent"}}'::jsonb where id = 'up'`);
   });
 });
 
@@ -306,6 +309,24 @@ describe("runMaterializeRange activity", () => {
       expect(await usageRows()).toBe(0);
       await completeMaterializeRun(sql, "m2", result);
       expect((await db.query<{ status: string }>(`select status from project_runs where id = 'm2'`)).rows[0]!.status).toBe("completed");
+    });
+
+    it("fails loudly, without settling or billing, when the document belongs to another organization", async () => {
+      await db.exec(`
+        insert into "user"(id, name, email) values ('u9', 'Z', 'z@example.com') on conflict do nothing;
+        insert into organizations(id, name, slug, created_by_user_id) values ('o9', 'Other', 'other', 'u9') on conflict do nothing;
+        insert into projects(id, org_id, user_id, name) values ('w9', 'o9', 'u9', 'Other') on conflict do nothing;
+        insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+          values (100, 'up9', 'o9', 'u9', 'w9', 'upload', 'completed', 'completed', '{}', 1) on conflict do nothing;
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
+          values ('foreign', 'o9', 'u9', 'w9', 'up9', 'f.pdf', 'application/pdf', 'k-f', 'completed', 4, 'map', 'counted', 1, repeat('0', 64))
+          on conflict do nothing;`);
+      await db.exec(`update project_runs set status = 'processing' where id = 'm2'`);
+      const error = await runMaterializeRange(deps() as never, { ...input("m2", [1, 2]), documentId: "foreign" }).catch((caught: unknown) => caught);
+      // Not a deletion: no quiet "document-deleted" result, a non-retryable typed failure instead.
+      expect(error).toMatchObject({ type: "DocumentOutOfScope", nonRetryable: true });
+      expect(await usageRows()).toBe(0);
+      expect((await db.query<{ n: number }>(`select count(*)::int as n from document_pages where document_id = 'foreign'`)).rows[0]!.n).toBe(0);
     });
 
     it("stops cleanly and bills nothing for unwritten pages when the document is deleted mid-run", async () => {
@@ -411,7 +432,7 @@ describe("runMaterializeRange activity", () => {
     const d = deps();
     d.materializer.ops = piiOps;
     const result = await runMaterializeRange(d as never, input("m-empty", [1, 2]));
-    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map"}'::jsonb where id = 'up'`);
+    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map","ladder":{"maxRung":"intelligent"}}'::jsonb where id = 'up'`);
     expect(result.blocked).toEqual([2]);
     expect(result.indexed).toEqual([1]);
     expect(seen[0]?.privacyMode).toBe("local-only");
@@ -431,7 +452,7 @@ describe("runMaterializeRange activity", () => {
       async embed(args) { seen.push(args.profile.model); return { vectors: args.chunks.map(() => Array.from({ length: args.profile.dimensions }, () => 0.1)), totalTokens: 1 } as never; },
     };
     const result = await runMaterializeRange(d as never, input("m-stale", [1]));
-    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map"}'::jsonb where id = 'up'`);
+    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map","ladder":{"maxRung":"intelligent"}}'::jsonb where id = 'up'`);
     expect(result.indexed).toEqual([1]);
     expect(seen[0]).toContain("MiniLM");
     expect(seen.join(" ")).not.toContain("bge-m3");
@@ -444,7 +465,28 @@ describe("runMaterializeRange activity", () => {
                (100, 'up-bare', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
         values ('bare', 'o1', 'u1', 'w', 'up-bare', 'z.pdf', 'application/pdf', 'kz', 'processing', 2, 'map', 'counted', 1, repeat('0', 64));`);
-    await expect(runMaterializeRange(deps() as never, { ...input("m-bare", [1]), documentId: "bare" })).rejects.toThrow(/refusing to run on defaults/);
+    // The project's own pipeline is the last fallback: an empty one leaves nothing to run on.
+    await db.exec(`update projects set pipeline = '{}' where id = 'w'`);
+    try {
+      await expect(runMaterializeRange(deps() as never, { ...input("m-bare", [1]), documentId: "bare" })).rejects.toThrow(/refusing to run on defaults/);
+    } finally {
+      await db.exec(`update projects set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"}}' where id = 'w'`);
+    }
+  });
+
+  it("a materialize run never reads above the project's quality as it is now (council #440 M2)", async () => {
+    const { withSourcePipeline } = await import("../deferred/materialize-activity.js");
+    await db.exec(`
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+        values (100, 'm-cap', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{"quality":"auto","ladder":{"maxRung":"intelligent"}}', 1);
+      update projects set pipeline = '{"quality":"auto"}' where id = 'w';`);
+    try {
+      const run = await withSourcePipeline(sql as never, { id: "m-cap", kind: "materialize", pipeline: { quality: "auto", ladder: { maxRung: "intelligent" } } as never }, "d1");
+      // A Smartest source run under a project now on Fastest reads as Fastest: the ladder's ocr rung.
+      expect((run.pipeline as { quality: string; ladder: { maxRung: string } }).ladder.maxRung).toBe("ocr");
+    } finally {
+      await db.exec(`update projects set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"}}' where id = 'w'; delete from project_runs where id = 'm-cap'`);
+    }
   });
 
   it("charges a page's base fee once across query materialization and a later full index (I6)", async () => {
@@ -498,6 +540,34 @@ describe("runMaterializeRange activity", () => {
         { run_id: "m1", metric: "ingest-page-fast", page: 4, amount: 1 },
         { run_id: "m2", metric: "ingest-page-fast", page: 5, amount: 1 },
       ]);
+    });
+
+    it("an OCR decision stamps the page without a Fast charge, and another run's model read upgrades it to Rich once, by the difference", async () => {
+      await reset();
+      const decide = async (runId: string, args: { requested: number[]; ledger?: PipelineUsageEventLedger; modelReads?: Map<number, number> }) =>
+        await sql.begin(async (tx) => {
+          await lockPageRows(tx as never, "d1", [6]);
+          return await billLockedMaterializedPages(tx as never, { runId, documentId: "d1", moved: args.requested.length ? null : new Set(), ...args });
+        });
+      // m2 holds page 6 and read it with the OCR route: its decision is the OCR charge, persisted with its stamp.
+      const ledger = new PipelineUsageEventLedger();
+      ledger.runId = "m2";
+      ledger.chargeOcrPage({ documentId: "d1", pageNumber: 6, readBy: "page-ocr" });
+      await decide("m2", { requested: [6], ledger });
+      await db.exec(`update document_page_states set state = 'indexed' where document_id = 'd1' and page_number = 6`);
+      // m1 read the page with a vision model but does not own it: it upgrades m2's OCR decision, the difference only.
+      await decide("m1", { requested: [], modelReads: new Map([[6, 1]]) });
+      await decide("m1", { requested: [], modelReads: new Map([[6, 1]]) });
+      const rows = (await db.query<{ id: string; run_id: string; metric: string; cost: number }>(`
+        select id, run_id, metric, cost_cents::float8 as cost from usage_events
+        where metadata->>'documentId' = 'd1' and coalesce(metadata->>'pageNumber', metadata->>'page') = '6' order by id`)).rows;
+      expect(rows.map((row) => [row.id, row.run_id, row.metric])).toEqual([
+        ["ocr:m2:d1:6", "m2", "ingest-page-ocr"],
+        ["rich-upgrade:d1:6", "m1", "ingest-page-rich"],
+      ]);
+      expect(rows[0]!.cost).toBeCloseTo(pageCredits("ocr", 1), 9);
+      expect(rows[1]!.cost).toBeCloseTo(pageCredits("rich", 1) - pageCredits("ocr", 1), 9);
+      expect(rows.reduce((sum, row) => sum + row.cost, 0)).toBeCloseTo(pageCredits("rich", 1), 9);
     });
 
     it("a retried attempt charges nothing twice, with or without the earlier attempt's stamp", async () => {
@@ -677,13 +747,21 @@ describe("runMaterializeRange activity", () => {
     });
 
     describe("publication is fenced on the claim (round 6 M1, M2)", () => {
-      // Every page has a text layer; Good (m1) still sends each page to vision, Auto (m2) indexes the text layer.
+      // Two runs disagree about page 3: a Smartest run (the ladder's intelligent rung) gets no usable text layer for it
+      // (as for a page in a broken font) and reads it with vision; a Fastest run indexes the text it gets. The race
+      // between the two is what these tests fence.
       const VISION = "VISION-READ";
+      const smartestRun = async (runId: string) => (await db.query<{ rung: string | null }>(
+        `select pipeline -> 'ladder' ->> 'maxRung' as rung from project_runs where id = $1`, [runId])).rows[0]?.rung === "intelligent";
       const tracked = () => {
         const writes: Record<string, string[]> = {};
         const deletes: Record<string, string[]> = {};
         const opsFor = (runId: string, onOcr?: () => Promise<void>): Partial<PageMaterializerOps> => ({
           ...ops,
+          async extractText(_d, range) {
+            const smart = await smartestRun(runId);
+            return Array.from({ length: range.last - range.first + 1 }, (_, i) => (smart && range.first + i === 3 ? "" : LONG));
+          },
           async ocrPage(_d, page) {
             await onOcr?.();
             return { text: `${LONG} ${VISION} page ${page}`, model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 50, costCents: 1 };
@@ -710,7 +788,7 @@ describe("runMaterializeRange activity", () => {
       };
       beforeEach(async () => {
         await reset();
-        await db.exec(`update project_runs set pipeline = '{"quality":"good"}' where id = 'm1';
+        await db.exec(`update project_runs set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"}}' where id = 'm1';
           update project_runs set pipeline = '{"quality":"auto"}' where id = 'm2'`);
       });
       afterEach(async () => {
@@ -842,6 +920,8 @@ describe("runMaterializeRange activity", () => {
         const m1Rich = [{ run_id: "m1", metric: "ingest-page-rich", page: 3, amount: 1 }];
 
         it("Good m1 reads, embedding fails: one Rich charge; Auto m2 indexes the kept read with no Fast charge", async () => {
+          // Page extract rows outlive earlier tests' runs of m1 and m2 (they are keyed by run and pass): start this page clean.
+          await db.exec(`delete from document_page_extracts where document_id = 'd1' and page_number = 3`);
           const t = tracked();
           const first = await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
           expect(first.failed).toEqual([{ page: 3, reason: "embedding provider down" }]);
@@ -853,6 +933,10 @@ describe("runMaterializeRange activity", () => {
           expect(await charges()).toEqual(m1Rich);
           expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
           expect(await readState()).toMatchObject({ state: "indexed", fee_billed_run: "m2", read_billed_run: "m1", kept: false });
+          // m2's record of the kept read names the model that made it (m1's usage row), not nothing.
+          expect((await db.query<{ pass: string; method: string; model_uri: string | null }>(
+            `select pass, method, model_uri from document_page_extracts where document_id = 'd1' and page_number = 3 and run_id = 'm2'`)).rows)
+            .toEqual([{ pass: "vision", method: "vision", model_uri: "llm://test/vision-x" }]);
         });
 
         it("a Good retry (the same run, or another) reuses the kept read: no model call, no second Rich", async () => {
@@ -861,7 +945,7 @@ describe("runMaterializeRange activity", () => {
           let reads = 0;
           const failedAgain = await runMaterializeRange(withOps("m1", t, embedDown, async () => { reads += 1; }), input("m1", [3]));
           expect(failedAgain.failed).toEqual([{ page: 3, reason: "embedding provider down" }]);
-          await db.exec(`update project_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+          await db.exec(`update project_runs set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"}}' where id = 'm2'`);
           expect((await runMaterializeRange(t.depsFor("m2", async () => { reads += 1; }), input("m2", [3]))).indexed).toEqual([3]);
           expect(reads).toBe(0);
           expect(await charges()).toEqual(m1Rich);
@@ -875,7 +959,7 @@ describe("runMaterializeRange activity", () => {
           }), input("m1", [3]));
           expect(empty.failed).toEqual([{ page: 3, reason: "empty-page" }]);
           expect(await readState()).toMatchObject({ state: "failed", read_billed_run: "m1", kept: false });
-          await db.exec(`update project_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+          await db.exec(`update project_runs set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"}}' where id = 'm2'`);
           expect((await runMaterializeRange(t.depsFor("m2"), input("m2", [3]))).indexed).toEqual([3]);
           expect((await page3()).chunks.every((c) => c.text.includes(VISION))).toBe(true);
           // m2's own Rich read of the page stays provider usage.
@@ -885,7 +969,7 @@ describe("runMaterializeRange activity", () => {
 
         it("a lost read (model_read_run) plus an owner whose read then failed bill one Rich, not two", async () => {
           const t = tracked();
-          await db.exec(`update project_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+          await db.exec(`update project_runs set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"}}' where id = 'm2'`);
           let peer = false;
           // m1 stalls in OCR; m2 takes the page, reads it and fails on embedding. m1 resumes having lost the page.
           const late = await runMaterializeRange(t.depsFor("m1", async () => {
@@ -912,7 +996,7 @@ describe("runMaterializeRange activity", () => {
           process.env.DOCSLURP_DEFERRED_PROFILES = "1";
           const t = tracked();
           await db.exec(`
-            update project_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm1';
+            update project_runs set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"},"piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm1';
             delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
             insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
               values (100, 'fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
@@ -948,7 +1032,7 @@ describe("runMaterializeRange activity", () => {
                   if (kind === "retention") {
                     await db.exec(`update projects set artifact_retention_days = 1 where id = 'w';
                       update project_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
-                    await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
+                    await (new Maintenance(store.stageSql) as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
                       .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
                   } else {
                     await db.exec(`update documents set materialization_generation = materialization_generation + 1, source_materialization_blocked = true where id = 'd1';
@@ -974,14 +1058,14 @@ describe("runMaterializeRange activity", () => {
             ["retention", false], ["retention", true], ["correction", false], ["correction", true],
           ])("does not publish or retain fresh OCR after %s (embedding fails: %s)", async (kind, embeddingFails) => {
             const t = tracked();
-            await db.exec(`update project_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+            await db.exec(`update project_runs set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"}}' where id = 'm2'`);
             try {
               const late = await runMaterializeRange(withOps("m2", t, {
                 async embed(args) {
                   if (kind === "retention") {
                     await db.exec(`update projects set artifact_retention_days = 1 where id = 'w';
                       update project_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
-                    await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
+                    await (new Maintenance(store.stageSql) as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
                       .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
                   } else {
                     await db.exec(`update documents set materialization_generation = materialization_generation + 1, source_materialization_blocked = true where id = 'd1';
@@ -1034,7 +1118,7 @@ describe("runMaterializeRange activity", () => {
             await db.exec(`update projects set artifact_retention_days = 1 where id = 'w';
               update project_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
             try {
-              await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
+              await (new Maintenance(store.stageSql) as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
                 .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
               expect(await readState()).toMatchObject({ state: "failed", read_billed_run: "m1", kept: false });
               // Belt and braces: a kept read of a purged run is never reused even if one survived.
@@ -1056,8 +1140,8 @@ describe("runMaterializeRange activity", () => {
           it("a redacted read is not kept, so a later block_indexing policy blocks the page instead of indexing it (M2)", async () => {
             const t = tracked();
             const ssn = (page: number) => ({ text: `${LONG} SSN 123-45-6789 ${VISION} page ${page}`, model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 50, costCents: 1 });
-            await db.exec(`update project_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"redact_artifacts","allowlistPatterns":[]}}' where id = 'm1';
-              update project_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm2'`);
+            await db.exec(`update project_runs set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"},"piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"redact_artifacts","allowlistPatterns":[]}}' where id = 'm1';
+              update project_runs set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"},"piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm2'`);
             const first = await runMaterializeRange(withOps("m1", t, { ...embedDown, async ocrPage(_d, page) { return ssn(page); } }), input("m1", [3]));
             expect(first.failed).toEqual([{ page: 3, reason: "embedding provider down" }]);
             // The read is the page's one charge, but its redacted text is not kept.
@@ -1078,7 +1162,7 @@ describe("runMaterializeRange activity", () => {
             await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
             expect(await readState()).toMatchObject({ kept: true });
             await db.exec(`update document_page_states set read_text = read_text || ' SSN 123-45-6789' where document_id = 'd1' and page_number = 3;
-              update project_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm2'`);
+              update project_runs set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"},"piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm2'`);
             const blocked = await runMaterializeRange(t.depsFor("m2"), input("m2", [3]));
             expect(blocked.blocked).toEqual([3]);
             expect(await readState()).toMatchObject({ state: "blocked-pii", read_billed_run: "m1", kept: false });
@@ -1113,7 +1197,7 @@ describe("runMaterializeRange activity", () => {
             // An empty read pays the page and keeps no text, so a Good retry reads it again with the model: that read is
             // provider usage, and the retry (and the page) report no credits for it.
             await db.exec(`delete from document_chunks; delete from document_pages; delete from document_page_states;
-              delete from usage_events where run_id in ('m1', 'm2'); update project_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+              delete from usage_events where run_id in ('m1', 'm2'); update project_runs set pipeline = '{"quality":"auto","ladder":{"maxRung":"intelligent"}}' where id = 'm2'`);
             await reset();
             const empty = await runMaterializeRange(withOps("m1", t, {
               async ocrPage() { return { text: "  ", model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 1, costCents: 1 }; },

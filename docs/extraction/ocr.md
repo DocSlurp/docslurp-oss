@@ -22,8 +22,8 @@ to a weaker boundary or to another reader.
 
 | Mode | Default | Where OCR runs | Without what it needs |
 | --- | --- | --- | --- |
-| `vm` | when `DOCSLURP_SERVICE_PROFILE=service` | An extractor plugin's `sandboxedOcr` provider, one fresh VM or microVM per job ([Extractor plugins](extractor-plugins.md#ocr-provider-sandboxedocr)). | No provider: the worker refuses to start. A failed VM read fails the page. |
-| `local` | never | `docslurp_ocr.py` under the worker's parser sandbox (bubblewrap). Customer-owned self-hosting only. | Refused at startup unless `DOCSLURP_SERVICE_PROFILE=self-hosted`. A missing venv or model fails the read. |
+| `vm` | when `DOCSLURP_PROFILE=service` | An extractor plugin's `sandboxedOcr` provider, in a VM or microVM that may be warm and shared across jobs ([Extractor plugins](extractor-plugins.md#ocr-provider-sandboxedocr)). | No provider: the worker refuses to start. A failed VM read fails the page. |
+| `local` | never | `docslurp_ocr.py` under the worker's parser sandbox (bubblewrap). Customer-owned self-hosting only. | Refused at startup unless `DOCSLURP_PROFILE=selfhost`. A missing venv or model fails the read. |
 | `hosted` | never | A hosted vision model reads the stored image bytes as uploaded (PNG, JPEG or WebP, up to 20 MiB). | Anything that would need host decoding, rasterising or resizing (PDF pages, TIFF, other formats) is refused and the page fails. |
 | `off` | outside production | Nowhere. | Pages that need OCR get no OCR text. |
 
@@ -32,7 +32,7 @@ boundary=vm`.
 
 ### Service and self-hosted profiles
 
-`DOCSLURP_SERVICE_PROFILE` says who owns the files and the machine.
+`DOCSLURP_PROFILE` (`service`, `selfhost` or `dev`; [Deployment profile](../self-host/deployment-profile.md)) says who owns the files and the machine. The deprecated `DOCSLURP_SERVICE_PROFILE` (`service`, `self-hosted`) is still read in this release.
 
 - `service`: the operator processes other people's files. OCR of those files must run behind a VM boundary, so only
   `vm`, `hosted` and `off` start. `local` is refused at startup.
@@ -45,7 +45,7 @@ providers](../self-host/sandbox-providers.md)). That is why `local` needs the cu
 To opt into local OCR on a self-hosted full worker, set:
 
 ```sh
-DOCSLURP_SERVICE_PROFILE=self-hosted
+DOCSLURP_PROFILE=selfhost
 DOCSLURP_OCR_MODE=local
 ```
 
@@ -58,8 +58,8 @@ self-test whenever the runtime is present, and fails when `local` is set without
 ## What fails closed
 
 - `vm` without a provider, or with one whose `assertConfigured()` throws: the worker does not start.
-- `local` under `DOCSLURP_SERVICE_PROFILE=service` or with the profile unset: the worker does not start.
-- A `sandboxedOcr` provider plugin loaded with `DOCSLURP_SERVICE_PROFILE` unset, or with `DOCSLURP_OCR_MODE=local` under
+- `local` under `DOCSLURP_PROFILE=service` or with the profile unset: the worker does not start.
+- A `sandboxedOcr` provider plugin loaded with `DOCSLURP_PROFILE` unset, or with `DOCSLURP_OCR_MODE=local` under
   any profile: the worker does not start, and the local runner refuses every job.
 - A refused or invalid OCR read (a CLI refusal, a model-pin mismatch, hostile input, a result that fails validation):
   the page fails, without another read of the same bytes, and is recorded as such (`ocr-failed-pages`). Vision page
@@ -86,10 +86,9 @@ most `DOCSLURP_OCR_MAX_LONG_EDGE` (default 2000 px, 640 to 4000), which bounds t
 mode the memory is the VM's, not the worker's.
 
 A cap above the 2000 px default is an operator opt-in, off unless set. It buys detail on small print at the cost of more
-VM time and memory per page (a VM provider may need a larger size above 3000 px). A page still bills one Rich page,
-so with escalation on a dense page at a high cap can cost more than it bills: slightly loss-making. The worker logs
-`[ocr] long-edge-opt-in` at startup when it is set, and the provider
-cost is recorded at the VM's real rate, so the provider-cost loss alert flags runs that lose money.
+VM time and memory per page (a VM provider may need a larger size above 3000 px). A page still bills one Scan page,
+whatever the cap. The worker logs `[ocr] long-edge-opt-in` at startup when it is set, and the VM's time is recorded on
+the usage ledger as for every read.
 
 ## Languages
 
@@ -146,6 +145,12 @@ A page it fails, answers empty, or never reaches keeps the recogniser's text and
 hosted reader handles it exactly as it would without a page reader. Markdown tables in a read are rebuilt in the parser
 VM, as for escalation reads.
 
+Privacy modes: a `local-only` or `strict-privacy` project's pages go to the reader only when its provider declares an
+operator-registered private route (`privateRoute`, [extractor plugins](extractor-plugins.md)) that resolves as private;
+otherwise the project skips the reader, before any reader VM is started, and its pages keep the recogniser's text and
+stay escalation candidates (the hosted escalation reader applies its own privacy check). A run whose pipeline cannot be
+read is treated as restricted.
+
 What fails closed:
 
 - An unknown `DOCSLURP_OCR_PAGE_READER` or `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` stops the worker at start.
@@ -173,7 +178,13 @@ advisory lock, the day's settled cost plus the reservations of unsettled jobs pl
 optional `estimateJobCostCents`) must stay within the cap, or the job's pages keep the recogniser read. A completed job
 settles its reservation with the cost it recorded; a job that throws (a lease that failed while booting, an abort) settles
 at no less than its reservation, since it may have run a VM it could not report; a job that never settles (a crashed
-worker) keeps its reservation for the day. A ledger that cannot answer, or whose organization lock is not free within
+worker) keeps its reservation for the day. The one exception is a capacity give-way: a rejection with job-level reason
+`capacity` that also sets `pageReaderNoCompute: true`, carries no usage, is not an input refusal and was not aborted
+asserts that no compute ran for the job, so its ticket is released (settled at 0, only if it is still that
+organization's own unsettled, cost-free ticket, and at most 200 times per organization per UTC day in one worker;
+otherwise it settles at the reservation). After a job-level `capacity` failure (other than a warm-start `requireReady`
+miss) the document's remaining pages in this worker's run state go to the fallback without another reader job
+(`reader-capacity` in the summary), so one document cannot set off a give-way per page batch. A ledger that cannot answer, or whose organization lock is not free within
 10 s, sends nothing. A tier word never picks a reader scoring at or under the recogniser alone, and treats a hosted
 escalation model other than the measured one as unmeasured. Token counts over 100,000 per page are rejected, control characters are stripped from returned Markdown,
 and any error inside the reader path is logged and leaves the pages with their reads (only an abort propagates).
@@ -223,15 +234,56 @@ every eligible run, whatever vision model a project configured.
   the run's own configured model, never one the system picks as a fallback. A render or download error propagates as it
   would on the hosted route; only reader errors fall back.
 - Usage: `[ai-usage] vision-page-reader model=<model> input_tokens=<n> output_tokens=<n>` per job, provider cost on the
-  ledger at 0 credits; each page read is one Rich page, charged once per run.
+  ledger at 0 credits; each page read is one Vision page, charged once per run.
 - The reader's Markdown passes through vision-extract's own post-processing: HTML tables are rebuilt in the parser VM and
   `$...$` / `$$...$$` math is kept, the conventions the hosted transcription prompts ask for.
 
+## Warm start
+
+A reader VM can take many minutes to boot. When the registered reader implements the optional `warm` capability
+([Extractor plugins](extractor-plugins.md#page-image-reader-pageimagereader)), neither reader route ever waits for it:
+
+- Each run counts its reader-eligible pages per worker process (the provider leases VMs per process): the OCR candidates
+  of each document, or vision-extract's plain-transcription pages. Until the count reaches the threshold
+  (`DOCSLURP_PAGE_READER_WARM_MIN_PAGES`), the run never starts a reader and its pages take their other route: the
+  hosted vision route, or the recogniser's text and hosted escalation. With page fan-out, planning holds back only a
+  document with at least the threshold of reader pages (so the activity that reads it, in whatever worker, reaches the
+  same threshold); smaller documents fan out to the hosted route. Planning never starts a reader itself.
+- At the threshold the host reserves the provider's start-up estimate (`estimateJobCostCents(0)`, which must be positive)
+  against the organization's daily reader cap, then calls `warm.start` and returns at once. A start the cap does not admit
+  is not made. While the reader boots, vision-extract reads the document's held-back pages on the hosted route in chunks
+  of four on four lanes (eight pages in flight), checking readiness before each chunk; OCR pages keep the recogniser read and stay escalation
+  candidates. Pages read that way stay read.
+- Once `warm.status` reports `ready`, the remaining pages go to the reader in jobs marked `requireReady`: a VM that went
+  away in between fails the job at once and its pages take their other route. Nothing waits on a boot, and a failed,
+  refused or slow start never delays or fails a page.
+- `warm.status` is checked before the threshold: a provider whose warm VMs serve every run and organization reports
+  `ready` for any run while one has room, so a run below the threshold uses an already-warm reader at once. The
+  threshold only decides when a run starts a new reader.
+- A run starts at most three readers per worker process, and a second only after an earlier one read pages; at most
+  three starts the provider refuses. The start-up reservation stands until the reader answers one of the run's jobs (the
+  provider records a warmed reader's boot on the first job it serves), and otherwise for the day, so a reader started
+  for nothing, or whose boot failed, still counts against the organization's cap. A start the provider reports
+  `refused` (its caps; nothing started) gives the reservation back. Wasted boots are visible in the provider's own
+  telemetry and in the cap, not as usage events.
+- Telemetry per run and process: `warm-start` (demand, threshold, reservation), `warm-ready` (`bootSeconds`,
+  `bootCostCents`), `warm-failed` or `warm-refused`, and after each document a cumulative `warm-summary` line with
+  `readerPages`, `hostedPages`, `hostedWhileWarming`, `hostedBelowThreshold` and `hostedUnavailable`, under the
+  `[vision-extract] page-reader` or `[ocr] page-reader` tag.
+
+`DOCSLURP_PAGE_READER_WARM_MIN_PAGES` unset uses the provider's `warm.minPages` (its own cost model: start-up and idle
+cost against the per-page saving over the hosted route), else 500. `off` sends jobs as before, waiting for whatever
+start-up the provider needs. A reader without `warm` is unaffected.
+
 ## Billing and usage
 
-- An uploaded image: every frame the engine read is one Rich page read, metric `page-ocr`, with or without text in it
+- OCR reads bill as Scan pages (page class `ocr`, `ingest-page-ocr`): one flat Scan page per page and run, however long
+  its text. Pages a vision model reads bill as Vision pages (`rich`), pages left to their text layer as Text pages (`fast`).
+  OCR reads are those of the OCR route: the engine (`page-ocr`, `pdf-ocr`, the native engine's `ocr-native-pdf`), the
+  page reader (`ocr-page-reader`) and `hosted` mode (`hosted-ocr`). A vision model's read of a page bills Vision.
+- An uploaded image: every frame the engine read is one Scan page read, metric `page-ocr`, with or without text in it
   (owner decision, 2026-11-05). The VM costs the same for a blank frame.
-- A scanned PDF page: one Rich page read only when the read found words.
+- A scanned PDF page: one Scan page read only when the read found words.
 - Each charge is keyed by run, document and page, so a retry or a second reader does not charge it twice.
 - A TIFF's frames are its pages: the frames read become `documents.page_count`. A TIFF with more than 64 frames (the
   job's frame cap) is refused before anything is charged, with the public error `imageTooManyFrames`.
@@ -239,12 +291,51 @@ every eligible run, whatever vision model a project configured.
   provider's own cost arrives separately, at provider cost. Remote usage outside a stage context has no usage ledger:
   it is logged as `[usage-unrecorded]` and counted on `docslurp.usage.unrecorded`, never dropped silently.
 - Escalation reads are recorded as `ocr-escalation`, and `hosted` mode reads as `hosted-ocr`, each with the provider's
-  actual input and output tokens and cost. An escalated page bills at most one Rich page, whatever the output length
-  (escalation output tokens add no Rich pages), and an escalation that returned no text charges nothing; its provider
-  cost is still recorded.
+  actual input and output tokens. An escalation is a vision model's read: it upgrades the page from Scan to Vision (the
+  page's first Vision charge is the Vision price minus its Scan charge, so the page pays Vision once), in every quality
+  that runs it. An escalated page bills at most one Vision page, whatever the output length (escalation output tokens
+  add no Vision pages), and an escalation that returned no text charges nothing more (the page stays Scan); its usage
+  is still recorded.
+- Escalation readers, tried in order: GLM 5.3 Flash on OpenRouter, restricted to Wafer's US endpoint and only when it
+  is listed at or under the request's price ceiling (`max_price`), then Qwen3-VL 30B A3B on DeepInfra (US-hosted).
+  Both send pages only to US-hosted endpoints. Each is checked on its own before it is
+  used; when no host can serve a reader under its ceiling, the next one is tried, and with none left the page keeps its
+  OCR read (recorded as skipped). `DOCSLURP_OCR_ESCALATION_MODEL` names a single reader instead.
+- Before each new escalation read the balance must cover the page's upgrade from Scan to Vision plus the activity's
+  buffered charges. The check is read-only: an unfunded organization skips the escalation (the page keeps its OCR read)
+  and the run goes on, unpaused. Without a store, a user or an organization to check, the escalation is skipped too. A
+  check that cannot decide is retried with the activity.
+- The database settles a page's read charges (migration 0185, `settle_page_read_charge`), whichever activity, worker or
+  release recorded them: an OCR charge for a page the run already charged Rich is not inserted, and a page's first Rich
+  unit is inserted at its price minus the run's OCR charge for that page. Each charge locks its run's row first (the
+  same row the run spend trigger updates), so settlements of one run serialize without a lock per page.
+- Pages that wanted a second read but kept their first OCR read are recorded per document with the reason: the
+  per-document cap (its page budget, `DOCSLURP_OCR_ESCALATION_MAX_PAGES`, or its attempt budget,
+  `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS`, retries included), the balance, the run cost cap, or the second-read model's
+  price check. The ingest report turns them into `ocr-escalation-cap` and `ocr-escalation-skipped`.
+
+### Rollout and rollback of the OCR page class
+
+A worker pins each new run to the OCR page class (`run:page-billing-ocr`) only when every live worker advertises
+`billing.ocr-page-class` in the capability registry (a worker advertises it once migration 0185's trigger exists) and
+`DOCSLURP_OCR_PAGE_CLASS` is not `off`. Otherwise the run bills OCR reads as Rich, as before. Runs started by an earlier
+release keep its rule.
+
+- Deploy order: apply migrations, roll every worker and confirm no older worker still polls (the fleet view lists each
+  worker's capabilities), then deploy the API. New runs use the class from the first run started after the last older
+  worker leaves.
+- Backstop: Fast charges carry `pageRules: 2`, and the database refuses (SQLSTATE `DS001`) a Fast charge without it for
+  a run that has OCR charges, so an older worker cannot bill a run's OCR pages Fast as well. Its message names the run
+  for operators; raw database errors stay in logs and traces.
+- Rollback of workers to a release before the class: set `DOCSLURP_OCR_PAGE_CLASS=off` on the current workers so new runs
+  stop using the class, let the runs pinned to it finish, then turn the backstop off
+  (`ALTER DATABASE <db> SET docslurp.page_rules_guard = 'off'`, effective for new connections) and roll back. Turn it
+  back on (`ALTER DATABASE <db> RESET docslurp.page_rules_guard`) once current workers run again. Each document stage records the pages escalated and the pages
+  capped (`stats.ocrEscalation`), and the ingest report recommends reading the capped pages with a vision model
+  (`ocr-escalation-cap`).
 - Page reader jobs are recorded as `ocr-page-reader` at provider cost, billing 0 credits (`providerCostCents`), also
   when the job failed. The host sets the metric, model and tenant scope of each event; a provider cannot record a
-  billable charge. A page the reader replaced is one Rich page, charged once per run like the recogniser's read of it.
+  billable charge. A page the reader replaced is one Scan page, charged once per run like the recogniser's read of it.
 - Quotes count a TIFF's frames as its pages, up to 64.
 
 ## Host phases outside OCR
@@ -314,8 +405,8 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DOCSLURP_OCR_MODE` | `vm` under `DOCSLURP_SERVICE_PROFILE=service`, else `off` | `vm`, `local`, `hosted` or `off`. |
-| `DOCSLURP_SERVICE_PROFILE` | unset | `service` or `self-hosted`. `local` needs `self-hosted`. |
+| `DOCSLURP_OCR_MODE` | `vm` under `DOCSLURP_PROFILE=service`, else `off` | `vm`, `local`, `hosted` or `off`. |
+| `DOCSLURP_PROFILE` | unset | `service`, `selfhost` or `dev` (deprecated: `DOCSLURP_SERVICE_PROFILE` `service` / `self-hosted`). `local` needs `selfhost`. `DOCSLURP_DISABLE=ocr` turns OCR off. |
 | `DOCSLURP_OCR_PYTHON` | `/opt/docslurp/ocr-venv/bin/python3` | OCR venv interpreter (`local`). |
 | `DOCSLURP_OCR_MODEL_DIR` | `/opt/docslurp/ocr-models` | Directory holding the pinned models (`local`). |
 | `DOCSLURP_OCR_ESCALATION` | off | `on` to enable escalation reads. |
@@ -325,6 +416,7 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | `DOCSLURP_OCR_PAGE_READER` | `off` | `escalation` or `all` to read pages with the page image reader plugin first, or a tier word (`fastest`, `balanced`, `smart`) resolved by the OCR route options (see [Page reader](#page-reader)). |
 | `DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS` | `2000` | Reader provider cost one organization may commit per UTC day, across workers (0 to 10000000; 0 sends nothing). |
 | `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` | `2000` | Most pages one document sends to the page reader (0 to 20000). |
+| `DOCSLURP_PAGE_READER_WARM_MIN_PAGES` | provider's `warm.minPages`, else `500` | Reader pages a run needs in one worker before a reader with `warm` is started; pages go to it only once ready (1 to 1000000, or `off` to wait for the reader as before; see [Warm start](#warm-start)). |
 | `DOCSLURP_VISION_PAGE_READER` | `off` | `all` to read vision-extract's plain page transcription with the page image reader plugin, or a tier word (`fastest`, `balanced`, `smart`); see [Vision page reader](#vision-page-reader). |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
 | `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for projects left on `auto`. |

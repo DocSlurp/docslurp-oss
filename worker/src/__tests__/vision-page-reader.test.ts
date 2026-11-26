@@ -227,6 +227,13 @@ describe("which pages the reader reads", () => {
     expect(h.hosted.map((call) => call.page).sort()).toEqual([1, 2]);
   });
 
+  it("never sends a standard project's pages to the reader in private model mode", () => {
+    register(reader(echo).provider);
+    const standard = runState(pdf());
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    expect(visionPageReaderDecision(standard, standard.run.pipeline.vision, { DOCSLURP_VISION_PAGE_READER: "all" })).toEqual({ refused: "privacy-mode" });
+  });
+
   it("keeps a run pinned to a local or operator-private vision model on that model", () => {
     register(reader(echo).provider);
     const document = pdf();
@@ -404,6 +411,22 @@ describe("caps", () => {
     expect(provider.read).toHaveBeenCalledTimes(1);
     expect(readerOutputs(second)).toEqual([]);
     expect(h2.hosted.map((call) => call.page).sort()).toEqual([1, 2]);
+  });
+
+  it("stops sending a document to the reader after a capacity give-way, releases its reservation, and sends the rest hosted", async () => {
+    const { provider } = reader(async () => { throw Object.assign(new Error("reader at capacity"), { reason: "capacity", pageReaderNoCompute: true }); },
+      { maxPagesPerJob: 2, estimateJobCostCents: () => 0.9 });
+    register(provider);
+    const document = pdf();
+    const state = runState(document);
+    const h = harness();
+    const outputs = await extract(h, state, document, [1, 2, 3, 4, 5, 6, 7, 8]);
+    // Two lanes may each have one job in flight when the first gives way; no later batch is sent.
+    expect(provider.read.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(readerOutputs(outputs)).toEqual([]);
+    expect(h.hosted).toHaveLength(8);
+    expect(h.rendered.filter((render) => render.maxLongEdgePx === 2048).length).toBeLessThanOrEqual(3);
+    expect(await state.pageReaderBudget!.committedCents("org-1")).toBe(0);
   });
 
   it("sends nothing when the organization spend ledger is unavailable (fail closed to hosted)", async () => {

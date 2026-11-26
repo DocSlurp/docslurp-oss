@@ -305,7 +305,7 @@ describe("admission happens right before fetch, inside the limiter", () => {
   it.each([
     "There is no available model provider that meets your routing requirements",
     '{"error":{"code":404,"message":"No endpoints found matching your max_price"}}',
-  ])("treats a 503 routing exclusion (%s) as a counted failure, never a throttle to retry", async (message) => {
+  ])("hands a 503 routing exclusion (%s) back unbilled: never a failure for the breaker, never a throttle to retry", async (message) => {
     const fetch = vi.fn(async () => new Response(message, { status: 503 }));
     const gate = gateOf();
     const response = await fetchWithProviderRetry("https://openrouter.ai/api/v1/chat/completions", { method: "POST" }, {
@@ -315,10 +315,11 @@ describe("admission happens right before fetch, inside the limiter", () => {
     expect(response.status).toBe(503);
     expect(await response.text()).toBe(message);
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(gate.requests).toBe(1);
+    // Nothing was billed: the request leaves the page bound, the breaker and the org count.
+    expect(gate.requests).toBe(0);
     await gate.finish();
-    expect(backend.inspect("run-1", "org-1")).toMatchObject({ runAttempts: 1, runFailures: 1 });
-    expect(vi.mocked(console.warn).mock.calls.some(([line]) => String(line).startsWith("[vision-throttle-handback]"))).toBe(false);
+    expect(backend.inspect("run-1", "org-1")).toMatchObject({ runFailures: 0, orgAttempts: 0 });
+    expect(vi.mocked(console.warn).mock.calls.some(([line]) => String(line).startsWith("[vision-throttle-handback] org=org-1 run=run-1 kind=routing provider=openrouter status=503"))).toBe(true);
     // Logged once, with provider, label and status, so an image cap excluding every pinned provider is visible.
     const exclusions = vi.mocked(console.warn).mock.calls.map(([line]) => String(line)).filter((line) => line.startsWith("[provider-routing-exclusion]"));
     expect(exclusions).toHaveLength(1);

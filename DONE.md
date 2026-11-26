@@ -1,3 +1,200 @@
+## Runs report searchable pages, a final page total and worker pickup (2026-11-25)
+
+`pagesProcessed` counts page checkpoints of the extraction stages, so it reaches `pagesTotal` before routing, page reading and indexing run; clients that divided the two showed 100% long before a run could be searched.
+
+- `project_runs.pages_searchable` and `pages_counted_at` (migration `20261125T2042_run_progress_fields`, nullable, no backfill). The index stage adds a document's pages to a pending count and the next progress checkpoint adds it to the row: no statement of its own, additive across shards, settled exactly by the terminal write. `pages_counted_at` is stamped at the boundary of the last stage that can change a page count, and at completion.
+- The run schema (`packages/shared/src/run.ts`), the SDK's `ProjectRun` and `docslurp status` gain optional `pagesSearchable`, `pagesCountedAt` and `workerStartedAt` (the existing `worker_started_at` milestone). Null or absent means not reported, never zero.
+- Completed document checkpoints record `stats.documentPages`; `completedPagesByStage` (`packages/shared/src/run-stage-pages.ts`) rolls page progress up per stage at document granularity with no extra writes.
+- `pagesProcessed` keeps its meaning. Not done: progress inside one document for stages that finish its pages together (text extraction of one large file, classification, routing, page index, vector index), and a queue position.
+
+## The spend rule is decided in one place (2026-11-19)
+
+No behaviour change. The API decided "may this organization spend" in `spendBlockReason`, the worker in its own `spendBlockCode`, and four more worker files read `org_spend_status()` themselves; the dev skip was written three times.
+
+- `packages/shared/src/spend-rule.ts`: `spendRuleCode(status, kind)` is the one decision over an `org_spend_status()` row, for new work (`job`), chat and search (`interactive`) and work already running (`running`). `spendGuardsSkipped` is the one switch that turns it off (local development).
+- The API's `spendBlockReason` and the worker's `spendBlockCode` call it; the API adds the message.
+- `worker/src/db/spend-check.ts` is the only worker file that reads `org_spend_status()` or names the admission lock. Figure resumes, page renders, media jobs and capacity leases go through `orgSpendRefusal`, `orgSpendBlock`, `runSpendHeadroom` and `lockOrgAdmission`.
+- `spend-rule.test.ts` is the rule's table; `worker/src/__tests__/spend-owners.test.ts` fails on a second reader, a second lock site or a second copy of the switch.
+- Not folded in: the predicates that ask whether the deployment bills at all (`isBillingEnforced`, `isMeteringEnforced`, `isStorageBillingEnabled`, `isStripeConfigured`, `isSelfHostedDeployment`). They answer different questions and are keyed on the payment provider.
+
+## API background tasks start and stop from one list (2026-11-19)
+
+- `server/src/services/background-tasks.ts`: the API's timers, refreshers, pools and LISTEN subscriptions are one ordered list. What starts is exactly what stops; `server.ts` no longer keeps a start sequence in `ensureApiStartup` and a second, hand-kept stop list. A stop that fails is logged by task name and the rest still stop.
+- `registerApiBackgroundTask` (from `server.ts`) lets the embedding host add its own task before startup; registering after startup throws, because that task would never run.
+- `registerMaintenanceSweep` adds a host-owned sweep to every maintenance pass. The built-in sweeps are unchanged.
+- No task was added, removed or retimed. The only observable difference is the log line for a failed unsubscribe (`[webhook-outbox] stop failed: ...`, formerly `unlisten failed`).
+
+## Run admission is one module (2026-11-19)
+
+No behaviour change. Seven paths admitted a run, each sequencing the organization's admission lock, the spend decision and the run's first credit lease itself: run creation, retry, operator resume and recover, re-index batches, full-index batches, blocked runs, spend-paused runs and on-demand page runs.
+
+- `server/src/services/run-admission.ts` owns that sequence behind five entry points (`admitRunSpend`, `admitRunInTransaction`, `admitBlockedRun`, `pausedRunSpendBlock`, `admitOnDemandRun`); `billing/admission-lock.ts` is the only file that names the lock key, and the ten places that took the lock by hand call `lockOrgAdmission`.
+- `billing/spend-guard.ts` keeps the spend rule and the interactive checks; the lease primitive and the in-transaction admission decision are no longer exported from it.
+- `run-admission-owners.test.ts` fails when a file outside the listed four inserts `project_runs`, when the lock key is named elsewhere, or when the lease primitive is used outside the module.
+- `run-admission-leases.db.test.ts` covers the new entry points: one of two concurrent transactions admitted on a balance that covers one, a refused lease never leaving a queued run, and refusals for a run named under another organization or project.
+- `GLOSSARY.md`: Run admission.
+
+## Activity feeds read active plus recently finished runs by index (2026-11-18)
+
+- Migration 0200: `project_runs.finished_at`, stamped by a trigger when a run reaches completed or failed (cleared if it becomes active again), so it changes once per finish, never on heartbeats; partial indexes `project_runs_project_finished_idx (project_id, finished_at)`, `project_runs_org_finished_idx (org_id, finished_at)` and `project_runs_org_blocked_idx (org_id, updated_at) WHERE blocked`. Runs finished in the last day are backfilled; older finished history no longer fills the realtime list (accepted). The migration holds ACCESS EXCLUSIVE on project_runs until commit (one migrator transaction): about as long as the index builds.
+- `listRuns(activity)` (REST poll and SSE inventory) is three index ranges: active runs, runs finished in the last five minutes and recently touched blocked runs, instead of every run of the caller's projects sorted by `updated_at`. The realtime activity projection reads active, then blocked, then the most recently finished runs in index order up to its limit, instead of sorting the organization's whole history on every update. The org summary's "recently completed" is now an exact `finished_at` window.
+- `getRun` reads the one run by key and checks `docslurp_project_access` plus the API key allowlist on it, instead of rebuilding the caller's accessible project list on every poll.
+- `activity-feed-plans.db.test.ts`: 100K finished runs in one project; every captured SELECT has no Seq Scan on project_runs; the trigger stamps once and clears on resume.
+
+## Hot-path queries read through indexes (2026-11-18)
+
+Owner: "make sure our queries rely on indexes where it should". Audit of periodic loops, scrapes, claim/lease paths, per-request auth, polling, search metadata and spend checks against a seeded Postgres (1M runs, 2M documents, 4M usage events, 4M page tasks and run events).
+
+- Migration 0198: an expression index for `usage_attribution.source_run_id` (`coalesce(run_id, metadata->>'runId')`); BRIN indexes on `usage_events.created_at`, `performance_log.created_at` and `api_key_usage.minute_bucket`; document foreign-key indexes on `usage_events`, `project_run_events` (both partial), `page_work_tasks`, `page_stage_states`, `document_run_stage_states` and `document_summaries`; 15 exact duplicate indexes from the initial schema dropped (two of them GIN).
+- The `monthly_run_capacity` trigger returns as soon as neither the organization nor the project has a monthly cap, and its month sum uses the stamped-column prefilter. A run insert went from about 10 s to 3 ms at this volume.
+- Budgeted spend checks and project usage reads (`loadSpendStatus`, `projectUsageTotals`, project state, settings save and budget read, ingest report) go through `orgAttributedUsage` / the new `projectAttributedUsage` prefilters instead of the derived view columns.
+- `/metrics`: `docslurp_runs_total` counts only queued and processing runs; stage percentiles cover the last 24 hours; `docslurp_cost_cents_total` (lifetime, a full `usage_events` scan per scrape) became `docslurp_cost_cents_24h`. The alert evaluator's queue snapshot reads only active runs.
+- Per-config document counts on the vector search path are cached per project for one eligibility TTL and dropped by the same hints.
+- DB test `hot-query-plans.db.test.ts` EXPLAINs the real statements of `/metrics`, the alert snapshot and a budgeted spend check, plus the run- and document-keyed reads, and asserts no sequential scan of the large tables.
+## Uploads start at once; organization summary and ETA buckets on the activity feed (2026-11-18)
+
+- Start latency (on top of #482's kick after the last files/complete): a storage notification asks this process's reconciler to sweep now (coalesced) instead of waiting for the 15 s tick; the kick and the requested sweep run outside the triggering request's async context (so intake never borrows that request's API key, allowlist or organization). `docslurp.upload.reconcile_lag.duration` (label `path`: `kick` or `sweep`) and a `[upload-reconcile] confirmed ... lag_ms=` line measure due to confirmed (replayed confirms are not counted). The sweep stays serial under #482's lock classes (one reconcile slot per process); concurrent sweeping is a follow-up.
+- `packages/shared/src/run-eta.ts`: pure `estimateRunEta` (a processing run's own rate; a queued or just-started run's project history from `project_corpus_stats`, flagged `estimate`; null with no basis) and `etaBucket` (`<1m`, `1-5m`, `5-15m`, `15-60m`, `1-3h`, `>3h`), plus the `activitySummarySchema` and `uploadSessionProgressSchema` contracts.
+- Activity feed `summary` (`GET /v1/runs/activity/summary`, `GET /v1/runs?activity=true`, the stream's `activity` event and an `activity-summary` event when it changes): the caller's organization's queued, in-progress and recently completed (15 min) runs, documents and pages, pages per minute and an ETA bucket, over only the projects the caller may read (project access and an API key's allowlist, as the run list). At most 200 active runs read (`truncated: true` past that), cached 5 s per organization and project set (`orgScopedCacheKey`), org- and project-filtered in every query; a summary that cannot be read is `null` and never fails the feed. The activity stream now ends for an API key revoked, expired or stripped of its scopes while it is open (checked each heartbeat; `isApiKeyLive` now refuses expired keys). SDK: `getActivitySummary`, `UploadSession.progress`.
+- Upload sessions (and MCP `getUploadStatus`) report `progress`: files and bytes received, then the session's run (same user and organization only) with documents, pages, pages per minute and ETA.
+- Every added read is an index read (`activity-summary-plans.db.test.ts`, 100K finished runs and 50K old sessions: no Seq Scan): active runs through `project_runs_org_active_idx` (0195), recently completed bounded by organization, project and a one-day creation window, history and session progress by primary key. Migration 0197 `upload_sessions_initializing_expiry_idx`: the reconciler's due-session sweep is now two index ranges (due sessions, expired initializing ones) instead of an OR that scanned every session.
+- ETA accuracy: the API logs each run's first estimate (`docslurp.run.eta.predicted`: seconds, bucket, basis) and the worker its actual duration at outcome (`docslurp.run.eta.actual`), joinable on run id in SigNoz.
+## Model URI backfill for rows written before migrations 0191-0192 (2026-11-18)
+
+- `server/scripts/backfill-model-uris.ts` (`services/model-uri-backfill.ts`): a one-off, idempotent, batched backfill. Dry run by default; `--write` applies it; `--target`, `--batch-size` and per-batch statement and lock timeouts are options. Each batch runs in its own transaction and only null fields are filled. Runbook: docs/self-host/operations.md.
+- Vector rows get the space URI search computes for their document, through the same shared code (`effectiveProjectIndexing`, `embeddingConfigFor`, `resolveEmbeddingRoute`, `embeddingRouteSpaceUri`). It is written only when the route's bare id and dimensions equal the row's, so the URI always equals the one readers expect and search serves the same vectors as before. A DB test checks eligibility before and after. Rows it cannot prove stay null and are counted by reason.
+- Usage rows get `withModelProvenance`'s `modelUri` plus `modelUriBackfilled: true`. Runs get `resolved_models` derived from their usage in the worker's shape, with `backfilled: true` on each entry. Vision page reads get `model_uri` and `model_class` when their document and run saw exactly one model.
+- `runModelClass` moved to `@docslurp/shared` (the worker re-exports it), so the backfill labels page extracts the way the worker does.
+
+## Autoscaler snapshot reads active runs only (2026-11-18)
+
+- Migration 0195: partial index `project_runs_org_active_idx` on `project_runs (org_id)` over `status IN ('queued', 'processing')`, including the run id, project, status, control state, lease, shard demand, document and page totals and processed counts, and created/worker-started/updated times. It serves the scaler snapshot and an organization's active runs (org_id leading) as an index read.
+- `queryWorkerScalerSnapshot` restricts every `project_runs` read to active runs, so the 10 s poll from the app and the worker leader no longer aggregates finished history. Its lifetime `pages_processed_total` sum is gone, along with the `docslurp_pages_processed_total` gauge on `/metrics` (nothing read it). `/metrics` now reuses the shared snapshot instead of a drifted copy of the query, so it reports the same queue view and worker target as `/fly-scaler-metrics`.
+- DB test: with a million finished runs on real Postgres (100K on the PGlite fallback), the snapshot plan uses the partial index with no sequential scan on `project_runs`, and its counts cover only live work.
+
+## Shared estimate-signing secret and the MCP reindex tools (2026-11-18)
+
+- Estimate signatures (`signature` / `confirmEstimate`) are keyed by `DOCSLURP_ESTIMATE_SIGNING_SECRET` (at least 32 characters), falling back to `SECRETS_ENCRYPTION_KEY`, `BETTER_AUTH_SECRET`, `FILE_TOKEN_SECRET`. Every process that signs or verifies them (the API and standalone server via `config.ts` and `ensureApiStartup`, the chat executor entrypoint) refuses to start in production without a stable key, and everywhere on a too-short dedicated secret; development and tests keep a per-process random key with a one-time warning. The startup log names the source variable, never the value. The worker does not sign estimates.
+- MCP `reindexEstimate` (read-only: locked settings, documents, pages, credits, signature) and `reindex` (requires that signature as `confirmEstimate`), forwarding to `POST /v1/projects/:id/reindex[/estimate]` with the route's gates (editor; server key with `projects:manage`, bound to the organization and project). Project chat never offers them.
+- Council (#508): each signing process logs `estimate signing key source=<variable> fingerprint=<12 hex>` (HMAC under the key), the API serves the same at `GET /ops/estimate-signing` (metrics bearer) and `server/scripts/estimate-signing-fingerprint.ts` prints it elsewhere; the chat executor's guard runs before `config.ts` loads; production refuses a weak dedicated secret; signatures bind `speedBoost` and the billing state and are compared in constant time; the reindex routes and MCP tools refuse delegated OAuth tokens; project chat never offers a tool annotated non-read-only or consequential; self-host compose blanks the signing secret for both workers.
+
+## Locked index settings and the reindex command (2026-11-18)
+
+Owner: changing a project's embedding after documents are ingested silently re-billed or broke search; lock it once projects have ingests and wrap the change in a reindex command with the similar options.
+
+- `INDEX_IDENTITY_SETTINGS` (`packages/shared/src/config-change.ts`, mirrored in the SDK): `embedding`, `chunkOverlap`, `contextualChunkPreambles`, `vectorBackends`, exactly the inputs of `indexConfigOf`. `changedIndexIdentitySettings` lists those a change alters that an enabled stage uses.
+- Once a project has indexed documents (re-index targets or vectorized documents), a PATCH, settings publication or chat proposal that changes one without `apply: "reindex"` is refused with 409 `reindex_required` and nothing in the body is saved. `details.reindex` carries the locked settings, documents, pages, credit range, the estimate `signature` and `reindexUrl`; the public message names them. The check runs before any write on every (re)plan, and a plan made with nothing to lock re-plans if documents appear before it commits. `autoConfirmReindex` never unlocks it (it still applies to recommended re-indexes); stricter PII or privacy policy still re-indexes automatically.
+- Council (#500): version rollback goes through the same planner and lock (and restores only version audit rows); the reindex routes accept API keys; in-flight documents and runs and archived documents count; only a change of `indexConfigHash` locks or re-indexes (a reordered backend list or `embedding.task` does neither); the lock holds while embedding is off and on re-enabling `embed`/`indexVectors` over vectors of another config; estimate signatures are HMACed with the deployment secret; `privacy_mode_violation` 400s; `confirmEstimate` needs `apply: "reindex"`; the command reports an `outcome`; ingest recommendations and graph settings assert they never change index settings; CLI flags for late chunking and vector backends.
+- Re-check (#500): upload, URL-ingest and direct-upload-session overrides cannot change a populated project's index settings (409 `reindex_required`, before any bytes are stored); a managed-model update that moves the resolved index identity is refused while documents exist; legacy unstamped vectors count as another config; ingest recommendations apply through the planner; a chat proposal whose only documents are still uploading answers 409 `uploads_in_progress`.
+- `POST /v1/projects/:id/reindex` and `/reindex/estimate`: apply index settings (`pipeline` takes only those) and queue the re-index in one transaction, or rebuild the index with no settings change. `confirmEstimate` (also on PATCH) refuses stale work with 409 `estimate_stale`. Same gates as PATCH (editor; server key with `projects:manage` bound to the organization and project). Estimates return `lockedSettings` and `signature`. SDK `reindexProject` / `reindexProjectEstimate` and `DocSlurpApiError.reindex`; CLI `docslurp reindex` with `--estimate` and `--confirm`.
+
+## Private model mode: one env map from each service to a private endpoint (2026-11-18)
+
+- `DOCSLURP_MODEL_MODE=hosted|private` (default `hosted`) and one variable per service, `DOCSLURP_PRIVATE_{TEXT,VISION,EMBEDDING,RERANK,ROUTER,STT}_MODEL`, each an `llm://private/<alias>/<model>` registered with the service's capability (`packages/shared/src/private-model-mode.ts`). The API and the worker refuse to start on an invalid mode or mapping and, in private mode, on a hosted model-provider key; unmapped services are listed at startup.
+- In private mode no project reaches a hosted model: the privacy guard treats every project as restricted, and an unmapped service is refused, never sent to a hosted model. In hosted mode the map serves `local-only`/`strict-privacy` projects (text, vision, embedding, rerank and STT; chat and voice used only text and STT before).
+- Runs and searches read their pipeline through `applyPrivateModelMode`; projects keep only their level, and a project row's private `textGeneration.model` no longer selects chat's model. Resolves the TODO that `DOCSLURP_VISION_MODEL_URI` could not name a private endpoint (`DOCSLURP_PRIVATE_VISION_MODEL`).
+- Private reranking (`POST <base>/rerank`); private embedding index identity takes the registry's dimensions, and search skips an older index whose model is now refused.
+
+## Video frame reads get their own page extract record; kept reads name their model (2026-11-18)
+
+- Migration 0193: `document_page_extracts.pass` accepts `video-frames`, a contributing pass: the vision model's read of a video's sampled frames. The wider check is added NOT VALID in a catalog-guarded block and the old inline check dropped; superseded_by_pass keeps its check (it only names a final pass).
+- The media pipeline records one `video-frames` row on the video's page (method `vision`, engine `media-video-frames`, the frame batches' summed text size and request time) named by the vision model (`model_uri`, `model_class`), beside the transcript's `extract` row. Finalization ranks only `PAGE_EXTRACT_FINAL_PASSES`, so the row is adopted, names `extract` as the page's final pass and is never final: the ingest report and `final=true` reads still show the transcript. The API serves the pass name, never the model.
+- Rollback: release N-1's finalization gives the new pass a null rank and would write `is_final = NULL`; a BEFORE UPDATE trigger (fires only on NULL) keeps it false.
+- A query-time publication of a page another claim read and kept (`read_text`) records the model that read it, from the reading run's usage row (`metadata.modelUri`).
+
+## Exact model records: embedding spaces, request settings, run models (2026-11-18)
+
+- Migration 0192: nullable `embedding_model_uri` (and `embedding_model_class`, the embedding profile) on `vector_indexes`, `embedding_model_uri` on `document_page_states`, `model_uri` on `document_page_vectors`, and `project_runs.resolved_models`. No default, rewrite or backfill.
+- Every new vector row records its space as `llm://<provider>/<model>?dimensions=<n>[&pooling=cls]` (`embeddingSpaceUri`). Readers (eligible documents, the Postgres vector path, boot warm-up, the page-vector locator) still match on the bare id and dimension, plus the URI when both the row and the query have one: rows from before the column still serve their model, another provider's rows under the same id do not. Legacy rows (null URI) still match any space sharing their bare id and dimension: only rows written after 0192 are protected. A parity test checks that the worker's write URI equals the server's read URI for every embedding profile, a `?pooling=cls` route, a private route, custom dimensions and a stored older index config, and for both page-image embedders.
+- `modelConfig` (request settings, no prompt text, addresses or keys) on embeddings (task, normalize, pooling, dimensions, batch size, late chunking, truncation), query and page-image embeddings, the hosted reranker, page router decisions, structured extraction, transcription, proposition generation and its embeddings, chart-export vision calls, failed-but-billed vision attempts and every server text call (search helpers included). The chat tool agent, output moderation and voice calls carry a `modelClass`; events adopted by a server usage ledger are stamped.
+- The worker records the models that serve a run per service (text, structured extraction, vision, embedding) in `project_runs.resolved_models` at first pickup; query-time page reads record their model on the page extract record.
+- Page-image search on a private page embedder: the worker stores the served model id on `document_page_vectors.model` (`jinaai/...`), but the query embedder only ran for an `llm://private/...` URI, so it embedded nothing and visual pages were never found by vector. `privatePageQueryModel` resolves a bare id to the registered endpoint that serves it as an embedding model (any private page embedder, not only Jina; the `Query: ` prefix stays Jina-only).
+
+
+## Stored settings that stop validating: drop the field, never the project (2026-11-18)
+
+Owner: "We should not reject saving settings just 'cause an invalid field is there. Just drop the invalid field, rather than give users a dead end."
+
+- `readStoredPipelineSettings` (`packages/shared/src/pipeline.ts`) is the one stored-row reader: every field that validates is kept, each one that does not is replaced, and the read returns generic repairs (`{ path: "pipeline.<setting>", reason: "retired" | "invalid" | "restricted" }`, never stored values or model names). `parseStoredPipelineFeatures` delegates to it.
+- Fallbacks never weaken privacy, egress or spend: `privacyMode` strict-privacy; `piiPolicy` every detector with `block_indexing`; `webTools` off; `webhooks` off; `maxCostCents` a cap (a positive value floored, else 1 cent: 0 and null mean no cap to the worker); `ladder` lowest rung; `visionFallback` off; `mediaVideo` off; `pageRouter` the default (no decision-model spend); local vision and embedding profiles under a restricted privacy mode. A pipeline stored as a non-object reads as defaults with all of these strictest.
+- Council (#494) follow-ups: `quality` falls to `fast` (`auto` in visual mode), `contextualChunkPreambles` and `figures` to off; embeddings off with graph features on turns the graph features off (a stored `false` is never deleted to settle a conflict); an enabled PII policy left with no known detector, or with a non-name entry, is the strictest policy; a legacy vision model the migration cannot place goes and the section reads local; a Nitro model without Speed boost loses only the model; the reader never logs (callers log once per row). Settings written by a newer version (`configVersion`) list and open with the strictest settings, `settingsUnreadable: true`, and saves answer 409 `project_settings_unreadable` instead of overwriting them. `privacyModeOf` reads a non-object pipeline as `strict-privacy`. Search session setup, boot warm, the worker graph rebuild and summary-tree backfill read through `parseStoredPipelineFeatures`.
+- `getProject`, the lists and the realtime view read through it for every project-record caller (display, uploads, run starts, save drafts); the project record carries an optional `settingsRepairs`. A save writes the cleaned row back (summary tree and indexing mode included), so it repairs the row; a caller's own invalid value is still a 400. Run creation reads the project's ceilings (ladder, chart tier, quality and visuals) from the cleaned row when the stored one does not validate. Project version snapshots read through the same reader, so an old version can still be rolled back to.
+
+
+## Doppler pinned to the #51 release (2026-11-18)
+
+- `worker/doppler.json` points at `docslurp-e1200cb` (Doppler #51, math and table encoding page facts, plus #52, a GCC 13 build fix): commit, source url, sha256 and prefix, the worker image labels and corresponding-source lines, and the notices. Output is byte-identical to `docslurp-d317bea` (#51's merge commit). The recorded fixtures regenerate from the release, and a `--html` fixture for `routing-table-large-coverage` was added. Encoding routing stays off in production until the durable read cap (#496) lands.
+
+## Page evidence: one module owns what is known about a page (2026-11-17)
+
+- `worker/src/lib/page-evidence.ts` owns, per page, each quantity known or unknown (words, text layer, images and furniture, grids, rule score, math glyphs, garbling, page size), the whole-page states (failed, low confidence, locked) and the routing decisions: the table decision (unknown grids take the table path; encodings only add), the router's table rule score, text-layer trust rules, the one math-glyph gate with its three purposes, readable image boxes and the page cost route. Adapters for Doppler facts (`lib/page-evidence-doppler.ts`, replacing `doppler-page-facts-layout.ts` and `routing/probe/doppler-facts.ts`), walker layout pages and native probe rows.
+- classify-route, the v2 router (page inputs built from evidence), cost stats, chart-export, page-image evidence and extract-markdown (facts gates run once) read it. The v2 router no longer reads a low-confidence (`xref-repaired-earlier`) page's images, rules, math or text counts, and gives a page with unknown grids the table path, as classify-route does.
+- A decision parity harness (`worker/src/__tests__/page-evidence-parity.test.ts`) snapshots every consumer's decisions on one synthetic corpus.
+
+## Doppler math and table encoding facts in routing; math reading by default (2026-11-16)
+
+- The page-facts reader validates Doppler's `mathtables` family: the packed `mathBits`, `tableBits` and `encodingCounts` words (all or none, agreeing with their names and count nibbles) and the full level's readable fields. One bit table (`worker/src/lib/doppler-encoding-facts.ts`, positions pinned by a test) decodes them; `analysis-truncated` or a bit this build does not name leaves a page's encodings unknown, never "no table" or "no math".
+- The host asks providers for `mathtables` page facts (`SandboxedPdfJob.pageFacts`, batch `options.pageFacts`); each page's encoding route rides on its layout facts, and the words are stored in `document_page_facts` (migration 0189).
+- Evidence routing behind `DOCSLURP_ENCODING_FACTS_ROUTING` (on in development and test, off in production) and `DOCSLURP_DOPPLER_PAGE_FACTS=use`: encodings only add. A text-layer table bit adds a table route; outlined-text tables and math only a read recovers add a page read, capped per document; math grids and raster table shapes are signals. They never settle a grid as no table, drop a grid or relabel a page (council #467).
+- `DOCSLURP_DOPPLER_MATH_DEFAULT` (default on): projects read math (`pdftomarkdown --math`) unless they opt out with the vm-pdf option `math: false`; batches still need `DOCSLURP_FIRST_PASS_MATH=on`.
+
+## Page extract records (2026-11-16)
+
+Every page gets durable, labelled provenance of how its text was produced (docs/extraction/page-extract-records.md).
+
+- Migration 0188 `document_page_extracts`: one org-scoped row per (document, page, run, pass) with method, engine route, capability-pool member and region, billed class, closed tags, OCR confidence or plausibility, text bytes, finish reason, timing, `adopted`, `is_final` and `superseded_by_pass`. Labels only. Finals are set when a document completes in its current run (or a query-time read publishes pages), never by an older run.
+- Written in the checkpoint transaction (one pipelined multi-row upsert per 2,000 records, no extra round trip) by extract-markdown (extractor, scan-fill OCR, escalation and page-reader second reads, self-critique, audio/video transcripts), query-time materialization, vision-extract (vision, OCR of mixed scans, page reader; rejected and unread pages non-final), and classify-route (table, math, garbled layer, drawn, yield-deficit, scanned, blank tags).
+- Read: `GET /v1/documents/:id/page-extracts` (org and project scoped, API keys need `artifacts`), ingest report page views (`extractMethod`, `finalPass`, `extractTags`), telemetry `docslurp.pages.extracts` and `docslurp.pages.extract_tags`.
+
+## Billing forecast page counts by final class (2026-11-16)
+
+- `orgUnitUsage` (billing forecast `fastPagesLast30d` / `ocrPagesLast30d` / `richPagesLast30d`) counts each charged page once per run, in its final class: a page OCR-read and then vision-read (the 0185 settle), or another run's Text or Scan decision upgraded by `rich-upgrade:`, counts only as Vision, and a Vision page billed several units counts once per run. Upgrades match the replaced charge by id, document and run inside the same organization. Credits remain the exact sum of the charges. Counts and credits come from one pass over the org's rows, which now uses the org index through the view's new stamped columns (migration 0187).
+
+## Compute reuse across organizations (2026-11-16)
+
+Owner directive: stop the per-organization compute isolation that made small uploads slow; warm reuse is the default.
+
+- Modal parser VMs are no longer bound to one organization's run: the per-document in-guest scope bind exec, the reset's scope marker and single-use VMs for commands without a run are gone (runKey removed). Every command still runs after a root wipe of the previous document's job tree.
+- Parked VMs: an activity's idle, healthy VMs are parked for the worker's next activity (any run or organization) for `DOCSLURP_MODAL_VM_PARK_SECONDS` (default 30) instead of terminated; the job tree is wiped at adoption (a VM that cannot be wiped is replaced) and again before the first staging. Saves the ~2 s create-and-harden per activity. Adoption needs two thirds of the VM lifetime left; parked VMs hold worker capacity and stop at worker shutdown (`provider.drain`).
+- Page reader jobs no longer carry a per-job SQL organization proof (`PageImageReadJob.authorize` removed); `warm.status` may report a shared warm VM ready for any scope, so small runs use it at once.
+- AGENTS.md: compute units may be shared across organizations with per-job workspace reset, results only to the requesting job, the VM boundary from worker secrets unchanged.
+
+## Data-plane isolation relaxed for performance (2026-11-16)
+
+Owner decision: isolation keeps everything that stops one organization reading another's data (org in every cache and storage key, org predicates, per-run job authorization, chat and search scoping, per-org quarantine), and drops measures that only cost latency, throughput or money.
+
+- Removed the per-organization provider prompt salt everywhere (worker text and Anthropic calls, vision page reads, media frame descriptions, server search helpers, chat answers and the chat agent, private-endpoint calls, Llama Guard moderation) and vLLM `cache_salt`, so fixed prompt prefixes are provider cache hits again. Vision request bodies are byte-identical to before #450 (golden tests).
+- Removed `ROUTING_DECISION_STATE_SALT`, the per-org OpenRouter `user` field and `tenantFree` on page-router decision calls (back to the pre-#452 request).
+- Query-embedding, vector-result and search response caches are one shared bounded LRU each, with the organization in the key (the response cache also compares the stored org key on read); no per-org partitions or caps, so one organization can use the whole cache again (1000 embedding entries, 500 responses).
+- `recordJobMeta` no longer runs an extra organization-count query per job; `GET /v1/jobs/:id` still authorizes every run.
+- `systemMessage: false` private text models keep their layout (instructions in the user turn) without a salt.
+
+## Organization isolation follow-ups (2026-11-16; prompt salts and cache partitions later removed, see above)
+
+- Llama Guard output moderation opens the user turn with the per-org salt line (its template takes no system role; a system message changed a verdict category). Verdicts and categories were identical with and without the line on 12 safe and unsafe pairs.
+- Page-router decision calls send OpenRouter a per-org `user` (an HMAC), but their states remain unsalted (open gap, `TODO.md`): a salt part changed calibrated answers. `ROUTING_DECISION_STATE_SALT=1` turns the state salt on once a policy pack is fit with it; only the fixed health-canary state may skip it.
+- One salt helper (`@docslurp/shared/org-prompt-salt`): server chat, search helpers and worker prompts salt an org identically, from one key derivation that refuses a short `EVIDENCE_TAG_KEY` in production (server config, worker startup and on use).
+- Query-embedding and vector-result caches are partitioned per organization (`OrgPartitionedTtlLru`): a per-org cap, and under global pressure a write reclaims expired entries and then evicts only its own organization's entries (or is not kept). The search response cache uses the same rule.
+- Private text models can be registered with `systemMessage: false`: no system message is sent, instructions open the user turn and the org salt goes as `cache_salt`; a call without the salt, or a request that cannot carry it, is refused.
+
+## Organization isolation for compute reuse (2026-11-16)
+
+- Pooled Modal parser VMs are bound to one organization's run: host-side (each lane takes its first command's org+run scope and is never offered another; a session refuses, with an ALERT, a command of a second organization) and in-guest (the root reset records the scope in a root-only marker and exits 9 on any other, so the host terminates the VM). Commands without both an organization and a run get a single-use VM. The runner sends `runKey` with every remote command.
+- The worker's process-local PDF source cache keys entries by run and requester as well as the storage key.
+- The page-image-reader contract now binds reader VMs to one organization's run. AGENTS.md: compute units are never reused across organizations; fail closed to a fresh unit.
+- Source quarantine is per organization: a hash listed after org A's parser teardown failure refuses only A's documents; org B's identical upload is parsed in its own VM and never learns of A's listing (it joins the row only if its own teardown fails). `find`/`record` return the asking document's organization, never the first attributor's.
+
+## Automatic-call margin gate (2026-11-15)
+
+- Automatic model calls (vision fallback, OCR escalation, chart generators, page-router targets, route tiers, chat failover, Speed boost swaps) are allowed only when the pricing provider's billed value covers planning tokens times the route's highest current price (per OpenRouter endpoint, time-of-day overrides, verified host schedules) by `DOCSLURP_AUTOMATIC_MIN_MARGIN` (1.3). Unknown or stale prices fail closed; refused candidates are skipped with a logged reason; losing calls log `[automatic-margin] overrun loss=true`.
+- DeepSeek V4.1 Flash leaves the never-automatic denylist (owner decision); the denylist mechanism stays, empty.
+
+## Durable compute fleet admission
+
+- Added operator-owned fleet limits and durable reservation slots before provider launch. The database rejects oversubscription, stale policy snapshots, identity changes and released-ID reuse. Runtime application roles cannot access the platform ledger; workers cannot edit fleet limits or erase reservations.
+- Added a content-free worker plugin admission interface and startup binding. Unbound storage fails closed. Provider lifecycle adapters must retain uncertain reservations and release only on definite non-creation or confirmed deletion; this seam does not authorize customer file access or change provider defaults.
+- Two independent security reviews found stale operator-policy reads and inherited custom application ACLs. Both were fixed with real PostgreSQL regression tests. See `docs/design/compute-fleet-admission.md`.
+
 ## PII withholding is page-scoped (2026-11-13, behaviour change)
 
 - One PII page no longer blocks a whole document. Under `piiPolicy.action = "block_indexing"` a match withholds its page: that page's text becomes a fixed placeholder before summary, embedding and indexing, and its images, renders and figures are refused. The rest of the document completes and is served. Unpaged documents withhold the section holding the match. A match that cannot be placed on a page still blocks the whole document (fail closed). See `docs/pii-page-withholding.md`.
@@ -407,3 +604,4 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Add storage-authoritative direct-upload refresh, transfer expiry checks, original-key binding and immutable client-claimed re-selection identity.
 - Provider response validation no longer trusts upstream MIME: bounded JSON validation or SSE framing precedes byte release, including mislabeled SDK error responses; lazy reads and cancellation remain covered. Database discovery conservatively joins container/return provenance, refuses environment property stores, and invalidates destructuring and loop key writes without adding exemptions.
 - Local detailed page profiles: JSONL schema v3 uses cooperative local range reads up to 2 GiB, all-page inventory, <=1,000 deep inspections, numeric image/vector facts, ruled/unruled-table and caption/vector-figure candidates, exclusive text-byte composition, compact range summaries and bounded rankings. Browser/Node/Python/native adapters avoid whole-file input copies, detect ordinary native file mutations and release state on cancellation. Synthetic acceptance covers a 20,000-page/~1 GiB PDF and 10,000 variable-size files. Pixel semantics, calibrated classification and damaged-xref recovery remain in TODO.md; the small quote profile stays separate.
+- Migrations: UTC-timestamp file names (`YYYYMMDDTHHMM_name.sql`, `pnpm db:new`) and our own runner (`server/db/migration-runner.mjs`) in place of Drizzle's migrator and `meta/_journal.json`. Each file is recorded by name in `docslurp_migrations.applied` and applied in its own transaction with a bounded lock wait and retries; a migration that merges late still runs; Drizzle-migrated databases are mapped once; a lost ledger is refused, not replayed. The numbered files are frozen (2026-11-18, docs/releases.md#how-migrations-are-applied).

@@ -5,6 +5,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildDecisionModelCatalog, defaultPageRouterConfig, routePlanSchema, type PageRouterConfig, type PageRouterMode } from "@docslurp/shared";
 
+const stageResult = vi.hoisted(() => vi.fn());
+
 const native = vi.hoisted(() => ({
   loadNativePdfEngine: vi.fn(async () => ({ ok: false as const, reason: "test" })),
   loadNativePdfModule: vi.fn(() => ({ ok: false as const, reason: "test" })),
@@ -26,6 +28,7 @@ vi.mock("../pipeline/checkpoints.js", () => ({
   },
   runDocumentStage: async (...args: unknown[]) => {
     const result = await (args[5] as () => Promise<{ artifactUri?: string }>)();
+    stageResult(result);
     (args[0] as WorkflowState).artifactLedger.record(args[3] as string, result.artifactUri);
   },
   runSpentCents: (state: WorkflowState) => state.run.spentCents + state.usageLedger.pendingBillableCents,
@@ -39,7 +42,7 @@ import type { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { StorageObjectTooLargeError } from "../tools/storage.js";
 import { testCatalog } from "../routing/testing.js";
-import { pageInputFromProbeRow } from "../routing/page-input.js";
+import { pageInputFromEvidence } from "../routing/page-input.js";
 import { HostPdfRefusedError, sandboxedPdfDeploymentReason } from "../routing/host-pdf-guard.js";
 import { createDopplerFactsProbeRunner } from "../routing/probe/doppler-facts-runner.js";
 import { dopplerPageFactsJsonl, parseDopplerPageFacts } from "../lib/doppler-page-facts.js";
@@ -80,7 +83,7 @@ function makeState(options: { mode?: PageRouterMode; pageRouter?: Partial<PageRo
   const state = WorkflowState.create({
     id: "run", orgId: "org", spentCents: 0, artifacts: {}, stats: {},
     pipeline: {
-      quality: "auto", privacyMode: "standard", maxCostCents: null,
+      quality: "auto", ladder: { maxRung: "intelligent" }, privacyMode: "standard", maxCostCents: null,
       pageRouter: { ...defaultPageRouterConfig, router: "baseline", marginFloor: 0, ...options.pageRouter, mode: options.mode ?? "shadow" },
     },
   } as unknown as ProjectRun, [document]);
@@ -142,6 +145,32 @@ describe("sandboxedPdfDeploymentReason", () => {
 });
 
 describe("route-pages on a sandboxed deployment", () => {
+  it("counts advisory regions without granting OCR or opening the PDF", async () => {
+    const regions = [[0.1, 0.2, 0.5, 0.6]];
+    const baseline = await route({ facts: jsonl([docLine(), textPage(1), scanPage(2), figurePage(3), runLine()]) });
+    const measured = await route({
+      facts: jsonl([docLine(),
+        { ...textPage(1), rasterTextRegions: regions },
+        { ...scanPage(2), rasterTextRegions: regions },
+        { ...figurePage(3), rasterTextRegions: regions, parseWarnings: ["xref-repaired"] }, runLine()]),
+    });
+    expectNoHostPdfAccess();
+    expect(measured.plan).not.toBeNull();
+    const ocrPages = new Set(measured.plan?.assignments.filter((assignment) => assignment.role === "ocr")
+      .map((assignment) => assignment.pageNumber));
+    expect(ocrPages.has(1)).toBe(false);
+    expect(ocrPages.has(2)).toBe(true);
+    expect(measured.plan?.assignments.filter((assignment) => assignment.pageNumber < 3))
+      .toEqual(baseline.plan?.assignments.filter((assignment) => assignment.pageNumber < 3));
+    expect(stageResult).toHaveBeenLastCalledWith(expect.objectContaining({
+      stats: expect.objectContaining({
+        facts: expect.objectContaining({
+          pagesWithRegionFacts: 2, pagesWithRegionCandidates: 2, regionCandidatePagesRoutedToOcr: 1,
+        }),
+      }),
+    }));
+  });
+
   it("never loads, renders, clips or scans the PDF on the host, even with image decision models and the table gate on", async () => {
     const { plan, metrics, state } = await route({
       facts: fullFixture(),
@@ -166,18 +195,6 @@ describe("route-pages on a sandboxed deployment", () => {
     expectNoHostPdfAccess();
     expect(plan).toBeNull();
     expect(metrics("page-route-fallback")[0]!.metadata).toMatchObject({ reason: "facts-mode-store", probeSource: "native-probe", sandboxed: "sandboxed-pdf-deployment", fallback: "v3" });
-  });
-
-  it("refuses loudly when anything would hand the router a host path (a facts row carrying a thumbnail)", async () => {
-    const thumbRunner = vi.fn(async () => ({
-      status: "ok" as const, locked: false, pagesKnown: 1, pagesFailed: 0, linesDropped: 0,
-      rows: [{ ...(await createDopplerFactsProbeRunner(async () => Buffer.from(fullFixture()))({ documentId: "doc", pageCount: 3 }) as { rows: object[] }).rows[0], thumbnail: "/etc/passwd" }],
-    }));
-    const { plan, metrics } = await route({ facts: fullFixture(), deps: { factsProbe: thumbRunner as never } });
-    expectNoHostPdfAccess();
-    expect(plan).toBeNull();
-    expect(metrics("page-route-host-pdf-refused")[0]!.metadata).toMatchObject({ operation: "facts-thumbnail", reason: "sandboxed-pdf-deployment" });
-    expect(String(metrics("page-route-error")[0]!.metadata!.reason)).toContain("host PDF access refused");
   });
 
   it("missing facts: no plan, v3 routing, nothing read or charged", async () => {
@@ -277,15 +294,15 @@ describe("route-pages on a sandboxed deployment", () => {
   it.each([
     ["user-password-required", { encryption: "user-password-required" }],
     ["locked", { locked: true }],
-  ])("encrypted doc line (%s): one locked row, no host byte scan", async (_name, extra) => {
+  ])("encrypted doc line (%s): one locked page, no host byte scan", async (_name, extra) => {
     const facts = jsonl([docLine(extra), textPage(1), scanPage(2), figurePage(3), runLine()]);
     const runner = createDopplerFactsProbeRunner(async () => Buffer.from(facts));
     const result = await runner({ documentId: "doc", pageCount: 3 });
     expect(result).toMatchObject({ status: "ok", locked: true });
-    const rows = (result as unknown as { rows: Array<Record<string, unknown>> }).rows;
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ locked: true, needsAttention: true, textLayerStatus: "unknown", probeEngine: "doppler-facts" });
-    expect(rows[0]!.unusualFeatures).toContain("encrypted-user-password");
+    if (result.status !== "ok") throw new Error(result.reason);
+    expect(result.pages).toHaveLength(1);
+    expect(result.pages[0]).toMatchObject({ page: 1, state: "locked", source: "doppler-facts", text: { status: "unknown" } });
+    expect(result.pages[0]!.features).toContain("encrypted-user-password");
 
     const { plan, metrics } = await route({ facts });
     expectNoHostPdfAccess();
@@ -311,7 +328,8 @@ describe("golden decisions on fixture facts", () => {
   it("maps the three fixture pages to stable page inputs", async () => {
     const result = await createDopplerFactsProbeRunner(async () => Buffer.from(fullFixture()))({ documentId: "doc", pageCount: 3 });
     expect(result.status).toBe("ok");
-    const pages = await Promise.all((result as { rows: Parameters<typeof pageInputFromProbeRow>[0][] }).rows.map((row) => pageInputFromProbeRow(row, null)));
+    if (result.status !== "ok") throw new Error(result.reason);
+    const pages = await Promise.all(result.pages.map((page) => pageInputFromEvidence(page, null, "pdf", { pageCount: 3 })));
     expect(pages.every((page) => page.features.provenance.probe === "doppler-facts")).toBe(true);
     expect(pages.map((page) => ({
       page: page.features.pageNumber,

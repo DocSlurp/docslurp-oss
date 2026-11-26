@@ -1,6 +1,6 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
-import { BILLABLE_UNIT_METRICS, defaultPipelineFeatures } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, defaultPipelineFeatures, TEST_PAGE_CREDITS } from "@docslurp/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { pinRunPageBillingRules, recordPageBaseFee } from "../db/page-base-fee.js";
@@ -22,7 +22,7 @@ let db: PGlite;
 let server: PGLiteSocketServer;
 let store: Store;
 
-const pipeline = (quality: "fast" | "auto") => JSON.stringify({ ...defaultPipelineFeatures, quality });
+const pipeline = (quality: "fast" | "auto") => JSON.stringify({ ...defaultPipelineFeatures, ladder: { ...defaultPipelineFeatures.ladder, maxRung: "ocr" }, quality });
 
 /** Fast run documents, one per way page facts go missing or mislead, plus a document a reader actually read. */
 const fastDocs = `
@@ -153,7 +153,7 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
     expect(charges).toMatchObject({ fastPages: 4, richPages: 0 });
   });
 
-  it("bills a blank uploaded image's OCR read Rich, and a blank scanned PDF page Fast, from read to completion", { timeout: 60_000 }, async () => {
+  it("bills a blank uploaded image's OCR read OCR, and a blank scanned PDF page Fast, from read to completion", { timeout: 60_000 }, async () => {
     await db.exec(`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('auto-blank', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 2, 3);
@@ -175,17 +175,64 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
     const batch = reading.usageLedger.checkpoint();
     await persistRunUsageEvents({ client: sql(), state: reading, usageEvents: batch.events });
     batch.commit();
-    expect(await chargedPages("auto-blank", BILLABLE_UNIT_METRICS.richPage)).toBe(2);
+    expect(await chargedPages("auto-blank", BILLABLE_UNIT_METRICS.ocrPage)).toBe(2);
+    expect(await chargedPages("auto-blank", BILLABLE_UNIT_METRICS.richPage)).toBe(0);
 
     const charges = await recordPageBaseFee(sql(), await pinnedState("auto-blank"));
-    // b-png's one frame and b-pdf page 1 were Rich reads; b-pdf's blank page 2 bills Fast.
-    expect(charges).toMatchObject({ fastPages: 1, richPages: 2 });
+    // b-png's one frame and b-pdf page 1 were OCR reads; b-pdf's blank page 2 bills Fast.
+    expect(charges).toMatchObject({ fastPages: 1, ocrPages: 2, richPages: 0 });
     expect(await chargedPages("auto-blank", BILLABLE_UNIT_METRICS.fastPage)).toBe(1);
-    expect(await chargedPages("auto-blank", BILLABLE_UNIT_METRICS.richPage)).toBe(2);
+    expect(await chargedPages("auto-blank", BILLABLE_UNIT_METRICS.ocrPage)).toBe(2);
     const { rows } = await db.query<{ documents: Record<string, { fast: number; rich: number }> }>(
       `select metadata -> 'documents' as documents from usage_events where id = 'fast:auto-blank'`,
     );
     expect(rows[0]?.documents).toEqual({ "b-pdf": { fast: 1, rich: 0 } });
+  });
+
+  it("bills each page once in its dearest class: OCR, OCR upgraded to Rich, Rich then OCR, and Fast for the rest", { timeout: 60_000 }, async () => {
+    await db.exec(`
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values ('auto-ocr', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 1, 5),
+               ('auto-ocr-other', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 0, 0);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
+        ('o-pdf', 'o1', 'u1', 'w', 'auto-ocr', 'scan.pdf', 'application/pdf', 'raw/o1', 'completed', 5, 'counted');
+    `);
+    const vision = (ledger: WorkflowState["usageLedger"], pageNumber: number) => ledger.record({ provider: "openrouter", model: "vision",
+      metric: "page-analysis", inputTokens: 100, outputTokens: 100, costCents: 0, metadata: { documentId: "o-pdf", pageNumber } });
+    const reading = WorkflowState.create(await store.loadRun("auto-ocr"), []);
+    // Page 1: OCR only. Page 2: OCR, then a vision read (upgrade). Page 3: vision, then OCR (nothing more). Pages 4, 5: unread.
+    reading.usageLedger.chargeOcrPage({ documentId: "o-pdf", pageNumber: 1, readBy: "page-ocr" });
+    reading.usageLedger.chargeOcrPage({ documentId: "o-pdf", pageNumber: 2, readBy: "page-ocr" });
+    vision(reading.usageLedger, 2);
+    vision(reading.usageLedger, 3);
+    reading.usageLedger.chargeOcrPage({ documentId: "o-pdf", pageNumber: 3, readBy: "page-ocr" });
+    // Another run's OCR read of page 4 of this document never cancels this run's Fast charge for it.
+    const other = WorkflowState.create(await store.loadRun("auto-ocr-other"), []);
+    other.usageLedger.chargeOcrPage({ documentId: "o-pdf", pageNumber: 4, readBy: "page-ocr" });
+    for (const state of [reading, other]) {
+      const batch = state.usageLedger.checkpoint();
+      await persistRunUsageEvents({ client: sql(), state, usageEvents: batch.events });
+      // A retried checkpoint writes the same ids: a no-op.
+      await persistRunUsageEvents({ client: sql(), state, usageEvents: batch.events });
+      batch.commit();
+    }
+    const charges = await recordPageBaseFee(sql(), await pinnedState("auto-ocr"));
+    expect(charges).toMatchObject({ fastPages: 2, ocrPages: 1, richPages: 2 });
+    const { rows } = await db.query<{ metric: string; n: number; cents: string }>(
+      `select metric, count(*)::int as n, sum(cost_cents)::text as cents from usage_events
+       where run_id = 'auto-ocr' and metric like 'ingest-page-%' group by metric order by metric`);
+    const by = Object.fromEntries(rows.map((row) => [row.metric, { n: row.n, cents: Number(row.cents) }]));
+    expect(by["ingest-page-ocr"]?.n).toBe(2);
+    expect(by["ingest-page-rich"]?.n).toBe(2);
+    // Two OCR charges, page 2's upgrade (Rich minus OCR), page 3's Rich, two Fast pages: each page paid its class once.
+    const t = TEST_PAGE_CREDITS;
+    expect(by["ingest-page-ocr"]!.cents + by["ingest-page-rich"]!.cents).toBeCloseTo(2 * t.ocr + (t.rich - t.ocr) + t.rich);
+    expect(by["ingest-page-fast"]!.cents).toBeCloseTo(2 * t.fast);
+    // A retried completion charges nothing twice.
+    await recordPageBaseFee(sql(), await pinnedState("auto-ocr"));
+    expect(await chargedPages("auto-ocr", BILLABLE_UNIT_METRICS.fastPage)).toBe(2);
+    expect(await chargedPages("auto-ocr", BILLABLE_UNIT_METRICS.ocrPage)).toBe(2);
+    expect(await chargedPages("auto-ocr-other", BILLABLE_UNIT_METRICS.ocrPage)).toBe(1);
   });
 
   it("keeps the earlier release's completion rule for a run it started (no pin): unread images and scans bill Rich", { timeout: 60_000 }, async () => {

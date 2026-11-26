@@ -77,12 +77,12 @@ describe("managed pipeline model fields", () => {
   });
 
   it("applies explicit admin overrides, and stores them so direct readers see them", () => {
-    const overrides = { textGeneration: { model: "llm://private/gpu1/acme/text" }, vision: { modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } };
+    const overrides = { textGeneration: { model: "llm://private/gpu1/acme/text" }, vision: { modelUri: "llm://openrouter/z-ai/glm-5.3-flash" } };
     const resolved = resolveManagedPipeline({ ...defaultPipelineFeatures, textGeneration: { model: "z-ai/glm-5.3-flash", models: {} } }, overrides, "test");
     expect(resolved.pipeline.textGeneration.model).toBe("llm://private/gpu1/acme/text");
-    expect(resolved.pipeline.vision.modelUri).toBe("llm://openrouter/google/gemini-2.5-flash-lite");
+    expect(resolved.pipeline.vision.modelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
     const stored = storedManagedPipeline(resolved.pipeline, overrides, resolved.applied) as { vision: Record<string, unknown>; embedding: Record<string, unknown> };
-    expect(stored.vision.modelUri).toBe("llm://openrouter/google/gemini-2.5-flash-lite");
+    expect(stored.vision.modelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
     // A default the schema filled in is not stored, so a later default change applies.
     expect(stored.embedding).not.toHaveProperty("modelUri");
   });
@@ -105,7 +105,8 @@ describe("managed pipeline model fields", () => {
 
 describe("call-time model policy", () => {
   it("refuses denied, Pro/Ultra and over-cap models whatever their spelling", () => {
-    expect(automaticModelCallProblem("llm://openrouter/deepseek/deepseek-v4.1-flash-1017?_provider=fireworks")).toBe("never selected automatically");
+    // Not refused by name since 2026-11-15: an automatic call on it passes the margin gate instead (automatic-call-margin.ts).
+    expect(automaticModelCallProblem("llm://openrouter/deepseek/deepseek-v4.1-flash-1017?_provider=fireworks")).toBeNull();
     expect(automaticModelCallProblem("openai/gpt-6-sol-pro?reasoning=high")).toBe("prohibited model");
     expect(automaticModelCallProblem("openai%2Fgpt-6-sol-pro")).toBe("prohibited model");
     expect(isProhibitedRoutingModelId("openai/gpt-6-sol-pro?reasoning=high")).toBe(true);

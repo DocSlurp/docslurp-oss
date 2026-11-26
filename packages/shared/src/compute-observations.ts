@@ -57,10 +57,16 @@ export interface ComputeExecutionScope {
   executionGeneration: string | null;
 }
 
-/** Null cohort means authorized single-use execution, never permission to reuse by organization. */
+/**
+ * A live execution grant. Its existence proves, in SQL, that the run is live and belongs to `orgId` (with the document in
+ * that run). Compute units may serve any organization's jobs (compute reuse, AGENTS.md), so the grant is a liveness and
+ * revocation check, not a reuse key. `cohortId` is the narrower run/principal/input cohort, or null.
+ */
 export interface ComputeCohortGrant {
   cohortId: string | null;
   validUntil: string;
+  /** The organization the SQL predicate verified the run belongs to. */
+  orgId: string;
 }
 
 export const computePriceColumns = {
@@ -86,4 +92,61 @@ export function decodeComputeObservation<T>(row: Record<string, unknown>, column
     dateFields.has(key) ? new Date(row[column] as string | Date).toISOString()
       : numericFields.has(key) ? Number(row[column]) : row[column],
   ])) as T;
+}
+
+/** Platform-only allocation admission. It contains no customer content or tenant identity and does not authorize file access. */
+export interface ComputeAllocationReservation { fleetId: string; reservationId: string; clientToken: string }
+export type ComputeAllocationReleaseReason = "not-created" | "provider-deleted";
+export interface ComputeAllocationAdmission {
+  /** Operator must preconfigure the enabled fleet and cap. Repeated IDs are idempotent; released IDs cannot be reused. */
+  reserve(fleetId: string, reservationId: string): Promise<ComputeAllocationReservation | null>;
+  allocated(fleetId: string, reservationId: string, providerId: string): Promise<void>;
+  /** Only after definite non-creation or provider-confirmed deletion. Timeouts and uncertain responses MUST retain the reservation. */
+  release(fleetId: string, reservationId: string, reason: ComputeAllocationReleaseReason): Promise<void>;
+  /**
+   * Unreleased reservations of the fleet older than `minAgeSeconds`, oldest first (at most 200): what a reconciler checks
+   * against the provider after a restart, a lost launch response or a missed release. Content-free ids only.
+   */
+  unreleased(fleetId: string, minAgeSeconds: number): Promise<ComputeAllocationPending[]>;
+}
+
+export interface ComputeAllocationPending { reservationId: string; providerId: string | null; reservedAt: string }
+
+/**
+ * Fleet-wide job admission with per-organization fairness (migration 0186). Platform bookkeeping only: it carries a hashed
+ * organization key and measured page counts, never content or tenant ids, and does not authorize file access.
+ */
+export type ComputeJobTicketState = "routing" | "waiting" | "admitted";
+export interface ComputeJobTicket {
+  fleetId: string;
+  ticketId: string;
+  /** 64 lowercase hex: a sha256 of the organization bound to the fleet (the plugin's choice; not a secret-keyed MAC). */
+  orgKey: string;
+  /** Measured pages of the job (a structural count), 1..100000. Never document-supplied metadata. */
+  pages: number;
+}
+export interface ComputeJobDemandCounts { jobs: number; pages: number }
+export interface ComputeJobDemand {
+  maxJobs: number;
+  maxJobsPerOrg: number;
+  /** The asking organization's own tickets by state. */
+  org: Record<ComputeJobTicketState, ComputeJobDemandCounts>;
+  /** Every organization's tickets on this fleet, aggregated (no per-organization breakdown). */
+  fleet: Record<ComputeJobTicketState, ComputeJobDemandCounts>;
+}
+export type ComputeJobAdmitResult = ComputeJobTicketState | "unknown" | "unavailable";
+export interface ComputeJobAdmission {
+  /** Record a ticket as `routing` (demand only) or `waiting`. False when the fleet is missing or disabled (fail closed). */
+  register(ticket: ComputeJobTicket, state: "routing" | "waiting", leaseSeconds: number): Promise<boolean>;
+  /**
+   * Join the fair queue (a routing ticket becomes waiting), renew the lease and admit waiting tickets while the fleet has
+   * room, fewest-held organization first. `unknown`: the ticket expired or was released; `unavailable`: fleet disabled.
+   */
+  admit(fleetId: string, ticketId: string, leaseSeconds: number): Promise<ComputeJobAdmitResult>;
+  /** Extend a live ticket's lease. False when it is gone (expired): the holder must stop using the slot it stood for. */
+  renew(fleetId: string, ticketId: string, leaseSeconds: number): Promise<boolean>;
+  /** Idempotent. */
+  release(fleetId: string, ticketId: string): Promise<void>;
+  /** Live (unexpired) demand on the fleet. Null when the fleet is missing or disabled. */
+  demand(fleetId: string, orgKey: string): Promise<ComputeJobDemand | null>;
 }

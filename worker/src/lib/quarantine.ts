@@ -121,6 +121,7 @@ export async function scanDocumentForQuarantine(args: {
   documentId: string;
   filename: string;
   declaredMimeType: string;
+  hostEncryptName?: boolean;
   bytes: Buffer;
   tempFile: string;
   runner: CommandRunner;
@@ -176,7 +177,7 @@ export async function scanDocumentForQuarantine(args: {
   }
   // The guest's "no /Encrypt" is not taken alone: an /Encrypt name in the bytes, `#xx` escapes included (council N-L3:
   // `/En#63rypt`), sends the file to the decryption check. A bounded byte search over name tokens, never a parse.
-  const encryptName = !!inspected.pdf?.encryptName || (hostPdf && (args.bytes.includes(ENCRYPT_NAME) || pdfHasEncryptName(args.bytes) === true));
+  const encryptName = !!inspected.pdf?.encryptName || (hostPdf && (args.hostEncryptName ?? (args.bytes.includes(ENCRYPT_NAME) || pdfHasEncryptName(args.bytes) === true)));
   // Council N-H1: readers may disagree on this PDF's encryption (two encryption dictionaries, trailers that disagree, a
   // cross-reference chain readers must rebuild), so what the decryption copy shows is not what every reader shows.
   if (inspected.pdf?.encryptConflict) {

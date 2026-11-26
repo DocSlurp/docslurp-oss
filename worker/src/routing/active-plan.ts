@@ -1,4 +1,4 @@
-import { defaultPageRouterConfig, type RoutePlan } from "@docslurp/shared";
+import { defaultPageRouterConfig, effectiveLadder, type RoutePlan } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -23,26 +23,35 @@ export function assertCompleteActivePlan(plan: RoutePlan): void {
 
 /**
  * The document's stored RoutePlan, only when the page router is effectively `active` and the
- * plan was written in active mode. Everything else (off, shadow, no plan, unreadable plan)
- * returns null so callers keep the legacy path byte-for-byte.
+ * plan was written in active mode. Off, shadow and absent plans return null.
+ * Callers selecting paid reads use strict mode so an unreadable plan cannot drop its budgets.
  */
 export async function loadActiveRoutePlan(
   state: WorkflowState,
   storage: Pick<ArtifactStore, "bucket" | "getJson">,
   documentId: string,
   cfg: Pick<Config, "pageRouterMode"> | undefined,
+  options?: { strict?: boolean },
 ): Promise<RoutePlan | null> {
   if (effectivePageRouterMode(state, cfg) !== "active") return null;
+  // An Auto ladder limit (pipeline.ladder) plans every page read from page triage; a router plan would read pages outside
+  // it, so documents of a run with a limit take the triage path (the router still records its plan).
+  if (effectiveLadder(state.run.pipeline).active) return null;
   assertSupportedActiveMargin((state.run.pipeline.pageRouter ?? defaultPageRouterConfig).marginFloor);
   const uri = state.artifactLedger.readDocument(documentId, PAGE_ROUTE_PLAN_SLOT);
   const key = uri ? keyFromStorageUri(uri, storage.bucket) : null;
-  if (!key) return null;
+  if (!key) {
+    if (options?.strict && uri) throw new Error("Invalid route plan artifact reference");
+    return null;
+  }
   let plan: RoutePlan | null;
   try {
     plan = parseRoutePlan(await storage.getJson<unknown>(key));
-  } catch {
+  } catch (error) {
+    if (options?.strict) throw error;
     return null;
   }
+  if (!plan && options?.strict) throw new Error("Invalid route plan artifact");
   if (!plan || plan.mode !== "active") return null;
   assertCompleteActivePlan(plan);
   return plan;

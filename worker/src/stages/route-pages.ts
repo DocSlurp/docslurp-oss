@@ -1,12 +1,16 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { recordPipelineTelemetry } from "@docslurp/shared/observability";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { chartExportConfigOf, FORMAT_MODE } from "../chart-export/config.js";
 import {
+  privacyModeAllowsHosted,
   adaptiveRoutingDecisionSurfaceSchema,
   defaultDocumentExtractionConfig,
   defaultPageRouterConfig,
   pageRouterDecisionModels,
+  effectiveLadder,
+  ladderForbidsVision,
   qualityAllowsPageReading,
   routePlanSchema,
   type AdaptiveRoutingArtifact,
@@ -33,7 +37,7 @@ import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { isCostCapExceeded, runDocumentStage, runDocuments, runSpentCents } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
-import { buildPageInputs, createProbeRunner, pageInputFromProbeRow, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
+import { buildPageInputs, createProbeRunner, pageInputsFromEvidence, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
 import { HostPdfRefusedError, sandboxedPdfReasonForRun, type SandboxedPdfReason } from "../routing/host-pdf-guard.js";
 import { documentExtractorRegistry } from "../extractors/registry.js";
 import { createDopplerFactsProbeRunner, type FactsProbeRunner } from "../routing/probe/doppler-facts-runner.js";
@@ -67,12 +71,14 @@ import { hasHealthyTextLayer } from "../routing/routers/decision-model.js";
 import { HeuristicRouter } from "../routing/routers/heuristic.js";
 import {
   PAGE_ROUTE_PLAN_SLOT,
+  assignmentNeedsPixels,
   buildRuntimeCatalog,
   effectivePageRouterMode,
   loadRuntimePolicyPack,
   type RuntimeCatalog,
 } from "../routing/runtime.js";
 import type { CommandRunner } from "../tools/runner.js";
+import { readBudgetOf } from "./classify-route.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 
@@ -183,6 +189,18 @@ export class RoutePagesStage implements Stage {
       console.log(`[route-pages] skipped run=${state.run.id} reason=quality-fast mode=${mode}`);
       return;
     }
+    // Fastest reads with OCR only and never executes a route plan (vision-extract loadRoutedExecution), so no decision
+    // model is asked about its pages.
+    if (ladderForbidsVision(state.run.pipeline)) {
+      console.log(`[route-pages] skipped run=${state.run.id} reason=quality-fastest mode=${mode}`);
+      return;
+    }
+    // An Auto ladder limit (pipeline.ladder) plans reads from page triage and never uses a router plan
+    // (active-plan.ts); routing would still re-OCR probe pages and send thumbnails to decision models.
+    if (effectiveLadder(state.run.pipeline).active) {
+      console.log(`[route-pages] skipped run=${state.run.id} reason=auto-ladder-limit mode=${mode}`);
+      return;
+    }
     if (mode === "active") assertSupportedActiveMargin((state.run.pipeline.pageRouter ?? defaultPageRouterConfig).marginFloor);
 
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
@@ -264,6 +282,7 @@ export class RoutePagesStage implements Stage {
       const probeStarted = performance.now();
       let pages: PageInput[];
       let factsSummary: Record<string, unknown> | undefined;
+      let regionCandidates: Set<number> | undefined;
       if (probeSource === "doppler-facts") {
         const facts = await (this.deps.factsProbe ?? this.defaultFactsProbe(state, document))({
           documentId: document.id,
@@ -271,18 +290,25 @@ export class RoutePagesStage implements Stage {
           signal,
         });
         if (facts.status !== "ok") return this.fallback(state, document, mode, probeSource, facts.reason, sandboxed, facts.detail);
-        // A thumbnail is a host file path that pageInputFromProbeRow would open: refused on a sandboxed deployment, and
-        // dropped everywhere before any row is built.
-        if (facts.rows.some((row) => row.thumbnail !== undefined)) guard("facts-thumbnail");
-        const rows = facts.rows.map(({ thumbnail: _thumbnail, ...row }) => row);
-        // An active plan must cover every page the host counted (a locked row covers one): pages the router never saw
+        // Page evidence carries no thumbnail (a host file path), and none is passed: facts never open a host file.
+        // An active plan must cover every page the host counted (a locked page covers one): pages the router never saw
         // would get no extraction at all.
         const hostPages = hostPageCount(document);
-        if (mode === "active" && rows.length !== hostPages) {
-          return this.fallback(state, document, mode, probeSource, "facts-incomplete-for-active", sandboxed, `${rows.length}/${hostPages}`);
+        if (mode === "active" && facts.pages.length !== hostPages) {
+          return this.fallback(state, document, mode, probeSource, "facts-incomplete-for-active", sandboxed, `${facts.pages.length}/${hostPages}`);
         }
-        pages = await Promise.all(rows.map((row) => pageInputFromProbeRow(row, routing, "pdf")));
-        factsSummary = { locked: facts.locked, pagesKnown: facts.pagesKnown, pagesFailed: facts.pagesFailed, linesDropped: facts.linesDropped };
+        pages = await pageInputsFromEvidence(facts.pages, routing, "pdf", { pageCount: hostPages ?? facts.pages.length });
+        regionCandidates = new Set<number>();
+        let pagesWithRegionFacts = 0;
+        for (const page of facts.pages) {
+          if (page.rasterTextRegions === undefined) continue;
+          pagesWithRegionFacts += 1;
+          if (page.rasterTextRegions.length > 0) regionCandidates.add(page.page);
+        }
+        factsSummary = {
+          locked: facts.locked, pagesKnown: facts.pagesKnown, pagesFailed: facts.pagesFailed, linesDropped: facts.linesDropped,
+          pagesWithRegionFacts, pagesWithRegionCandidates: regionCandidates.size,
+        };
       } else {
         guard("native-probe");
         const source = await this.sources.get(document);
@@ -356,12 +382,24 @@ export class RoutePagesStage implements Stage {
         pixelNote,
         chainReport ? `decision-chain:${chainReport.trace.map((t, i) => `${i + 1}=${t.outcome}`).join(",")}` : undefined,
       ].filter(Boolean).join(" ") || undefined;
-      const plan: RoutePlan = routePlanSchema.parse({
+      const parsedPlan: RoutePlan = routePlanSchema.parse({
         ...raw,
         documentId: document.id,
         runId: state.run.id,
         mode,
       });
+      // Persist why triage authorized each budgeted page's read with the plan, so routed execution admits it under that
+      // durable budget and never as an ordinary read (stampReadBudgets).
+      const plan = stampReadBudgets(parsedPlan, routing);
+
+      if (factsSummary && regionCandidates) {
+        // OCR admission comes from the existing plan. Measure overlap even if one page has several assignments.
+        const ocrCandidates = new Set<number>();
+        for (const assignment of plan.assignments) {
+          if (assignment.role === "ocr" && regionCandidates.has(assignment.pageNumber)) ocrCandidates.add(assignment.pageNumber);
+        }
+        factsSummary.regionCandidatePagesRoutedToOcr = ocrCandidates.size;
+      }
 
       if (mode === "active") assertCompleteActivePlan(plan);
       const runTableGate = (this.deps.tableGate ?? readRoutingFlags().tableGate) === "shadow";
@@ -534,7 +572,7 @@ export class RoutePagesStage implements Stage {
   }): Promise<{ router: Router; routerNote?: string; chain?: DecisionModelChainRouter }> {
     const { state, document, settings } = args;
     const ids = { documentId: document.id, runId: state.run.id };
-    const disallowedPrivacy = new Set<string>(args.privacyMode === "standard" ? [] : ["hosted"]);
+    const disallowedPrivacy = new Set<string>(privacyModeAllowsHosted(args.privacyMode) ? [] : ["hosted"]);
     // Chart export replaces chart/diagram readings with generator calls: the planner prices those instead.
     const chartExportConfig = chartExportConfigOf(state.run.pipeline);
     // Only the billed `models` tier sends chart crops to a generator; the free tier adds no model output to price.
@@ -675,6 +713,11 @@ export class RoutePagesStage implements Stage {
         else if (comparison.routerNeedsPixels) summary.routerOnlyPixels++;
         else summary.v3OnlyPixels++;
       }
+      recordPipelineTelemetry("pages.router_decisions", 1, {
+        mode: plan.mode,
+        pixels: comparison.routerNeedsPixels ? "yes" : "no",
+        agrees: comparison.agreesWithV3 === null ? "unknown" : comparison.agreesWithV3 ? "yes" : "no",
+      });
       state.pendingPerformance.push({
         documentId: document.id,
         scope: "page",
@@ -913,4 +956,24 @@ const NO_PIXELS: { render: (pageNumber: number) => Promise<string | null>; clip?
 async function openNativePdfDocument(pdfPath: string, signal?: AbortSignal): Promise<NativePdfDocument | null> {
   const loaded = await loadNativePdfEngine();
   return loaded.ok ? loaded.engine.openPath(pdfPath, { signal }) : null;
+}
+
+/**
+ * The plan with each pixel-needing assignment of a budgeted page (classify-route readBudgetOf over page triage) stamped
+ * with its `readBudget`. A page triage did not budget keeps its assignments as the router wrote them.
+ */
+export function stampReadBudgets(plan: RoutePlan, routing: Pick<AdaptiveRoutingArtifact, "pages"> | null): RoutePlan {
+  const budgets = new Map<number, "encoding-read" | "table-rescue">();
+  for (const page of routing?.pages ?? []) {
+    const budget = readBudgetOf(page);
+    if (budget) budgets.set(page.pageNumber, budget);
+  }
+  if (budgets.size === 0) return plan;
+  return {
+    ...plan,
+    assignments: plan.assignments.map((assignment) => {
+      const budget = budgets.get(assignment.pageNumber);
+      return budget && assignmentNeedsPixels(assignment) ? { ...assignment, readBudget: budget } : assignment;
+    }),
+  };
 }

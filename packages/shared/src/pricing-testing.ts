@@ -18,19 +18,23 @@ export function installTestPricing(overrides: Partial<PricingProvider> = {}): Pr
   return provider;
 }
 
+/** Test credits per page and class (DISTINCT_TEST_PRICING): arbitrary and distinct, not any deployment's prices. */
+export const TEST_PAGE_CREDITS: Readonly<Record<import("./pricing-provider.js").PageMode, number>> = { fast: 0.005, ocr: 0.04, rich: 0.25 };
+
 /**
- * Test prices. Per page, Fast 5 and Rich 250 credits per 1,000 pages; these and everything else is arbitrary and distinct, not any deployment's rule: one more Rich page per
+ * Test prices. Per page, Fast 5, OCR 40 and Rich 250 credits per 1,000 pages; these and everything else is arbitrary and distinct, not any deployment's rule: one more Rich page per
  * started 800 output tokens past the first 800, a video minute two pages and an audio minute one, a feature 0.4 per started
- * 8 pages, an exported visual 0.07 per generator call, storage 7 credits per GB-month, an LLM search three searches, speed boost 4x, a reindex-only run half the page
+ * 8 pages, an exported visual 0.07 per generator call, storage 7 credits per GB-month, an LLM search three searches, a hosted-reranked search five, metered provider cost passed through at 1.5x, speed boost 4x, a reindex-only run half the page
  * charge, and remote sandboxes at 0.002 cents per core-second plus 0.0005 per GiB-second.
  */
 export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
-  pageCredits: (mode, pages) => Math.max(0, Number.isFinite(pages) ? pages : 0) * (mode === "rich" ? 0.25 : 0.005),
+  pageCredits: (mode, pages) => Math.max(0, Number.isFinite(pages) ? pages : 0) * TEST_PAGE_CREDITS[mode],
   richPagesForOutputTokens: (tokens) => 1 + Math.max(0, Math.ceil((Math.max(0, tokens ?? 0) - 800) / 800)),
   mediaRichPages: (kind, seconds) => Math.ceil(Math.max(0, seconds) / 60) * (kind === "video" ? 2 : 1),
   storageCreditsPerMonth: (bytes) => (Math.max(0, bytes) / 1024 ** 3) * 7,
-  searchUnits: ({ llmStrategies }) => (llmStrategies ? 3 : 1),
-  searchCredits: (searches, { llmStrategies }) => Math.max(0, searches) * (llmStrategies ? 3 : 1) * 0.01,
+  searchUnits: ({ llmStrategies, hostedRerank }) => (llmStrategies ? 3 : hostedRerank ? 5 : 1),
+  searchCredits: (searches, { llmStrategies, hostedRerank, providerCostCents }) =>
+    Math.max(0, searches) * (llmStrategies ? 3 : hostedRerank ? 5 : 1) * 0.01 + Math.max(0, providerCostCents ?? 0) * 1.5,
   chatAnswerCredits: () => 2,
   featureCredits: (feature, pages) => (feature === "documentSummary" ? 0.3 : 0.4 * Math.max(1, Math.ceil(Math.max(0, pages) / 8))),
   visualExportCredits: ({ visuals, callsPerVisual }) => Math.max(0, visuals) * Math.max(0, callsPerVisual) * 0.07,
@@ -43,7 +47,7 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
   webPageCredits: (pages) => Math.max(0, pages) * 0.5,
   webMapCredits: (urls) => Math.max(1, Math.ceil(Math.max(0, urls) / 40)),
   qualityModePricing: (mode) => ({
-    creditsPer1kPages: mode === "fast" ? { min: 5, max: 5 } : mode === "good" ? { min: 250, max: 250 } : { min: 5, max: 250 },
+    creditsPer1kPages: mode === "fast" ? { min: 5, max: 5 } : mode === "visual" ? { min: 250, max: 250 } : { min: 5, max: 250 },
     priceNote: "Test price note.",
   }),
   pageEquivalentAllowance: DEFAULT_PAGE_EQUIVALENT_ALLOWANCE,
@@ -75,7 +79,7 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
       documents: paged.length + (media ? media.audioFiles + media.videoFiles : 0),
       billing: args.profile.billing,
       credits: args.profile.billing === "disabled" ? null : {
-        low: (test.pageCredits!(args.profile.quality === "good" ? "rich" : "fast", low)) * boost + (media?.credits.low ?? 0),
+        low: (test.pageCredits!(args.profile.quality === "visual" ? "rich" : "fast", low)) * boost + (media?.credits.low ?? 0),
         high: (test.pageCredits!(fast ? "fast" : "rich", high)) * boost + (media?.credits.high ?? 0),
       },
       seconds: { low: seconds(low), high: seconds(high) },

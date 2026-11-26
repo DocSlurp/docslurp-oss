@@ -11,6 +11,7 @@ import { authorizeImageFrames } from "../ocr/image-frames.js";
 import { VisionRunGuard, type VisionGuardConfig, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import type { ProjectRun } from "../models.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
+import { bindMemoryPageBasis } from "../pipeline/page-basis-memory.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { pngHeader } from "../test/fake-ocr.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -145,8 +146,9 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
   }, 60_000);
 
   it("fails closed for two TIFFs authorizing at the same time while the spend check's database errors", async () => {
-    await admin`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
-      values (100, 'ocrb-tiff-run', 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}') on conflict do nothing`;
+    const generation = "tiff-budget-execution";
+    await admin`insert into project_runs (execution_generation, monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
+      values (${generation}, 100, 'ocrb-tiff-run', 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}') on conflict do nothing`;
     for (const id of ["ocrb-tiff-a", "ocrb-tiff-b"]) {
       await admin`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
         values (${id}, 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'ocrb-tiff-run', ${`${id}.tiff`}, 'image/tiff', ${`raw/${id}`}, 'processing', 1, 'assumed')`;
@@ -158,8 +160,9 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
     try {
       const activities = await Promise.all(["ocrb-tiff-a", "ocrb-tiff-b"].map(async (id) => {
         const created = store();
-        const state = WorkflowState.create(await created.loadRun("ocrb-tiff-run"), [(await created.loadDocument(id))!]);
-        state.store = created;
+        const state = WorkflowState.create(await created.loadRun("ocrb-tiff-run"), [(await created.loadDocument(id, { runId: "ocrb-tiff-run" }))!]);
+        state.executionGeneration = generation;
+        state.bindStore(created);
         state.usageLedger.runId = "ocrb-tiff-run";
         return { id, state };
       }));
@@ -193,9 +196,15 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
     const activity = () => {
       const state = WorkflowState.create({
         id: run, orgId: "ocrb-org", projectId: "ocrb-ws", userId: "ocrb-u1", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
-        pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true },
+        // Smartest: hosted escalation is refused on Fastest (the ladder forbids vision below the intelligent rung).
+        pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } },
       } as unknown as ProjectRun, []);
-      state.visionAttempts = store().visionAttempts;
+      const created = store();
+      state.visionAttempts = created.visionAttempts;
+      // This test is about the per-document budget across activities, not funding: escalation fails closed without a
+      // balance check (hosted-reader.ts authorizeEscalationRead), so the page basis is an in-memory one that funds every read.
+      state.store = created;
+      bindMemoryPageBasis(state);
       state.usageLedger.runId = run;
       return { state, reader: createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: { DOCSLURP_OCR_ESCALATION: "on" }, execute }) };
     };

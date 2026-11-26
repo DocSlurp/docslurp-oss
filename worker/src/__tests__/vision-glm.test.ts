@@ -9,7 +9,8 @@ import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { insertMissingTableDelimiters } from "../tools/vision-table-delimiter.js";
 import { openRouterProviderParams, postProcessVisionText, visionModelProfile, visionOutputCapForModel, visionPromptKeyForModel, visionReasoningParams } from "../tools/vision-model-profiles.js";
-import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, visionPromptTemplates, type VisionPriceCeiling } from "../tools/vision-runtime.js";
+import { ProviderRoutingExclusionError } from "../lib/provider-retry.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
 import { inAllowingRun } from "../test/provider-scope.js";
 
@@ -20,10 +21,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function requestBody(model: string, prompt?: string) {
+async function requestBody(model: string, prompt?: string, extra: { priceCeiling?: VisionPriceCeiling; response?: () => Response } = {}) {
   const bodies: Array<Record<string, any>> = [];
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
     bodies.push(JSON.parse(String(init.body)));
+    if (extra.response) return extra.response();
     return new Response(JSON.stringify({ choices: [{ message: { content: "x" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
   }));
   const dir = await mkdtemp(join(tmpdir(), "vision-glm-"));
@@ -36,6 +38,7 @@ async function requestBody(model: string, prompt?: string) {
     cfg,
     runner: new CommandRunner(),
     privacyMode: "standard",
+    ...(extra.priceCeiling ? { priceCeiling: extra.priceCeiling } : {}),
   }));
   const body = bodies[0]!;
   body.messages[1].content[1].image_url.url = "<image>";
@@ -56,7 +59,7 @@ describe("GLM 5.3 Flash vision profile", () => {
   });
 
   it("routes only to endpoints measured to read the image, with failover confined to those endpoints", () => {
-    expect(openRouterProviderParams(GLM)).toEqual({ provider: { only: ["wafer/nvfp4", "friendli", "inference-net/fp4"], sort: "price", allow_fallbacks: true } });
+    expect(openRouterProviderParams(GLM)).toEqual({ provider: { only: ["wafer/us", "friendli", "inference-net/us"], sort: "price", allow_fallbacks: true } });
   });
 
   it("caps output at 8k and never raises a smaller shared cap", () => {
@@ -95,8 +98,42 @@ describe("GLM 5.3 Flash vision profile", () => {
   it("keeps an explicitly chosen template but still sends the profile routing, reasoning and cap", async () => {
     const body = await requestBody(GLM, "layout");
     expect(body.messages[1].content[0].text).toBe(visionPromptTemplates.layout);
-    expect(body.provider).toEqual({ only: ["wafer/nvfp4", "friendli", "inference-net/fp4"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(GLM) });
+    expect(body.provider).toEqual({ only: ["wafer/us", "friendli", "inference-net/us"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(GLM) });
     expect(body.reasoning).toEqual({ effort: "minimal" });
     expect(body.max_tokens).toBe(8_192);
+  });
+
+  it("a price-ceiling request sends max_price at the ceiling and is restricted to the ceiling's hosts", async () => {
+    const ceiling = { inputUsdPerMillion: 0.065, outputUsdPerMillion: 0.24, imageUsd: 0, hosts: ["wafer/us"] };
+    const body = await requestBody(GLM, undefined, { priceCeiling: ceiling });
+    expect(body.provider).toMatchObject({ only: ["wafer/us"], sort: "price", allow_fallbacks: true,
+      max_price: { prompt: 0.065, completion: 0.24, image: 0 } });
+  });
+
+  it("a request no host can serve under its ceiling fails as a routing exclusion, not a model failure", async () => {
+    const ceiling = { inputUsdPerMillion: 0.001, outputUsdPerMillion: 0.001, imageUsd: 0, hosts: ["wafer/us"] };
+    await expect(requestBody(GLM, undefined, { priceCeiling: ceiling, response: () => new Response(JSON.stringify({ error: { message: "No endpoints found matching your data policy and max_price" } }), { status: 404 }) }))
+      .rejects.toSatisfy((error: unknown) => {
+        for (let current = error, depth = 0; current && depth < 8; current = (current as { cause?: unknown }).cause, depth += 1) {
+          if (current instanceof ProviderRoutingExclusionError) return true;
+        }
+        return false;
+      });
+  });
+
+  it("refuses a price-ceiling request on a route that cannot carry it, sending nothing", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const dir = await mkdtemp(join(tmpdir(), "vision-glm-"));
+    const imagePath = join(dir, "page.png");
+    await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const ceiling = { inputUsdPerMillion: 0.065, outputUsdPerMillion: 0.24, imageUsd: 0, hosts: ["wafer/us"] };
+    // DeepInfra's own API takes no max_price or host allowlist.
+    await expect(inAllowingRun(() => executeVisionRuntime({
+      imagePath, outputPath: `${imagePath}.json`, gate: null,
+      vision: visionConfigSchema.parse({ modelUri: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct" }),
+      cfg: { ...cfg, deepInfraApiKey: "di-key" } as Config, runner: new CommandRunner(), privacyMode: "standard", priceCeiling: ceiling,
+    }))).rejects.toThrow(/cannot carry the request's price ceiling/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

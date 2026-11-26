@@ -1,7 +1,10 @@
+import { ApplicationFailure } from "@temporalio/common";
+import { QUALITY_RANK, retiredGoodQualitySql, runLegacyQualitySql } from "@docslurp/shared";
+import { runWithPerfContext } from "../lib/perf-context.js";
 import type { Sql } from "postgres";
-import { applyDefaultVisionOverride, normalizeStoredPipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
+import { applyDefaultVisionOverride, applyPrivateModelMode, runModelModeStamp, applyKillSwitchesToPipeline, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
 
-import { isMissingDocumentError } from "../db/missing-document.js";
+import { DocumentOutOfScopeError, isMissingDocumentError } from "../db/missing-document.js";
 import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import type { Store } from "../db/store.js";
@@ -40,16 +43,45 @@ export interface MaterializeActivityDeps {
  * silently become the defaults and write vectors to the wrong table or leak OCR to hosted providers),
  * load the source document's ingest run pipeline, then the project's, and refuse to run on defaults.
  */
-async function withSourcePipeline<R extends { id: string; kind?: string; pipeline: unknown; projectId?: string | null }>(
+export async function withSourcePipeline<R extends { id: string; kind?: string; pipeline: unknown; projectId?: string | null }>(
   sql: Sql<Record<string, unknown>>,
   run: R,
   documentId: string,
 ): Promise<R> {
   if (run.kind !== "materialize") return run;
+  // Query-time reads follow the project's Auto ladder as it is now, never looser: a materialize run carries an older
+  // snapshot of the pipeline (pipeline.ladder), so the project's current limits tighten it.
+  // Quality is capped at the project's while it has a limit (clampRunLadder), so a source run at Good cannot read past it.
+  const [row] = await sql<{ ladder: unknown; quality: string | null; retired_good: boolean }[]>`
+    select w.pipeline -> 'ladder' as ladder, ${sql.unsafe(runLegacyQualitySql("w"))} as quality,
+      ${sql.unsafe(retiredGoodQualitySql("w"))} as retired_good
+    from documents d join projects w on w.id = d.project_id where d.id = ${documentId}
+  `;
+  // A project row still on the retired `good` (before migration 0199 moved it) is Smartest: the intelligent rung.
+  const project = row && row.retired_good
+    ? { ...row, ladder: { ...(row.ladder && typeof row.ladder === "object" ? row.ladder : {}), maxRung: "intelligent" } }
+    : row;
+  const projectQuality = qualityModeSchema.safeParse(project?.quality ?? "auto");
+  const tighten = <T extends { pipeline: unknown }>(value: T): T => {
+    const pipeline = value.pipeline as PipelineFeatures;
+    if (!pipeline || typeof pipeline !== "object") return value;
+    const clamped = clampRunLadder(pipeline, {
+      // An unreadable project quality is treated as the tightest (fail closed).
+      quality: projectQuality.success ? projectQuality.data : "fast",
+      ladder: (project?.ladder ?? null) as never,
+    }, false);
+    // A materialize run replays its source run's quality: never above the project's as it is now (extraction-config.ts,
+    // replays are capped at the current project), whether or not the project has a ladder limit.
+    const cap = projectQuality.success ? projectQuality.data : "fast";
+    const capped = QUALITY_RANK[clamped.quality] > QUALITY_RANK[cap]
+      ? { ...clamped, quality: cap, ...(cap === "auto" ? { visionFallback: true } : {}) }
+      : clamped;
+    return { ...value, pipeline: applyKillSwitchesToPipeline(applyLadderLimits(capped), process.env) };
+  };
   const [own] = await sql<{ empty: boolean }[]>`
     select (pipeline = '{}'::jsonb) as empty from project_runs where id = ${run.id}
   `;
-  if (own && !own.empty) return run;
+  if (own && !own.empty) return tighten(run);
   const [source] = await sql<{ pipeline: Record<string, unknown> | null; managed: unknown }[]>`
     select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb)) as pipeline,
       w.managed_models -> 'pipeline' as managed
@@ -69,7 +101,8 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
     parseManagedPipelineOverrides(source.managed, `project of document ${documentId}`),
     label,
   );
-  return { ...run, pipeline: applyDefaultVisionOverride(managed.pipeline) };
+  // The Auto ladder's limits apply to query-time reads as to ingest (db/run-ledger.ts).
+  return tighten({ ...run, pipeline: applyPrivateModelMode({ ...applyDefaultVisionOverride(managed.pipeline), ...runModelModeStamp(source.pipeline) }) });
 }
 
 /**
@@ -79,10 +112,19 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
 export async function runMaterializeRange(deps: MaterializeActivityDeps, input: MaterializePagesInput): Promise<MaterializeResult> {
   const result: MaterializeResult = { indexed: [], blocked: [], failed: [], costCredits: 0 };
   try {
-    return await materializeRange(deps, input, result);
+    // Parser commands carry this organization's run (scanner sessions and usage attribution need it).
+    const owner = await deps.store.loadRun(input.runId);
+    return await runWithPerfContext({
+      runId: input.runId, orgId: owner.orgId, ...(owner.projectId ? { projectId: owner.projectId } : {}), documentId: input.documentId,
+      scope: "document", stageName: "materialize-pages", pushPerformance: () => {},
+    }, () => materializeRange(deps, input, result));
   } catch (error) {
     // The document was deleted while (or before) its pages were materialized: stop cleanly. Retrying would
     // only repeat the foreign-key error; pages already written were billed as they finished, the rest are not.
+    // A document outside the run's organization is not a deletion: fail the run loudly, and do not retry.
+    if (error instanceof DocumentOutOfScopeError) {
+      throw ApplicationFailure.nonRetryable(error.message, "DocumentOutOfScope");
+    }
     if (!isMissingDocumentError(error)) throw error;
     console.warn(`[materialize] document ${input.documentId} was deleted; stopping run=${input.runId}`);
     const settled = new Set([...result.indexed, ...result.blocked, ...result.failed.map((f) => f.page)]);
@@ -114,7 +156,8 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
   const heartbeat = deps.heartbeat ? () => { deps.heartbeat!(); void renewLease(); } : undefined;
   const sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
   const loaded = await store.loadRun(input.runId);
-  const document = await store.loadDocument(input.documentId);
+  // The run may read another run's document (a query or backfill run): scoped to the run's organization.
+  const document = await store.loadDocument(input.documentId, { orgId: loaded.orgId ?? null });
   const run = coerceIndexingModeForFlag(await withSourcePipeline(sql, loaded, document.id));
   const state = WorkflowState.create(run, [document]);
   // Full-index runs label their pages 'full-index'; query/backfill keep the requested reason.

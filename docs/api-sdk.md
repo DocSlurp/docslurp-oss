@@ -50,7 +50,7 @@ A key holds one search scope, the most it may search. Modes nest: a `search:deep
 | --- | --- | --- |
 | `search:keyword` | `keyword` | Keyword matching and the free BM25 rerank. Never embeds the query or calls a model. |
 | `search:hybrid` | `hybrid` | Keyword plus the query embedding and vector search, fused. No graph expansion, hosted reranker or LLM step. |
-| `search:deep` | `deep` | Everything the project and request turn on: graph and community expansion, the hosted reranker, deferred (on-demand) pages, and LLM query strategies (HyDE, rewriting, decomposition, stepback, self-query, compression, multi-hop). |
+| `search:deep` | `deep` | Everything the project and request turn on: graph and community expansion, the hosted reranker, deferred (on-demand) pages, and LLM query strategies (HyDE, rewriting, decomposition, stepback, self-query, multi-hop). |
 
 Pass `mode` (`keyword`, `hybrid` or `deep`) on a search to run a cheaper mode; omitted, a search runs in the key's mode. A mode above the key's scope runs at the key's mode, and the response's `mode` says which mode ran. Project search settings never lift a search above its mode. Every passage-search endpoint takes any search scope: `/v1/search`, batches, `/v1/search/aggregate`, the Algolia, Meilisearch, Typesense and Pagefind compatible routes, and the MCP `search`, `listProjects`, `suggestQueries` and `getMediaEvidence` tools. Paid web tools and `/v1/capabilities` need `search:deep`. Keys created with the retired `search` scope became `search:deep`.
 
@@ -245,12 +245,15 @@ So `client.search({ q: "question" })`, `client.getProjectState()` and `docslurp 
 - Reserved words such as `default`, `board`, `templates` and `invites` return 400.
 - A slug that another project uses, or used before, returns 409.
 - API keys need the opt-in `projects:manage` scope, which only server keys can have. The key owner's project role still decides what may change. The same scope covers the other project settings (name, prompt, pipeline, budget).
+- `PATCH /v1/projects/:project` and `PATCH /v1/projects/:project/search-settings` each save one record. To change ingestion and search/chat settings together, with no partial save and no lost update from a concurrent editor, read `GET /v1/projects/:project/settings-publication` and send its revisions back with one `POST` to the same path; a stale revision answers `409 settings_stale`. The dashboard's project settings use this route. See [coherent settings publication](config-change-jobs.md#coherent-settings-publication).
 
 ```bash
 curl -X PATCH "$api_url/v1/projects/amber-falcon-ridge" \
   -H "Authorization: Bearer $DOCSLURP_API_KEY" -H 'Content-Type: application/json' \
   --data '{"slug":"legal-contracts"}'
 ```
+
+**Project settings in the dashboard:** the gear next to the project name opens the project's settings. Pipeline and search/chat options are grouped by job: **Read files** (what runs on each upload), **Find evidence** (index preparation and retrieval defaults) and **Answer questions** (chat behaviour). Each group offers a few presets, such as *Focused evidence* or *Concise and cited*; a preset only changes the unsaved draft, shows each field it would change with a per-field reset, and reads *Customized* once you edit further. Rarely needed controls, such as chunk overlap, contextual preambles, vector normalization and deferred indexing, sit under each group's **Advanced** disclosure. Each setting explains where its effective value comes from, including template locks and organization or key limits. **Save** publishes every change in the dialog as one revisioned commit through `settings-publication`: nothing is saved partially, a change that re-indexes existing documents asks you to confirm its estimate first, and if someone else saved in the meantime you are asked to reload instead of overwriting their change.
 
 **Path responses:** when a `/v1/projects/:project/...` path uses a slug, former slug or `default`, the response carries `X-DocSlurp-Project-Id` (UUID) and `X-DocSlurp-Project-Slug` (current slug), plus `X-DocSlurp-Project-Renamed-From` when a former slug was used, so clients can update stored links. Dashboard URLs are canonical at `/app/projects/<slug>`; UUIDs, former slugs and legacy `/app?projectId=` links redirect there.
 
@@ -267,11 +270,13 @@ curl -X PATCH "$api_url/v1/projects/amber-falcon-ridge" \
 | Wait for successful run | Poll `GET /v1/runs/:runId/progress` | `waitForRun` | `status --watch` |
 | List runs (paged: `limit` 1-100, `cursor`; returns `hasMore`, `nextCursor`) | `GET /v1/runs` | `listRunsPage`, `iterateRuns`, `listRuns` (all pages) | `runs` |
 | Account activity (SSE) | `GET /v1/runs/activity/stream` | `streamActivity` | Use SDK/HTTP |
+| Organization activity summary (queued, in progress, recently completed; pages per minute; ETA bucket) | `GET /v1/runs/activity/summary`; also `summary` on `GET /v1/runs?activity=true` and the stream's `activity` and `activity-summary` events | `getActivitySummary` | Use SDK/HTTP |
 | Project state | `GET /v1/projects/:project/state` | `getProjectState` | Use SDK/HTTP |
 | Ingest report | `GET /v1/projects/:project/ingest-report` (also MCP `getUploadStatus`, chat `/status`) | `getIngestReport` | Use SDK/HTTP |
 | List projects | `GET /v1/projects` | `listProjects()` | Use HTTP |
 | Read project | `GET /v1/projects/:project` | `getProject(id)` | Use HTTP |
 | Update or rename project | `PATCH /v1/projects/:project` (session or `projects:manage` key) | `updateProject(id, { slug })` | Use HTTP |
+| Read settings with revisions, or save project and search/chat settings in one commit | `GET` / `POST /v1/projects/:project/settings-publication` ([publication](config-change-jobs.md#coherent-settings-publication)) | Use HTTP | Use HTTP |
 | Retrieve passages | `POST /v1/search` or `GET /v1/search` | `search` | `search` |
 | Batch retrieval | `POST /v1/search` with `{ queries }` | `search({ queries })` | `search --queries-file` |
 | Streaming retrieval (SSE, each leg as it lands) | `POST /v1/search/stream` ([events](search-api.md#streaming-search)) | `searchStream` | `search --stream` |
@@ -317,21 +322,34 @@ document has been processed. Direct uploads have three milestones:
 2. Transfer each file using its returned `mode`. For `single`, PUT the bytes to
    `putUrl` with the supplied `headers`. For `multipart`, PUT each byte range to
    its `pendingParts[].url`; the range starts at
-   `(partNumber - 1) * partSize` and contains that part's `sizeBytes`.
+   `(partNumber - 1) * partSize` and contains that part's `sizeBytes`. Parts
+   are independent: send several at once (the SDK and CLI send 6 at a time).
 3. Poll `GET /v1/uploads/direct/sessions/:sessionId?statusOnly=true` until
    `result` is non-null, or the session becomes `failed` or `aborted`.
 4. Follow `result.run.id` through the run status or progress endpoints.
 
-The server uses a single PUT below 32 MiB and multipart at or above 32 MiB,
-with 8 MiB parts. Use the returned descriptors rather than hard-coding those
-values. The reconciler reads storage's part list, checks the part numbers and
+The session response carries `progress`: `files` and `bytes` received so far,
+then, once ingestion has started, `run` with documents and pages processed,
+`pagesPerMinute` and `eta`. An ETA is a bucket (`<1m`, `1-5m`, `5-15m`,
+`15-60m`, `1-3h`, `>3h`), never a countdown. `eta.estimate` is `true` when it
+comes from the project's completed runs rather than this run's own progress,
+and `eta` is `null` while there is no basis yet (show "estimating").
+
+A file up to 64 MiB gets one signed PUT; a larger file gets multipart with
+64 MiB parts, larger when a file would otherwise need more than 10,000 parts.
+Send `singlePart: true` for one PUT of any file up to 5 GiB (simpler, but it
+cannot resume or upload in parallel). Use the returned descriptors rather than
+hard-coding those values. Each signed URL is bound to its exact byte count:
+storage refuses a body of any other size with `403 SignatureDoesNotMatch`. The reconciler reads storage's part list, checks the part numbers and
 sizes, assembles the object, and verifies the stored file. It starts ingestion
 after all files in the session are ready. Clients do not need to call
-`/files/complete` or `/confirm` for known-size files.
+`/files/complete` or `/confirm` for known-size files. A client that does call
+`/files/complete` for the last file starts ingestion at once; otherwise the
+reconciler starts it within seconds of the last object landing.
 
 The API checks pending sessions every 15 seconds in bounded batches, with
 backoff between attempts. This is not a completion-time guarantee. A Tigris
-object notification makes a session eligible for the next check; polling still
+object notification makes a session due and starts a check in that process; polling still
 works without notifications. A webhook does not replace multipart assembly or
 prove that an unknown-size stream has ended.
 
@@ -356,8 +374,113 @@ For a custom HTTP client:
 4. Poll the session for `result`, then follow `result.run.id`.
 
 The server verifies the stored parts. It cannot infer EOF from an idle stream
-or from its current byte total. The `/confirm` endpoint remains available as an
-explicit fallback, but automatic ingestion does not require it.
+or from its current byte total.
+
+### Completing many files
+
+`/files/complete` also takes a batch: `{ "files": [{ "fileId": "A" }, { "fileId": "B", "sizeBytes": 12345 }] }`,
+up to 100 entries, each `fileId` once. A batch entry takes only `fileId`,
+`etag` and `sizeBytes` (no part manifest: the server reads the parts from
+storage), and a batch body is at most 32 KiB. The server finalizes the batch
+under one session lock, several files at a time, and answers per file:
+
+```json
+{ "ok": false, "completedCount": 1, "failedCount": 1, "sessionComplete": false,
+  "files": [{ "fileId": "A", "status": "completed" },
+            { "fileId": "B", "status": "failed", "error": { "statusCode": 409, "code": "upload_object_missing", "message": "...",
+              "retryable": false, "action": "reupload", "blocksSession": false } }] }
+```
+
+Two codes mean the file's bytes are not in storage yet, and only these mean
+"send the bytes again": `upload_object_missing` (no stored object: PUT the
+file to its `putUrl`) and `upload_parts_incomplete` (a multipart file's parts
+are missing or of the wrong size: upload the missing parts). Read the file's
+fresh targets with `?fileId=` (below), send the bytes, then complete it again.
+Any other `400` or `409` is not a reason to resend; in particular a coded
+`409` `upload_session_busy` is never a missing object.
+
+A file's failure carries the status the single-file call would have answered,
+and what to do about it: `retryable` (repeat the same request for this file as
+it is; `action: "retry"`), `action: "reupload"` (put the bytes again or finish
+the parts, then repeat), `action: "none"` (a repeat cannot fix it), and
+`blocksSession` (left as is, this file makes the whole session fail once you
+stop completing files). One call starts files for about five seconds; files it
+did not reach come back as retryable `upload_session_busy`. Only a session-level problem (not found, closed, no longer
+permitted, or `409` `upload_session_busy` while another request holds the
+session) fails the whole request. While a client is completing files, the
+background reconciler leaves the session alone for 30 seconds after each call
+that completes a file (at most 15 minutes in all).
+The call that completes the last file starts ingestion within a second or two;
+calling `/confirm` yourself is still fine and returns the same run. The SDK's
+`completeUploadFiles()` splits larger lists into batches.
+
+Retry rules for session calls (`/files/complete`, part signing, the session
+read, `/confirm`, `/abort`):
+
+- `503` `upload_storage_unavailable` (with `Retry-After`): storage was briefly
+  unavailable after the server's own retries. Repeat the same request, or the
+  files marked `retryable`, after `Retry-After`. Nothing was completed for those
+  files.
+- `409` `upload_session_busy` (with `Retry-After`): another request or the
+  reconciler holds the session. Each of these calls first waits up to 10
+  seconds for it, so this answer means a long hold: repeat the same request
+  after `Retry-After`. The SDK does this for you (`signUploadParts`,
+  `completeUploadFile(s)`, `getUploadSession`, `completeUploadSession`) within
+  the call's one deadline, and does not send a repeat with less than 250 ms
+  left. A known-size upload (SDK `upload()` or the CLI) that is still busy
+  after its waits keeps the session and names it in the error: the server's
+  reconciler finishes the files whose bytes arrived, so the session is not
+  aborted. A stream upload's final complete is waited out for about two
+  minutes; a stream declares no size, so if it is still busy after that the
+  session is aborted (the server cannot finish it) and the error names it.
+- `400`/`409` `upload_object_missing` or `upload_parts_incomplete`: the bytes
+  are not in storage; send them, then complete again.
+- Other `4xx`: the file or session needs attention; repeating will not help.
+
+Rate limits count requests, not files: a batch of 100 files costs one request
+in the upload category, the same as completing one file.
+
+The full session read (`GET /v1/uploads/direct/sessions/:sessionId`, without
+`statusOnly`) checks storage for each pending file before it signs fresh upload
+targets, a few seconds' worth per read. On a large session, files it did not
+get to come back still pending with `"inspected": false`: a single-part file
+with a fresh `putUrl`, a multipart file with no part list at all
+(`"transferState": "unknown"`, no `pendingParts`), since its parts were not
+read. Do not send bytes for an uninspected file straight away: complete the
+uninspected files first (a batch of up to 100 per call), and send bytes only
+for those answered `upload_object_missing` or `upload_parts_incomplete`. The
+SDK and CLI do this, with one batch complete and one `fileId` read per 100
+files. To resume particular files, name them: `?fileId=A&fileId=B` (up to
+1,000, each at most 64 characters) reads and inspects only those. `fileId`
+applies to the full read only: with `statusOnly=true` it is a `400`.
+
+One read signs at most 1,000 part URLs across its files. A multipart file past
+that budget lists its remaining `pendingParts` (number and size) without a
+`url` and is marked `"partUrlsOmitted": true`; sign those parts with
+`POST .../files/:fileId/parts/sign` (`{ "partNumbers": [...] }`, up to 100 per
+call). The SDK and CLI sign omitted parts for you.
+
+#### Revocation
+
+Authorization is checked immediately before each external step: before a
+session read or `parts/sign` signs upload targets (after any storage reads),
+before a session read seals an uploaded object, and, for bulk, URL and website
+intake, before each storage write, each URL fetch (after its DNS check) and
+each crawl provider request, failovers and retries included. The API key must
+still be live, keep `ingest`, belong to the session's or upload's organization,
+and its project allowlist must still cover the target project. A step already
+dispatched (one fetch, one write, one signing batch, or a provider request
+already accepted) may complete after a key is revoked; nothing new starts, and
+no run starts or bills (run admission checks again in its own transaction).
+Once refused, the request answers `403`.
+
+The `/confirm` endpoint remains available as an explicit fallback, but automatic
+ingestion does not require it. Confirm is idempotent: repeating it returns the
+same run, and a session that is already confirmed answers at once. While the
+server is starting the run (an earlier confirm, or its own reconciler, can take
+a while on a large session), confirm waits up to 10 seconds and then answers
+`409` `upload_session_busy` with `Retry-After`. Repeat the same request; it
+never starts a second run.
 
 ### Matching files, partial acceptance and idempotency
 
@@ -398,7 +521,8 @@ A part or file that fails mid-transfer resumes: read the session without
 storage does not yet hold at their expected size, with fresh signed URLs, and
 `completedParts` the ones it does.
 
-Signed URLs expire after 15 minutes. A session GET without `statusOnly=true`
+Signed URLs expire after 3 hours, or when the session does if that is sooner.
+A session GET without `statusOnly=true`
 returns fresh transfer URLs for pending files; use `statusOnly=true` when you only
 need status. Treat signed URLs as credentials. Send your DocSlurp bearer key to
 the API, never to storage.
@@ -419,9 +543,18 @@ API, with a default 25 MB limit (`MAX_MULTIPART_UPLOAD_BYTES`). This is a separa
 transport from object-storage multipart. In the SDK, select it with
 `directUpload: false`. A larger request gets `413 payload_too_large` whose
 `details` carry `maxBytes` and `directUpload.maxFileBytes`, the per-file limit
-for direct sessions (`MAX_UPLOAD_BYTES`, default 500 MB).
+for direct sessions (`MAX_UPLOAD_BYTES`, default 500 MB). An upload that does
+not arrive in time (a pause over 45 s, or slower than the minimum rate) gets
+`408` pointing to direct upload sessions (the CLI retries 408s).
 
-Self-hosters: see [automatic completion and Tigris setup](self-host/operations.md#automatic-upload-completion-and-tigris-notifications)
+Request bodies have one media type per endpoint: `/v1/uploads/bulk` (and the
+other bulk routes) take `multipart/form-data`, and every other JSON endpoint
+takes `application/json` (or `application/*+json`). A body of another type gets
+`415 unsupported_type` before any of it is read, with `details.policy` naming the
+expected type (for example `request_body:json`: "Send the request body as
+application/json."). A request with no body needs no `Content-Type`.
+
+Self-hosters: see [automatic completion and Tigris setup](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/operations.md#automatic-upload-completion-and-tigris-notifications)
 for the reconciler, Token authentication, bucket filter and deployment order.
 
 ## API changes
@@ -464,6 +597,7 @@ for the reconciler, Token authentication, bucket filter and deployment order.
 - **2026-10-21, breaking.** One `project` request field replaces `projectId` and `projectName` everywhere a request targets a project (bodies, query strings, multipart fields, MCP tool arguments; aggregate search takes `projects` instead of `projectIds`). It takes a UUID, slug, former slug or name, matched by slug. Uploads into a name that matches nothing create that project; other requests answer `404 project_not_found` naming the slug. The SDK option and inputs, embed and widget attribute (`project`), CLI `--project` (`--project-name` is removed) and the `DOCSLURP_PROJECT` environment variable follow. Responses still carry `projectId`. See [Projects](#projects).
 
 - **2026-10-20.** New projects default to `summaries: true`. Create/update bodies and project responses expose this document-summary option. It adds a one-time processing cost to improve document search and project overviews. See [document summaries, costs and limits](document-summaries.md).
+- **2026-11-18, breaking for index settings.** Once a project has indexed documents, a `PATCH /v1/projects/:id` that changes `embedding`, `chunkOverlap`, `contextualChunkPreambles` or `vectorBackends` without `apply: "reindex"` is refused with `409 reindex_required` and nothing is saved; `details.reindex` names the locked settings and the re-index documents, pages, credits and estimate `signature`. New `POST /v1/projects/:id/reindex` and `/reindex/estimate` apply those settings and re-index in one step (SDK `reindexProject`, `reindexProjectEstimate`; CLI `docslurp reindex`). `confirmEstimate` refuses stale work with `409 estimate_stale`. `autoConfirmReindex` no longer confirms index-setting changes. See [config-change jobs](config-change-jobs.md#locked-index-settings-and-the-reindex-command).
 - **2026-10-14, non-breaking.** Responses of work-creating routes (project `PATCH`, search-settings `PATCH`, uploads, reprocess, full-index, graph rebuild) gain an optional `job`. New `POST …/estimate` routes, `GET /v1/jobs/:id` and `GET /v1/jobs/:id/events`. Projects gain `autoConfirmReindex` and `retainDocumentVersions`; organizations gain `retainDocumentVersions`. Uploads accept `path`. Config `PATCH` requests that succeeded before still succeed and never return `409`; a `reindex-required` change now queues a re-index. See [config-change jobs](config-change-jobs.md).
 
 <a id="editor-required"></a>
@@ -547,6 +681,20 @@ The HTTP response is the full `{ run, stages, recentEvents, temporal, progress?,
   }
 }
 ```
+
+#### What the run's page counters mean
+
+| Field | Meaning |
+| --- | --- |
+| `pagesTotal` | Pages the run covers. Provisional while `pagesCountedAt` is `null`: formats only the worker can count start from an estimate. |
+| `pagesProcessed` | Page checkpoints of the extraction stages. It reaches `pagesTotal` when text extraction finishes, before routing, page reading and indexing run. Don't present it as "searchable". |
+| `pagesSearchable` | Optional. Pages of documents that finished indexing and are served by search. It advances a document at a time, because a document is published to search whole. On a completed run it stays below `pagesTotal` when documents failed or were withheld. |
+| `pagesCountedAt` | Optional. When `pagesTotal` became final; `null` while documents are still being counted. |
+| `workerStartedAt` | Optional. When a worker first picked the run up; `null` while the run waits for one. A retry or resume doesn't reset it. |
+
+The three optional fields are absent, or `null` for `pagesSearchable`, when the server or the worker that ran the job doesn't report them, and for runs created before they existed. Treat that as "unknown" and fall back to `pagesProcessed`; never read it as zero.
+
+For progress inside a stage, a completed document checkpoint in `stages` carries `stats.documentPages`, the document's page count. `completedPagesByStage({ stages, pageProgress: progress.pageRollup.byDocument })` from `@docslurp/shared` adds those to the page checkpoints, so stages that finish a document's pages together (classification, routing, the page index, the vector index) advance a document at a time. One document's progress inside such a stage isn't reported: its pages finish together.
 
 `progress` may be absent, and `temporal` may be `null`. Stage rollups report completed pages, document status counts, duration and usage. Resource totals report elapsed time, CPU time and memory. Run and stage progress can infer completion from lifecycle state, so use [project state](#current-project-state) for current searchable page coverage. A recorded cost of zero doesn't prove there was no API or infrastructure cost.
 
@@ -725,12 +873,12 @@ Bearer requests need a server key with the `ingest`, `artifacts` or `projects:ma
 | `stages`, `languages`, `media`, `tables` | Failed and skipped stages, detected languages, audio and video files (and minutes), and table-heavy pages. |
 | `performance` | Cost (`costCents`, the same figure as the run records: billed spend plus the flagged unbilled compute estimate, `computeEstimated`), `billedCostCents` (billed spend only, what the run cost cap is enforced against), pages per minute, minutes per 100 pages and pages per $1, from run wall time including queueing. |
 | `coverage` | Per-page text and image facts exist for files processed from 2026-10-14; older files report them as not recorded. |
-| `config` | The pipeline settings that shaped what was observed (vision, processing quality, OCR language, tables, embeddings, chunking, video, cost cap, privacy mode), each with why it matters here. |
+| `config` | The pipeline settings that shaped what was observed (vision, processing quality, OCR language, tables, embeddings, chunking, video, cost cap, privacy mode), each with why it matters here, plus `capsApplied` when a run's stamped settings were lowered (privacy, a switch, a replay cap). |
 | `recommendations` | Deterministic rules with the evidence, the expected effect, `cost.centsPer100Pages` for future uploads, `cost.reprocessCents` for re-running the affected files, and the pipeline `patch` an editor can apply. |
 
 Video frame reading defaults to enabled for new projects and configurations that omit `mediaVideo.enabled`. Explicit `false` disables frame reading even for silent video, and bills the file as audio (see below). Every organization gets the same video limits (up to 2 hours per file); only credits and budgets bound what a video costs. This project policy still requires the worker's `MEDIA_VIDEO_ENABLED=true`, remote-media support, privacy permission and available budget. The report shows project policy, not proof that frames were processed. Changing the default does not reprocess existing uploads; reprocessing remains explicit.
 
-Recommendation rules: read every page with vision when scanned-looking pages have no searchable text or vision stopped at the former per-file page limit (`turn-on-vision` when vision is off, `vision-all-pages` otherwise; the patch sets `quality: "good"`); make pages that Fast kept as page images searchable (`fast-kept-as-image`, reason `kept-as-image`; the patch sets `quality: "auto"`, and the effect names Good as the other choice, or only a reprocess once the project has left Fast); retry pages where vision failed; raise the run cost cap when it stopped vision; keep tables when table-heavy pages were flattened (`preserveTables`); turn on embeddings; read video frames (`mediaVideo.enabled`); export charts and diagrams as data when ingest recorded ones that were not exported (`export-charts`, patch `chartExport: { enabled: true }`); flag audio or video without a transcript (a platform setting); reprocess pages that have text but no chunks; retry failed files; and suggest a multilingual embedding profile for non-English files. A failed file never produces a vision recommendation; `retry-failed-files` names the cause and says when retrying will fail the same way (for example `ocr_unavailable`). Singular and plural wording follows the counts. Every recommendation id is classified in `INGEST_RECOMMENDATION_CATALOG`: those with a `patch` (`turn-on-vision`, `vision-all-pages`, `fast-kept-as-image`, `preserve-tables`, `turn-on-embeddings`, `turn-on-video`, `export-charts`) can be prepared in the DocSlurp app's chat with `proposeProjectSettings` as `{changes: {pipeline: <patch>}}` (app-only; API callers apply a patch with `POST /v1/projects/:id/ingest-report/apply`); the rest are reprocess-only, informational or outside the proposal allowlist, and a test enforces that. Vision cost uses this project's observed vision spend per page when at least three pages were read, otherwise the model's catalog price.
+Recommendation rules: read every page with vision when scanned-looking pages have no searchable text or vision stopped at the former per-file page limit (`turn-on-vision` when vision is off, `vision-all-pages` otherwise; the patch sets `quality: "good"`, i.e. `smart`, and is not offered under `local-only`/`strict-privacy` without a local vision reader); make pages that Fast kept as page images searchable (`fast-kept-as-image`, reason `kept-as-image`; the patch sets `quality: "auto"`, and the effect names Good as the other choice, or only a reprocess once the project has left Fast); retry pages where vision failed; raise the run cost cap when it stopped vision; read with a vision model the pages that kept their first OCR read because the per-document OCR second-read cap (`DOCSLURP_OCR_ESCALATION_MAX_PAGES`) was reached (`ocr-escalation-cap`, from the stages' `stats.ocrEscalation`; the patch sets `quality: "good"` and the cost is those pages' Vision charge in a new run; not emitted under Good); say how many such pages skipped their second read because the balance ran out, the run cost cap was reached or the second-read model's price was not accepted (`ocr-escalation-skipped`, reprocess only); keep tables when table-heavy pages were flattened (`preserveTables`); turn on embeddings; read video frames (`mediaVideo.enabled`); export charts and diagrams as data when ingest recorded ones that were not exported (`export-charts`, patch `chartExport: { tier: "models" }`, i.e. `visuals: "charts-ai"`; never offered under a restricted privacy mode); flag audio or video without a transcript (a platform setting); reprocess pages that have text but no chunks; retry failed files; and suggest a multilingual embedding profile for non-English files. A failed file never produces a vision recommendation; `retry-failed-files` names the cause and says when retrying will fail the same way (for example `ocr_unavailable`). Singular and plural wording follows the counts. Every recommendation id is classified in `INGEST_RECOMMENDATION_CATALOG`: those with a `patch` (`turn-on-vision`, `vision-all-pages`, `fast-kept-as-image`, `ocr-escalation-cap`, `preserve-tables`, `turn-on-embeddings`, `turn-on-video`, `export-charts`) can be prepared in the DocSlurp app's chat with `proposeProjectSettings` as `{changes: {pipeline: <patch>}}` (app-only; API callers apply a patch with `POST /v1/projects/:id/ingest-report/apply`); the rest are reprocess-only, informational or outside the proposal allowlist, and a test enforces that. Vision cost uses this project's observed vision spend per page when at least three pages were read, otherwise the model's catalog price.
 
 In the dashboard, ask "how did my files process?", "why can't it find page 4?" or type `/status` in chat, or use the Report button in the composer. Only the signed-in dashboard chat answers this way (`CHAT_INGEST_REPORT_NATURAL=false` keeps just `/status`); `/v1/chat`, MCP `chat` and `/v1/chat/completions` treat these as ordinary questions, so API clients read the endpoint above. Project editors can apply a recommendation (`POST /v1/projects/:project/ingest-report/apply` with `recommendationId` and the report's `runId`/`documentIds`; API keys need a server key with `projects:manage`) after a confirmation that shows the cost; the server recomputes the report and merges the recommendation's own patch onto the stored pipeline through the regular project update and audit log, so a request cannot carry arbitrary settings. `POST …/ingest-report/reprocess` re-runs up to 100 affected files with the project's current settings (server keys need `ingest`). The report's `permissions.canEdit` tells you whether the caller may do either.
 
@@ -744,7 +892,7 @@ A server key with the `ingest` scope can keep the documents it uploads current w
 | Price it first | `POST /v1/runs/:runId/reprocess/estimate` | `reprocessEstimate` |
 | Delete a document | `DELETE /v1/documents/:docId` | `deleteDocument` |
 | Replace a document's tags | `PUT /v1/documents/:docId/tags` with `{ tags }` | `setDocumentTags` |
-| Reprocess, retag or delete many documents | `POST /v1/documents/bulk` with `{ action, documentIds, tags? }` | `bulkDocuments` |
+| Reprocess, retag or delete many documents (at most 500 per request; the SDK splits deletes and tag changes) | `POST /v1/documents/bulk` with `{ action, documentIds, tags? }` | `bulkDocuments` |
 | Act on an ingest report recommendation | `POST /v1/projects/:project/ingest-report/reprocess` (`ingest`) or `…/apply` (`projects:manage`) | `reprocessIngestRecommendation` / `applyIngestRecommendation` |
 
 - Browser keys never get these, whatever their scopes.
@@ -1142,19 +1290,29 @@ A 503 with `error.code` `chat_capacity_unavailable` is not a limit you reached: 
 
 ### Processing quality
 
-`pipeline.quality` is the one extraction setting: set it on the project (`PATCH /v1/projects/:project` with `{ "pipeline": { "quality": "fast" } }`) or per upload in the request's `pipeline` overrides (SDK `quality`, CLI `--quality`, MCP `upload`/`extract` `quality`). Indexing mode (`pipeline.indexingMode`, full or on demand) is a separate, advanced setting.
+`pipeline.quality` (`fastest`, `auto`, or `smartest`) says how pages are read, and `pipeline.visuals` (`none`, `figures`, `charts` or `charts-ai`) what happens to figures and charts; [Quality and visuals](extraction/quality-and-visuals.md) is the full reference, including who may raise them and how runs record what they executed. Set quality on the project (`PATCH /v1/projects/:project` with `{ "pipeline": { "quality": "smartest" } }`) or per upload in the request's `pipeline` overrides (SDK `quality` and `readScans`, CLI `--quality` and `--no-read-scans`, MCP `upload`/`extract` `quality` and `readScans`); reprocess takes a top-level `quality`. `pipeline.pageImages: false` keeps no viewer page images (thumbnails, the reader, cited-page previews) on Fastest; images already stored stay. Smartest always keeps page images (a request asking for both gets a `page_images_forced` warning). Fastest leaves OCR off by default. Auto reads scans with OCR. Indexing mode (`pipeline.indexingMode`, full or on demand) is a separate, advanced setting.
+
+The former words are deprecated aliases: `balanced` is `auto`, `fast` is `fastest`, `smart` and `good` are `smartest`. They are still accepted, answered with a `Deprecation: true` header and a `warnings[]` entry. The stored `pipeline` holds `quality: "auto"` plus `ladder.maxRung` (`ocr`, `fast` or `intelligent`); read `project.extraction` (`quality`, `readScans`, `visuals`) for the current names.
 
 | Quality | What it does | How pages bill |
 | --- | --- | --- |
-| `fast` | Reads the text layer only, never OCR or a vision model. Request or project extraction settings that could read a page (OCR options, `forceOcr`, model or OCR extractors in `documentExtraction.order`, artifact-graph `enrich`) are removed for the run and logged; extractor options are validated per extractor and unknown extractors or keys are rejected. A page without a usable text layer keeps its stored page image, and its Markdown is `![Page N: scanned page image, no text layer](images/page-NNNN.png)` (the export's page-image path; the extension follows the stored image, so a JPEG upload links `images/page-0001.jpg`). Markdown-only exports include these page images. Renders are capped at `WORKER_FAST_PAGE_IMAGE_MAX_PER_DOCUMENT` (default 1,000) per document and `WORKER_FAST_PAGE_IMAGE_MAX_PER_RUN` (default 10,000) per run, a budget shared by every worker. A page counts against the budget when it is granted, so a render that then fails still uses its share and is not retried from the budget; pages past a cap, and pages whose render failed, stay unread with no reference (previews still render them on demand). On-demand indexing (search-triggered, index-all, map mode) follows the same rule: text layer only. Such a page has no text, adds no chunks and is not searchable; the ingest report lists it as `kept-as-image`. | Fast pages (a page bills Rich only when a model actually reads it, and Fast cannot be combined with visual indexing mode) |
-| `auto` (default) | Reads each page the cheapest faithful way: the text layer for born-digital pages, a vision model for scans and complex layouts. | Fast or Rich per page, by what read it |
-| `good` | A vision model reads every page, for the most faithful tables, figures and layout. Good turns `visionFallback` on. A run cost cap (`maxCostCents`) can still stop vision early; pages it did not read bill as in Auto. | Rich for every page a vision model reads |
+| `fastest` (default) | Native readers extract existing text and document structure. Pages without usable text remain page images when image retention is enabled and have no searchable text. Explicit `readScans: true` selects OCR for compatibility. | Text pages |
+| `auto` | Native readers first. OCR reads scans and images. Page reading uses OCR only. | Text pages, plus Scan pages for pages OCR read |
+| `smartest` | Native readers first; scans, image pages and pages with hard math, layouts or fonts go straight to a vision model, with no OCR step (pages over a `pipeline.ladder` share cap are read by OCR). If vision cannot read the run, OCR reads its scans. `smartest` above the project's quality needs project editor rights, or an API key with `pipeline:billed-features` whose owner is an editor (`403 quality_smart_forbidden`); under `local-only`/`strict-privacy` it needs a local vision reader (`400 quality_unavailable`). | Text pages, plus Vision pages for pages a vision model read |
 
-Current Fast and Rich page prices are on [docslurp.io/pricing](https://docslurp.io/pricing) (and `GET /v1/billing/prices`); they are set by the hosted price card and can change.
+Pages bill as Text, Scan or Vision pages (internal ids `fast`, `ocr`, `rich`). Current prices are on [docslurp.io/pricing](https://docslurp.io/pricing) (and `GET /v1/billing/prices`); they are set by the hosted price card and can change.
 
-`QUALITY_MODES` in `@docslurp/shared` holds these labels and descriptions; prices come from the deployment's pricing provider (`qualityModeInfo`), and `estimateIngest` takes the same three ids as its `profile`. The internal parser playbooks are not a setting: requests and stored pipelines that still send the retired `parserPlaybook` or `vision.forceAllPages` are accepted and mapped (`fast` to fast, `forceAllPages: true` to good, and every other playbook, `review-grade` and `agentic` included, to auto: those playbooks never read every page). Run previews (`POST /v1/runs/preview`) return one option per quality.
+`QUALITY_MODES` in `@docslurp/shared` holds the pricing profiles' labels and descriptions (`fast`, `fastest`, `smartest`, `visual`; `QUALITY_MODE_ORDER` is the public choice); prices come from the deployment's pricing provider (`qualityModeInfo`), and `estimateIngest` takes the same ids as its `profile`. The internal parser playbooks are not a setting: requests and stored pipelines that still send the retired `parserPlaybook` or `vision.forceAllPages` are accepted and mapped (`fast` to fast, `forceAllPages: true` to Smartest, and every other playbook, `review-grade` and `agentic` included, to auto: those playbooks never read every page). Run previews (`POST /v1/runs/preview`) return one option per quality.
 
 ### Chart and diagram export
+
+**Use `visuals`.** `pipeline.visuals` (`none`, `figures`, `charts`, `charts-ai`) replaces `figures` and
+`chartExport.tier` (`figures` = tier `off` with the PDF figure pass, `charts` = `free`, `charts-ai` = `models`, `none` =
+`figures: false`); reprocess and the estimate endpoints take a top-level `visuals`, and the project record reports
+`visualsDefaults: { app, machine, available }` beside the deprecated `chartExportDefaults`. A rung the deployment or the
+project's privacy mode does not offer is `400 visuals_unavailable`; `charts-ai` above the project's setting needs the
+same rights as `smart` (`403 chart_export_models_forbidden`). The tier names below remain accepted, deprecated, for the
+window ([Quality and visuals](extraction/quality-and-visuals.md)); `chartExport.formats` and `.diagrams` keep their names.
 
 `pipeline.chartExport` re-expresses each detected chart or diagram as text an assistant or a notebook can use. You choose a **tier**, never a model:
 
@@ -1184,8 +1342,8 @@ and logged at startup:
 - `DOCSLURP_CHART_EXPORT_INLINE=1` (default unset): the free steps run inside the sandboxed inspection every document
   already gets, instead of a separate sandbox run per document. A sandbox image whose inspection does not support it
   skips those charts and counts them as deferred.
-- `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on|off` (default: follows `DOCSLURP_CHART_EXPORT_INLINE`). Whether callers may
-  choose `free` explicitly. Unset, it is allowed exactly when inline extraction is on. While it is refused, a request
+- `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on|off` (default: follows `DOCSLURP_CHART_EXPORT_INLINE`; the operator setting
+  `charts.explicitFree`, `auto` when unset). Whether callers may choose `free` (`visuals: "charts"`) explicitly. Unset, it is allowed exactly when inline extraction is on. While it is refused, a request
   or project change that asks for `free` is refused, and a stored `free` counts as unset.
 - `DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR` (default `200`): per-organization hourly cap on free-tier
   documents whose charts run in a sandbox, inline or in a separate run, across every worker. One document counts once.
@@ -1267,7 +1425,7 @@ The upload estimate answers `chartExport: { tier, source, credits }`, where `sou
 
 Website ingest (`POST /v1/web/ingest`) takes a top-level `chartExport` too.
 
-Other surfaces: SDK `chartExport: { tier }` on `upload`, `uploadUrls`/`ingestUrls`, `reprocessRun`, `reprocessEstimate` and `uploadEstimate`; CLI `--chart-export off|free|models` on `upload`, `ingest-url`, `reprocess` and their `--estimate`; MCP `chartExport` on `upload`, `extract`, `uploadEstimate` and `reprocessEstimate`.
+Other surfaces: SDK `visuals` (deprecated `chartExport: { tier }`) on `upload`, `uploadUrls`/`ingestUrls`, `reprocessRun`, `reprocessEstimate` and `uploadEstimate`; CLI `--visuals none|figures|charts|charts-ai` (deprecated `--chart-export off|free|models`, `--no-figures`) on `upload`, `ingest-url`, `reprocess` and their `--estimate`; MCP `visuals` (deprecated `chartExport`) on `upload`, `extract`, `uploadEstimate` and `reprocessEstimate`.
 
 **Refusals:** a tier the deployment does not offer is refused with `400 chart_export_tier_unavailable` on every surface:
 uploads, URL ingest, direct sessions (at creation and again at confirm), extracts, website ingest, reprocess, the
@@ -1306,14 +1464,15 @@ Ingest records chart and diagram counts per document whatever the tier. That let
 
 ### Credits and budgets
 
-DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. Buy a credit pack ($25, $50 or $100) or any amount from $10 to $10,000 on the billing page; credits do not expire while the account exists. Every new account starts with 100 free credits ($1), no card needed: enough for 10,000 text pages or 400 scanned pages. You pay per unit:
+DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. Buy a credit pack ($25, $50 or $100) or any amount from $10 to $10,000 on the billing page; credits do not expire while the account exists. Every new account starts with 100 free credits ($1), no card needed: enough for 10,000 Text pages, 3,333 Scan pages or 666 Vision pages (pages read by a vision model). You pay per unit:
 
 | Unit | What counts |
 | --- | --- |
-| Fast page | Any page no vision or OCR model read: a text-layer PDF page, Office, HTML, Markdown, EPUB, text, an unread scan or image |
-| Rich page | A page a vision or OCR model read: a scanned page the extractor OCR'd, an image read by OCR, a page read by a vision model. In Fast quality nothing is read, so scans and images bill as Fast pages |
+| Text page (`fast`) | Any page no vision or OCR model read: a text-layer PDF page, Office, HTML, Markdown, EPUB, text, an unread scan or image |
+| Scan page (`ocr`) | A page an OCR engine transcribed: a scanned page or an image frame read by OCR, one flat charge per page however long its text |
+| Vision page (`rich`) | A page a vision model interpreted. A Scan page a vision model then reads (for example the second read of a page OCR read poorly) becomes a Vision page: it pays the Vision charge minus its Scan charge, so it pays Vision once. In `fastest` quality nothing is read, so scans and images bill as Text pages |
 
-The credits per Fast and Rich page are on [docslurp.io/pricing](https://docslurp.io/pricing) and in `GET /v1/billing/prices`.
+The credits per Text, Scan and Vision page are on [docslurp.io/pricing](https://docslurp.io/pricing) and in `GET /v1/billing/prices`.
 
 Audio and video minutes, storage, searches (priced by [search mode](#search-modes)), chat answers, optional document features (summaries, structured fields, knowledge graph, propositions) and web tools are also charged per unit; [docslurp.io/pricing](https://docslurp.io/pricing) and `GET /v1/billing/prices` (no authentication) list the current prices, packs, top-up limits and the tier of each chat model. Optional features are charged when their stage actually runs. `POST /v1/uploads/estimate` estimates an upload before any bytes are sent: pass each file's page count, `durationSeconds` and `type` when known, or the file's profile from the offline profiler (`@docslurp/estimate`), and read `media` for audio and video. An estimate is never a charge: an upload is billed by what the worker measures. A file pays only for what it uses: there is no per-file minimum. A Word, slide, sheet or EPUB file arrives counted as one page; the worker measures its real pages after converting it and bills those. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded.
 
@@ -1359,6 +1518,33 @@ JSON upload and direct-session requests accept `tags: string[]`. Multipart `/v1/
 
 Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. `PUT /v1/documents/:docId/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with project edit access, from a session or a server key with `ingest`. Tag changes take effect without re-ingestion.
 
+## Bulk document actions
+
+`POST /v1/documents/bulk` takes `{ action, documentIds, tags? }` for `reprocess`, `apply-tags`, `remove-tags`, `delete` or `export-artifacts`, and `POST /v1/projects/:project/documents/bulk/estimate` prices the same body. Both check the request before anything else:
+
+- **At most 500 documents per request.** More is a `400 invalid_request` with `details: { policy: "bulk_documents_limit", limit: 500 }`. Split larger batches.
+- **Document ids only.** Each `documentIds` entry must be a document id (at most 64 characters). Anything else is a `400 invalid_request`, and nothing is changed.
+
+A bulk delete runs in groups of up to 100 documents, each committed with its own audit record. If a later group fails after earlier ones committed, the response keeps the failure's status (`503` with `Retry-After` when the documents were busy) and reports both sides:
+
+```json
+{
+  "error": {
+    "code": "unavailable",
+    "details": {
+      "policy": "bulk_delete_partial",
+      "deleted": 200,
+      "deletedDocumentIds": ["…"],
+      "remainingDocumentIds": ["…"]
+    }
+  }
+}
+```
+
+Retry with `remainingDocumentIds` only. The deleted documents are gone, and naming them again returns `404 Document not found`.
+
+The SDK's `bulkDocuments` sends `delete`, `apply-tags` and `remove-tags` in requests of 500 and merges the results. If one fails part-way, it throws `DocSlurpBulkDocumentsPartialError`: `completed` is the merged result of what was done (a server-side partial delete counts the ids the server reports deleted), `remainingDocumentIds` is exactly what to retry, and `cause` is the failure. `reprocess` and `export-artifacts` with more than 500 documents throw `RangeError` before any request, because their results (runs, costs, artifacts) cannot be merged across requests.
+
 ## Export documents as a zip
 
 Export one document or a project's current documents as an organized zip. The worker builds the archive in the background and stages it in object storage; the API never holds it in memory.
@@ -1393,7 +1579,7 @@ Project exports hold current versions only (no superseded, archived or purged do
 - **Lifetime:** every link works for **7 days** from when the export is ready (`expiresAt`). After that `download` answers `404` and the file is deleted. Each `download` call checks the export (requester, project access, expiry) and then redirects to a presigned storage link that lasts two minutes, so the zip downloads straight from storage. Call `download` again for a fresh link; resumable downloads (Range) work against the storage link.
 - **Limits:** three unfinished exports per user, and 20 exports or 20 GB (estimated) per user per day (`429 rate_limited`). Asking for the same export again within an hour returns the one already in flight or finished. A single document must have finished processing (`409` otherwise).
 
-Sessions and server keys with `artifacts` can export; keys stay within their organization and project restrictions. Objects live in the private bucket under `exports/<orgId>/<projectId>/<exportId>.zip` with an `Expires` header and `docslurp-expires-at` metadata; the API's maintenance sweep deletes them. A bucket lifecycle rule that expires `exports/` after 8 days is a useful backstop (see [operations](self-host/operations.md#export-cleanup)).
+Sessions and server keys with `artifacts` can export; keys stay within their organization and project restrictions. Objects live in the private bucket under `exports/<orgId>/<projectId>/<exportId>.zip` with an `Expires` header and `docslurp-expires-at` metadata; the API's maintenance sweep deletes them. A bucket lifecycle rule that expires `exports/` after 8 days is a useful backstop (see [operations](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/operations.md#export-cleanup)).
 
 ## Primary sponsor
 

@@ -238,11 +238,11 @@ export class StructuredExtractStage implements Stage {
           artifactSlot,
           "structured extraction complete",
           async () => {
-            if (geoSchemaFields(outputSchema).length && (!state.store?.beginGeoAttempt || !state.run.projectId || !state.run.orgId)) {
+            if (geoSchemaFields(outputSchema).length && (!state.store || !state.run.projectId || !state.run.orgId)) {
               throw new Error("Geo extraction requires a scoped persistent store");
             }
             const geoAttempt = geoSchemaFields(outputSchema).length
-              ? await state.store!.beginGeoAttempt!(state, document.id, outputSchema) : undefined;
+              ? await state.store!.records.beginGeoAttempt(state, document.id, outputSchema) : undefined;
             const pageCount = Math.max(1, document.pageCount);
             await emitDocumentPageProgress(
               state,
@@ -436,6 +436,14 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                   documentId: document.id,
                   window: windowIndex + 1,
                   windows: plan.windows.length,
+                  // The request settings (the text call's, plus how the document was windowed), never the schema or prompt.
+                  modelConfig: {
+                    operation: "structured-extraction",
+                    maxOutputTokens: extractionConfig.maxOutputTokens,
+                    ...recordOf(result.usage.metadata?.modelConfig),
+                    windows: plan.windows.length,
+                    windowChars: window.text.length,
+                  },
                 },
               });
             };
@@ -703,4 +711,8 @@ export function buildStructuredFieldsEnvelopeSchema(outputSchema: Record<string,
     },
     required: ["fields"],
   };
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }

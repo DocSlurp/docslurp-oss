@@ -11,7 +11,7 @@ const shared = new URL("../packages/shared/src/", import.meta.url);
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "@docslurp/shared") {
-      const source = `export * from "${new URL("runtime-environment.ts", shared)}"; export * from "${new URL("parse-source-decision.ts", shared)}";`;
+      const source = `export * from "${new URL("runtime-environment.ts", shared)}"; export * from "${new URL("parse-source-decision.ts", shared)}"; export * from "${new URL("deployment-profile.ts", shared)}"; export * from "${new URL("capability-pools.ts", shared)}";`;
       return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true };
     }
     if (specifier.endsWith(".js") && context.parentURL?.endsWith(".ts")) {

@@ -16,7 +16,7 @@
  *   1. adopt pending uploads a crashed attempt left (streamed SHA-256, no VM);
  *   2. if a runnable unit remains (below #355's per-unit and per-document caps): the lease is extended for the unit's
  *      pages (heartbeat), the launch is counted (lifetime and per organization per day), the unit's stored manifest only
- *      (none for a gap: a fresh pass over its pages becomes its shard), the provider's `figures.resume` in a fresh VM, the
+ *      (none for a gap: a fresh pass over its pages becomes its shard), the provider's `figures.resume` in a VM, the
  *      folder validated whole (resume mode: stored images keep their digest), new files stored pending → stored with
  *      conditional creates, figure files only (`folderFiles: false`); the new manifests are staged by content before the
  *      ledger write and published after it, the index rebuilt after it with the stored Markdown's markers (unsharded);
@@ -54,10 +54,10 @@ import {
   type DocumentAssetLedgerScope, type FigureObjectReader,
 } from "../db/document-asset-ledger.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
-import { documentParseSource } from "../db/store.js";
+import { documentParseSource } from "../db/document-records.js";
 import { isUnscannedParseSourceKey } from "../lib/parse-source.js";
 import { SourceRefusalError, stageSourceFile } from "../sandbox/source-integrity.js";
-import { spendBlockCode, spendCheckConfig } from "../db/spend-check.js";
+import { orgSpendRefusal } from "../db/spend-check.js";
 import {
   DopplerFigureRejection, disposeDopplerFigureSet, dopplerFolderKey, downloadDopplerImagesDir, readDopplerFigureDir, storeDopplerFigureIndex,
   storeDopplerFigures, storeDopplerFolderManifests, type DopplerFigureSet, type DopplerFigureStorage, type DopplerFolderReader,
@@ -216,9 +216,7 @@ export async function claimFigureResume(sql: Client, workerId: string, env: Reco
       const spent = resumeBudgetBlock(row, env);
       if (spent) { await block(tx as unknown as Client, row, spent, budgetDetail(row, env)); continue; }
       // A resume adds billable stored bytes: never for an organization that may not spend now (re-queued later).
-      const [spend] = await tx<Array<{ funded: boolean | null; available: string | number; project_budget_paused: boolean; org_budget_paused: boolean; project_in_org: boolean }>>`
-        select funded, available, project_budget_paused, org_budget_paused, project_in_org from org_spend_status(${row.org_id}, ${row.project_id}::text, 0)`;
-      if (spendCheckConfig().enabled && spendBlockCode(spend ? { ...spend, org_id: row.org_id } : spend)) {
+      if (await orgSpendRefusal(tx as unknown as Client, { orgId: row.org_id, projectId: row.project_id })) {
         await tx`update document_extraction_levels set resume_after = now() + interval '1 hour' where document_id = ${row.document_id} and org_id = ${row.org_id}`;
         console.log(`[doppler-figures] resume deferred doc=${row.document_id} reason=spend-paused`);
         recordFigureTelemetry("resume.deferred", 1, { reason: "spend-paused" });
@@ -660,7 +658,7 @@ async function resumeUnit(
     }
     // 2. The parse source quarantine decided (lib/parse-source.ts, R6-H1), never the upload: an encrypted PDF's scanned copy,
     //    or the upload exactly as the scan read it; hash-bound when staged (stageSourceFile). The provider stages it into a
-    //    fresh VM (the host never parses it), counted before it starts and timed whatever happens.
+    //    VM (the host never parses it), counted before it starts and timed whatever happens.
     source = await stageSourceFile(deps.storage, { id: row.document_id, ...parse! }, "figure-resume-source-*.pdf");
     const outDir = path.join(work, "out");
     await mkdir(outDir, { mode: 0o700 });
@@ -732,7 +730,9 @@ async function resumeUnit(
       }
       // The new manifest staged by content before any file (R2-L4): a crash anywhere later still finds it.
       await storeDopplerFolderManifests({ storage: deps.storage, set, document, runId: row.run_id, phase: "stage", signal });
-      const ledger = figureLedgerHooks({ store: { markAssetsPending: (args) => markAssetsPending(deps.sql, args), markAssetsStored: (args) => markAssetsStored(deps.sql, args) }, run: { id: row.run_id, orgId: row.org_id, projectId: row.project_id } }, row.document_id, row.lease);
+      // No repair hook (as before): the resume runner's writes are fenced by its lease, and an object it cannot vouch for fails
+      // the resume rather than being replaced.
+      const ledger = figureLedgerHooks({ store: { assets: { markAssetsPending: (args) => markAssetsPending(deps.sql, args), markAssetsStored: (args) => markAssetsStored(deps.sql, args), replaceUnvouchedObject: null } }, run: { id: row.run_id, orgId: row.org_id, projectId: row.project_id } }, row.document_id, row.lease);
       // Figure files only: the folder's manifests, Markdown and index are never rewritten before the ledger commits.
       const result = await storeDopplerFigures({ storage: deps.storage, document, runId: row.run_id, figures: set, markdown: "", folderFiles: false, ...(ledger ? { ledger } : {}), signal });
       const pending = ledgerWriteForStoredFigures({ set, stored: result, outcome });

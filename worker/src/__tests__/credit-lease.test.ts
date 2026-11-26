@@ -418,9 +418,9 @@ describe("worker checkpoints", () => {
     await vi.waitFor(() => expect(leases.grants).toBe(1));
     [lease] = await sql<{ granted: number; consumed: number }[]>`select granted, consumed from credit_leases where holder_id = ${runId!}`;
     expect(Number(lease!.granted) - Number(lease!.consumed)).toBeGreaterThan(2);
-    const [run] = await sql<{ pages: number; credits: number; cost: number }[]>`
+    const [run] = await sql<{ pages: string; credits: number; cost: number }[]>`
       select spend_unchecked_pages as pages, spend_unchecked_credits as credits, spent_cents as cost from project_runs where id = ${runId!}`;
-    expect(run).toMatchObject({ pages: 0 });
+    expect(run).toMatchObject({ pages: "0" });
     expect(Number(run!.credits)).toBe(0);
     expect(Number(run!.cost)).toBe(8);
     // The lease and the run cap take the same per-checkpoint delta.
@@ -480,9 +480,9 @@ describe("worker checkpoints", () => {
     await finishPage(leases, "o", runId!, 1, 2);
     expect(leases.grants).toBe(0);
     expect(await sql`select 1 from credit_leases`).toHaveLength(0);
-    const [run] = await sql<{ pages: number; credits: number }[]>`
+    const [run] = await sql<{ pages: string; credits: number }[]>`
       select spend_unchecked_pages as pages, spend_unchecked_credits as credits from project_runs where id = ${runId!}`;
-    expect(run!.pages).toBe(1);
+    expect(run!.pages).toBe("1");
     expect(Number(run!.credits)).toBe(2);
   });
 });

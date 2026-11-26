@@ -28,6 +28,8 @@ pub mod range;
 mod features;
 #[path = "inline.rs"]
 mod inline;
+#[path = "encoding.rs"]
+mod encoding;
 
 /// Decompressed bytes of one content stream or form XObject.
 const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
@@ -44,6 +46,12 @@ const MAX_LOAD_STREAM_BYTES: usize = 16 * 1024 * 1024;
 /// Decompressed bytes of all object streams together (`budget_object_streams`): lopdf decodes and keeps every object
 /// stream at load time with only a per-stream limit.
 const MAX_OBJECT_STREAM_BYTES: usize = 64 * 1024 * 1024;
+/// lopdf's loader keeps every object in memory: 1.0 to 1.25 KiB each on wasm32 beyond the input itself (measured on
+/// real PDFs, streams included), charged at 1.25 KiB per object the trailer declares (`/Size`), plus the input's copy.
+const LOAD_BYTES_PER_OBJECT: u64 = 1280;
+/// What a whole-document load may take of the module's 256 MiB memory; past it the probe reads only the page tree. A
+/// file that declares too few objects still traps, and the host's bounded retry gives it a page count.
+const MAX_LOAD_BYTES: u64 = 224 * 1024 * 1024;
 /// Decompressed page content and form bytes per document, cached forms included.
 const MAX_DOCUMENT_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 /// A page with this much image coverage or this many path operations is layout-heavy (figures, charts, tables).
@@ -65,6 +73,13 @@ pub(super) fn probe(rules: &Rules, input: &ProbeInput<'_>) -> ProbeResult {
         let mut result = fallback_page_count(input.head, result).note("encrypted PDF; page facts not measured");
         result.encrypted = Some(true);
         return result;
+    }
+    // A document whose objects would not fit a whole load, or one the host retries after the module ran out of memory,
+    // gets its page count from a bounded read of the page tree instead (a declared /Size can lie low: the host retry
+    // covers that).
+    if input.bounded || !whole_load_fits(input.head) {
+        let note = if input.bounded { "retried without loading the whole document" } else { "too many objects to load the whole document" };
+        return bounded_page_count(input.head, result).note(format!("{note}; page facts not measured"));
     }
     OBJECT_STREAM_BUDGET.with(|budget| budget.set(MAX_OBJECT_STREAM_BYTES));
     OBJECT_STREAM_BUDGET_EXCEEDED.with(|exceeded| exceeded.set(false));
@@ -97,12 +112,14 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
     }
     let mut forms = FormCache::default();
     let mut readings: Vec<PageReading> = Vec::new();
+    let mut read_pages: Vec<(usize, ObjectId)> = Vec::new();
     for index in sample_indices(pages.len(), rules.max_sampled_pages) {
         if forms.document_budget_spent() {
             break;
         }
         if let Some(reading) = classify_page(routing, document, pages[index], &mut forms) {
             readings.push(reading);
+            read_pages.push((index, pages[index]));
         }
     }
     if readings.is_empty() {
@@ -113,7 +130,33 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
     let drawn = readings.iter().all(|reading| reading.blank(&repeated)) && drawn_document(routing, document, file_bytes, pages.len());
     let mut profile = PdfProfile { sampled_pages: readings.len() as u32, drawn_content: drawn, budget_exhausted: budget_hit, ..PdfProfile::default() };
     profile.furniture_images = repeated.len() as u32;
+    let encoding_rules = &rules.encoding;
+    let sampled_ids: HashSet<ObjectId> = read_pages.iter().map(|(_, id)| *id).collect();
+    // The structure tree is read only while the content budget lasts (pages that spent it end the reading); its reads
+    // come out of the encoding facts' own budget.
+    let tagged = (!forms.document_budget_spent()).then(|| {
+        let mut budget = encoding::Budget::new(forms.encoding_budget());
+        let left = budget.left;
+        let facts = encoding::struct_facts(document, encoding_rules, &sampled_ids, &mut budget);
+        forms.encoding_spend(left - budget.left);
+        facts
+    });
+    // Strip and table-shaped images repeated like page furniture (often too small to count as significant images).
+    let mut furniture = repeated.clone();
+    let mut shaped: HashMap<ObjectId, usize> = HashMap::new();
     for reading in &readings {
+        let on_page: HashSet<ObjectId> = reading.encoding.strips.iter().chain(&reading.encoding.table_images).filter_map(|id| *id).collect();
+        for id in on_page { *shaped.entry(id).or_insert(0) += 1; }
+    }
+    let scope = readings.len().max(1) as f64;
+    furniture.extend(shaped.into_iter().filter(|(_, pages)| *pages as f64 >= routing.repeated_image_min_pages && *pages as f64 / scope >= routing.repeated_image_min_share).map(|(id, _)| id));
+    profile.tagged_formulas = tagged.as_ref().map(|facts| facts.formulas);
+    profile.tagged_tables = tagged.as_ref().map(|facts| facts.tables);
+    profile.tagged_math_sources = tagged.as_ref().map(|facts| facts.sources);
+    profile.tagged_truncated = tagged.as_ref().is_some_and(|facts| facts.truncated).then_some(true);
+    let mut masks: Vec<(u16, u32)> = Vec::new();
+    let mut page_stats: Vec<PageStat> = Vec::new();
+    for (reading, (page_index, page_id)) in readings.iter().zip(&read_pages) {
         let totals = reading.totals(&repeated);
         let raster = is_raster_page(routing, reading.words, &totals);
         profile.words_per_page[bucket(&rules.words_per_page_buckets, reading.words, WORDS_BUCKETS)] += 1;
@@ -214,6 +257,30 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         if facts.ruled_table_heavy {
             profile.ruled_table_pages += 1;
         }
+        let word_boxes: Vec<[f64; 4]> = reading.words_at.iter().map(|w| [w.x - w.width / 2.0, w.y - w.height / 2.0, w.x + w.width / 2.0, w.y + w.height / 2.0]).collect();
+        let (mask, counts) = encoding::page_mask(encoding_rules, &reading.encoding, &encoding::PageView {
+            visible: reading.display_visible,
+            chars: reading.text.chars,
+            words: reading.words,
+            words_at: &word_boxes,
+            words_known: !reading.exhausted && !reading.words_overflow,
+            rules: &reading.rules.rules,
+            rules_known: !reading.exhausted && !reading.rules.overflow,
+            rule_thickness: rules.layout.rule_thickness_pt,
+            grids: facts.grids.as_ref().map(Vec::len),
+            exhausted: reading.exhausted,
+            images: totals.count,
+            path_operations: reading.path_operations,
+            repeated: &furniture,
+            // Unknown structure (not read): the page's tagged bits are unknown too.
+            tagged: tagged.as_ref().map_or(1 << encoding_rules.bits.partial, |facts| facts.pages.iter().filter(|entry| entry.0 == *page_id).fold(0, |bits, entry| bits | entry.1)),
+            document_mathml: tagged.as_ref().is_some_and(|facts| facts.document_mathml),
+        });
+        match masks.iter_mut().find(|entry| entry.0 == mask) {
+            Some(entry) => entry.1 += 1,
+            None => masks.push((mask, 1)),
+        }
+        page_stats.push(PageStat { page: *page_index as u32 + 1, mask, counts });
         // `pageCostRoute`: what production does with the page (scan-fill OCR, table path or text layer).
         let grids: Option<Vec<(u32, Option<f64>)>> = facts.grids.as_ref().map(|grids| grids.iter().map(|grid| (grid.0, Some(grid.2))).collect());
         let route = super::cost_route::page_cost_route(&rules.page_table_routing, &super::cost_route::PageCostFacts {
@@ -236,6 +303,8 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
     let square_inches = |value: f64| value.round().clamp(0.0, 1_000_000.0) as u32;
     profile.median_page_area_sq_in = square_inches(areas[areas.len() / 2]);
     profile.max_page_area_sq_in = square_inches(*areas.last().unwrap_or(&0.0));
+    profile.page_encodings = Some(encoding::sorted_keys(masks.iter().map(|entry| f64::from(entry.0))).into_iter().map(|(_, index)| masks[index]).collect());
+    PAGE_STATS.with(|slot| *slot.borrow_mut() = page_stats);
     if budget_hit {
         result.notes.push("a page hit the profiler's content budget; its facts are approximate".into());
     }
@@ -284,6 +353,75 @@ fn sample_indices(total: usize, count: usize) -> Vec<usize> {
     indices
 }
 
+/// The largest object count a `/Size` entry declares (trailers and xref streams; incremental updates repeat it). An
+/// array (`/Size [..]`, function dictionaries) is not a count and is skipped.
+fn declared_objects(bytes: &[u8]) -> u64 {
+    let mut most = 0u64;
+    let mut at = 0usize;
+    while let Some(found) = bytes[at..].windows(5).position(|window| window == b"/Size") {
+        let mut cursor = at + found + 5;
+        while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\r' | b'\n' | b'\t' | b'\x0c' | b'\0') {
+            cursor += 1;
+        }
+        let digits = bytes[cursor..].iter().take_while(|byte| byte.is_ascii_digit()).take(10).fold(0u64, |n, byte| n * 10 + u64::from(byte - b'0'));
+        most = most.max(digits);
+        at = cursor.max(at + found + 1);
+    }
+    most
+}
+
+/// Whether lopdf's whole-document load fits the module memory, from the declared objects and the input size.
+fn whole_load_fits(bytes: &[u8]) -> bool {
+    declared_objects(bytes).saturating_mul(LOAD_BYTES_PER_OBJECT).saturating_add(bytes.len() as u64) <= MAX_LOAD_BYTES
+}
+
+/// The page count from the bounded range reader (`range::RangeSession`, inventory only, no page deep-measured) over the
+/// bytes in hand: it parses the xref and page tree lazily under its own object, read and decode limits. Falls back to
+/// the raw page-object scan when the reader refuses the document.
+fn bounded_page_count(bytes: &[u8], result: ProbeResult) -> ProbeResult {
+    match range_inventory_pages(bytes) {
+        Ok(pages) if pages > 0 => {
+            let mut result = result;
+            result.pages = Some(pages as f64);
+            result.note("page count read from the page tree")
+        }
+        Ok(_) => fallback_page_count(bytes, result),
+        Err(error) => fallback_page_count(bytes, result).note(format!("page tree not read ({error})")),
+    }
+}
+
+fn range_inventory_pages(bytes: &[u8]) -> Result<usize, String> {
+    use self::range::{RangeSession, Request};
+    let options = self::detail::Options { max_deep_pages: 0, groups: Vec::new(), ranked_pages: 0, ..Default::default() };
+    let mut session = RangeSession::new(bytes.len() as u64, options, 0).map_err(|error| error.to_string())?;
+    let mut pages = None;
+    // Every step reads, emits or finishes; the reader's own budgets end a hostile walk long before this bound.
+    for _ in 0..10_000_000u32 {
+        let step = session.step().map_err(|error| error.to_string())?;
+        match step["kind"].as_str() {
+            Some("read") => {
+                let offset = step["offset"].as_u64().ok_or("bad read offset")? as usize;
+                let length = step["length"].as_u64().ok_or("bad read length")? as usize;
+                let request_id = step["requestId"].as_u64().ok_or("bad read id")?;
+                let end = offset.checked_add(length).filter(|end| *end <= bytes.len()).ok_or("read past the end")?;
+                session.supply(Request { request_id, offset: offset as u64, length }, &bytes[offset..end]).map_err(|error| error.to_string())?;
+            }
+            Some("output") => {
+                for line in step["jsonl"].as_str().unwrap_or_default().lines() {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                        if value["t"] == "end" {
+                            pages = value["inventoryPages"].as_u64().map(|n| n as usize);
+                        }
+                    }
+                }
+            }
+            Some("done") => return pages.ok_or_else(|| "no page inventory".to_owned()),
+            _ => return Err("unexpected range step".to_owned()),
+        }
+    }
+    Err("range walk did not finish".to_owned())
+}
+
 /// When the document does not parse, count `/Type /Page` objects in the raw bytes (misses compressed object streams).
 fn fallback_page_count(bytes: &[u8], mut result: ProbeResult) -> ProbeResult {
     let mut count = 0usize;
@@ -311,7 +449,20 @@ fn fallback_page_count(bytes: &[u8], mut result: ProbeResult) -> ProbeResult {
 struct FormCache {
     content: HashMap<ObjectId, Option<Rc<Vec<u8>>>>,
     decompressed: usize,
+    /// Font classes (`encoding::font_class`) per font dictionary (by its place in the loaded document, so direct fonts
+    /// are cached too), at most `MAX_CACHED_FONTS`; past that fonts are not classified and their glyphs make the page
+    /// partial.
+    fonts: HashMap<usize, usize>,
+    /// Bytes the encoding facts may read (font program and glyph procedure heads, associated files, text prefixes),
+    /// apart from the content budget so they never cut the pages sampled; set on first use.
+    encoding_left: Option<usize>,
+    /// Font program and glyph procedure answers per stream object (`encoding::stream_facts`).
+    streams: encoding::StreamMemo,
 }
+
+const MAX_CACHED_FONTS: usize = 4_096;
+/// Bytes the encoding facts may read per document (compressed plus decoded), apart from the content budget.
+const MAX_ENCODING_BYTES: usize = 8 * 1024 * 1024;
 
 impl FormCache {
     fn document_budget_spent(&self) -> bool {
@@ -321,6 +472,16 @@ impl FormCache {
     /// Bytes still allowed for one stream: the per-stream limit or what is left of the document budget.
     fn stream_limit(&self) -> usize {
         MAX_STREAM_BYTES.min(MAX_DOCUMENT_CONTENT_BYTES.saturating_sub(self.decompressed))
+    }
+
+    /// What the encoding facts may still read.
+    fn encoding_budget(&mut self) -> usize {
+        *self.encoding_left.get_or_insert(MAX_ENCODING_BYTES)
+    }
+
+    fn encoding_spend(&mut self, bytes: usize) {
+        let left = self.encoding_budget();
+        self.encoding_left = Some(left.saturating_sub(bytes));
     }
 
     fn charge(&mut self, bytes: usize) {
@@ -348,6 +509,25 @@ impl FormCache {
         self.charge(content.len());
         Some(Rc::new(content))
     }
+}
+
+/// One sampled page's line in the per-page stat stream (`PDF_PAGE_STAT_COUNTS` in `@docslurp/shared`): its 1-based
+/// page number, encoding mask and packed 4-bit count buckets. Never part of the file profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PageStat {
+    pub page: u32,
+    pub mask: u16,
+    pub counts: u32,
+}
+
+thread_local! {
+    /// The per-page stat lines of the last PDF probed (the module is single-threaded); taken by `take_page_stats`.
+    static PAGE_STATS: std::cell::RefCell<Vec<PageStat>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Clear the per-page stat lines before a probe, and take them after it.
+pub fn take_page_stats() -> Vec<PageStat> {
+    PAGE_STATS.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
 }
 
 thread_local! {
@@ -505,6 +685,8 @@ struct PageStats {
     /// Significant images (pixels and placed area over the rules' floors), at most `MAX_TRACKED_IMAGES_PER_PAGE`; the
     /// totals the class is read from are taken after repeated objects are dropped (`ImageTotals`).
     images: Vec<ImageUse>,
+    /// What the page's math and table encoding mask is read from.
+    encoding: encoding::PageEncoding,
 }
 
 const MAX_TRACKED_IMAGES_PER_PAGE: usize = 64;
@@ -718,17 +900,12 @@ fn page_resources(document: &Document, page_id: ObjectId) -> Vec<&Dictionary> {
 
 /// A composite (Type0) font, or a simple font with an Identity encoding, that has no ToUnicode map: its shown bytes are
 /// glyph ids, so the page's extracted text is likely unreadable.
-fn unmapped_font(document: &Document, resources: &[&Dictionary], name: &[u8]) -> bool {
-    let font = resources.iter().find_map(|resource| {
-        let fonts = resource.get(b"Font").ok().and_then(|object| dictionary(document, object))?;
-        fonts.get(name).ok().and_then(|object| dictionary(document, object))
-    });
-    let Some(font) = font else { return false };
+fn unmapped_font(document: &Document, font: &Dictionary) -> bool {
     if font.get(b"ToUnicode").is_ok() {
         return false;
     }
     let name_of = |key: &[u8]| match font.get(key).ok().and_then(|object| deref(document, object)).map(|(_, value)| value) {
-        Some(Object::Name(value)) => Some(value.clone()),
+        Some(Object::Name(value)) => Some(value.as_slice()),
         _ => None,
     };
     name_of(b"Subtype").is_some_and(|subtype| subtype == b"Type0")
@@ -785,6 +962,7 @@ struct PageReading {
     rules: layout::RuleSet,
     /// The visible box in displayed coordinates.
     display_visible: [f64; 4],
+    encoding: encoding::PageEncoding,
 }
 
 impl PageReading {
@@ -819,7 +997,7 @@ fn classify_page_checked(routing: &PageRasterRouting, document: &Document, page_
     let mut stats = PageStats::default();
     stats.rules.eligible_only = strict_validation;
     let display = layout::DisplaySpace::new(media, visible, page_rotate(document, page_id));
-    let mut context = Context { document, routing, forms, area, visible, media, limits, display, layout: &bundled.layout, strict_validation };
+    let mut context = Context { document, routing, forms, area, visible, media, limits, display, layout: &bundled.layout, encoding: &bundled.encoding, strict_validation };
     context.interpret(&content, &resources, IDENTITY, 0, &mut stats);
     if stats.exhausted && stats.text.chars > 0.0 {
         // A page with text that was not read to the end: estimate its glyphs from its own content stream's size (forms it
@@ -832,7 +1010,7 @@ fn classify_page_checked(routing: &PageRasterRouting, document: &Document, page_
         stats.text.estimated = true;
     }
     let (width, height) = ((visible[2] - visible[0]).max(0.0), (visible[3] - visible[1]).max(0.0));
-    Some(PageReading { vector_bounds:stats.vector_bounds, operations: stats.operations, lexical: if stats.exhausted || stats.unmapped_text || stats.words.encoding_unknown { None } else { Some(stats.words.characters > 0.0) }, words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, failure_bits: stats.failure_bits, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, words_at: stats.words_at, words_overflow: stats.words_overflow, rules: stats.rules, display_visible: display.visible })
+    Some(PageReading { vector_bounds:stats.vector_bounds, operations: stats.operations, lexical: if stats.exhausted || stats.unmapped_text || stats.words.encoding_unknown { None } else { Some(stats.words.characters > 0.0) }, words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, failure_bits: stats.failure_bits, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, words_at: stats.words_at, words_overflow: stats.words_overflow, rules: stats.rules, display_visible: display.visible, encoding: stats.encoding })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -996,6 +1174,7 @@ struct Context<'a, 'f> {
     limits: ExtractionLimitsCopy,
     display: layout::DisplaySpace,
     layout: &'a crate::rules::LayoutRules,
+    encoding: &'a crate::rules::PageEncodingRules,
 }
 
 /// The extraction limits a page is read with (from the profiler rules).
@@ -1040,11 +1219,14 @@ struct TextState {
     new_line: bool,
     /// The last string shown ended inside a word: a kerned continuation (TJ) does not start a new one.
     word_open: bool,
+    /// Horizontal displacement of TJ adjustments since the line's start, in text space: places runs for the encoding
+    /// facts only (the word estimates above keep their own rule).
+    kern: f64,
 }
 
 impl Default for TextState {
     fn default() -> Self {
-        Self { matrix: IDENTITY, line: IDENTITY, leading: 0.0, render_mode: 0, new_line: true, word_open: false }
+        Self { matrix: IDENTITY, line: IDENTITY, leading: 0.0, render_mode: 0, new_line: true, word_open: false, kern: 0.0 }
     }
 }
 
@@ -1112,6 +1294,11 @@ impl<'a> Context<'a, '_> {
             if !width.is_finite() || !height.is_finite() || width<=0.0 || height<=0.0{stats.words_overflow=true;continue;}
             stats.words_at.push(WordAt { x: dx, y: dy, glyphs: count as f64, width,height });
         }
+        // The run for the encoding facts: its baseline start (with TJ adjustments) and estimated end, displayed.
+        let start = multiply(&multiply(&[1.0, 0.0, 0.0, 1.0, text.kern, 0.0], &multiply(&[1.0, 0.0, 0.0, 1.0, -all * 0.5 * font_size, 0.0], &text.matrix)), ctm);
+        let end = multiply(&[1.0, 0.0, 0.0, 1.0, all * 0.5 * font_size, 0.0], &start);
+        let (a, b) = (self.display.point(start[4], start[5]), self.display.point(end[4], end[5]));
+        stats.encoding.shown(encoding::Run { x0: a.0.min(b.0), x1: a.0.max(b.0), y: a.1, size, math: false, symbol: false, unmapped: false, glyphs: 0.0 }, glyphs);
         let volume = &mut stats.text;
         if text.new_line {
             volume.lines += 1.0;
@@ -1127,14 +1314,18 @@ impl<'a> Context<'a, '_> {
         }
     }
 
-    fn record_image(&self, stats: &mut PageStats, id: Option<ObjectId>, ctm: &Matrix, width: f64, height: f64, stream_bytes: usize, bilevel: bool) {
+    #[allow(clippy::too_many_arguments)]
+    fn record_image(&self, stats: &mut PageStats, id: Option<ObjectId>, ctm: &Matrix, width: f64, height: f64, stream_bytes: usize, bilevel: bool, lossy: bool) {
         let placement = self.display.placement(ctm);
         let placed = (ctm[0] * ctm[3] - ctm[1] * ctm[2]).abs();
         let coverage = (placed / self.area).min(1.0);
-        if !coverage.is_finite()
-            || coverage < self.routing.min_significant_image_coverage
-            || width.min(height) < self.routing.min_significant_image_pixels
-        {
+        let significant = coverage.is_finite()
+            && coverage >= self.routing.min_significant_image_coverage
+            && width.min(height) >= self.routing.min_significant_image_pixels;
+        if let Some((bbox, _)) = placement {
+            stats.encoding.image(self.encoding, id, bbox, self.display.visible, (width, height), significant, lossy);
+        }
+        if !significant {
             return;
         }
         // Pixels per inch as placed on each axis, rounded as `pdfimages -list` prints them.
@@ -1168,6 +1359,45 @@ impl<'a> Context<'a, '_> {
         filtered || one_bit || mask
     }
 
+    /// A lossy image encoding (JPEG, JPEG 2000): photographs, rarely rendered tables.
+    fn lossy(&self, dict: &Dictionary, filter_keys: &[&[u8]]) -> bool {
+        let lossy = |name: &[u8]| matches!(name, b"DCTDecode" | b"DCT" | b"JPXDecode");
+        match filter_keys.iter().find_map(|key| dict.get(key).ok().and_then(|object| deref(self.document, object)).map(|(_, value)| value)) {
+            Some(Object::Name(name)) => lossy(name),
+            Some(Object::Array(filters)) => filters.iter().any(|filter| matches!(filter, Object::Name(name) if lossy(name))),
+            _ => false,
+        }
+    }
+
+    /// The class of font resource `name` (`encoding::font_class`, with `FONT_UNMAPPED` from `unmapped_font`), cached per
+    /// font dictionary so a page switching fonts reads each once. Its stream reads come out of the encoding facts' own
+    /// budget; once that or the cache is spent, a font is still classified by name, and one that would need a read is
+    /// unknown.
+    fn font_class(&mut self, resources: &[&Dictionary], name: &[u8]) -> u8 {
+        let found = resources.iter().find_map(|resource| {
+            let fonts = resource.get(b"Font").ok().and_then(|object| dictionary(self.document, object))?;
+            fonts.get(name).ok().and_then(|object| dictionary(self.document, object))
+        });
+        let Some(font) = found else { return 0 };
+        let key = font as *const Dictionary as usize;
+        if let Some(class) = self.forms.fonts.get(&key) {
+            return *class as u8;
+        }
+        let unmapped = unmapped_font(self.document, font);
+        let cacheable = self.forms.fonts.len() < MAX_CACHED_FONTS;
+        // Detail and range sessions (strict validation) do not report encoding facts: they classify by name only and
+        // read no font program or glyph procedure.
+        let reads = cacheable && !self.strict_validation;
+        let mut budget = encoding::Budget::new(if reads { self.forms.encoding_budget() } else { 0 });
+        let left = budget.left;
+        let class = encoding::font_class(self.document, font, unmapped, &mut budget, &mut self.forms.streams);
+        if cacheable {
+            self.forms.encoding_spend(left - budget.left);
+            self.forms.fonts.insert(key, usize::from(class));
+        }
+        class
+    }
+
     fn image_size(&self, dict: &Dictionary, width_key: &[u8], height_key: &[u8]) -> (f64, f64) {
         let read = |key: &[u8]| {
             dict.get(key).ok().and_then(|object| deref(self.document, object)).and_then(|(_, value)| number(value)).unwrap_or(0.0)
@@ -1188,12 +1418,17 @@ impl<'a> Context<'a, '_> {
         let content = normalized.as_ref().map(|n|n.content.as_slice()).unwrap_or(content);
         let mut inline_index = 0usize;
         let mut ctm = base;
-        let mut stack: Vec<(Matrix, f64)> = Vec::new();
+        // The graphics state q/Q saves: the transformation, the line width and the encoding facts' font class (a form or
+        // a q/Q block selecting a math font does not make the text after it math).
+        let mut stack: Vec<(Matrix, f64, u8)> = Vec::new();
         let mut line_width = 1.0_f64;
         let mut path = layout::PathBuilder::default();
         if self.strict_validation { path.detailed_min_length = Some(self.layout.rule_min_length_pt); }
         let mut font_size = 12.0;
         let mut font_unmapped = false;
+        // The path under construction for the encoding facts: its curves and displayed box.
+        let mut path_curves = 0u32;
+        let mut path_box: Option<[f64; 4]> = None;
         let mut text = TextState::default();
         for operation in Content::decode_iter(content) {
             let Ok(operation) = operation else { stats.fail(4); break };
@@ -1204,8 +1439,14 @@ impl<'a> Context<'a, '_> {
             }
             let operands = &operation.operands;
             match operation.operator.as_str() {
-                "q" if stack.len() < 256 => stack.push((ctm, line_width)),
-                "Q" => (ctm, line_width) = stack.pop().unwrap_or((base, line_width)),
+                "q" if stack.len() < 256 => stack.push((ctm, line_width, stats.encoding.font)),
+                // A save past the stack, or a restore with nothing saved, leaves the font in force unknown.
+                "q" => stats.encoding.unknown = true,
+                "Q" => match stack.pop() {
+                    Some(saved) => (ctm, line_width, stats.encoding.font) = saved,
+                    // Nothing saved (a stray trailing Q is a common writer slip): only text shown after it is in doubt.
+                    None => { (ctm, line_width) = (base, line_width); stats.encoding.unbalanced = true; }
+                },
                 "w" => line_width = operands.first().and_then(number).filter(|width| width.is_finite()).unwrap_or(line_width),
                 "cm" => {
                     if let Some(matrix) = matrix_from(operands) {
@@ -1222,6 +1463,7 @@ impl<'a> Context<'a, '_> {
                     text.word_open = false;
                     text.line = multiply(&[1.0, 0.0, 0.0, 1.0, 0.0, -text.leading], &text.line);
                     text.matrix = text.line;
+                    text.kern = 0.0;
                     text.new_line = true;
                 }
                 "Tm" => {
@@ -1233,6 +1475,7 @@ impl<'a> Context<'a, '_> {
                         }
                         text.line = matrix;
                         text.matrix = matrix;
+                        text.kern = 0.0;
                     }
                 }
                 "TL" => text.leading = operands.first().and_then(number).unwrap_or(text.leading),
@@ -1240,7 +1483,9 @@ impl<'a> Context<'a, '_> {
                 "Tf" => {
                     font_size = operands.get(1).and_then(number).unwrap_or(font_size);
                     if let Some(Object::Name(name)) = operands.first() {
-                        font_unmapped = unmapped_font(self.document, resources, name);
+                        let class = self.font_class(resources, name);
+                        font_unmapped = class & encoding::FONT_UNMAPPED != 0;
+                        stats.encoding.font = class;
                     }
                 }
                 "Td" | "TD" => {
@@ -1253,6 +1498,7 @@ impl<'a> Context<'a, '_> {
                     }
                     text.line = multiply(&[1.0, 0.0, 0.0, 1.0, tx, ty], &text.line);
                     text.matrix = text.line;
+                    text.kern = 0.0;
                     if ty.abs() > 0.01 {
                         text.new_line = true;
                     }
@@ -1269,6 +1515,7 @@ impl<'a> Context<'a, '_> {
                     text.word_open = false;
                     text.line = multiply(&[1.0, 0.0, 0.0, 1.0, 0.0, -text.leading], &text.line);
                     text.matrix = text.line;
+                    text.kern = 0.0;
                     text.new_line = true;
                     if let Some(Object::String(bytes, _)) = operands.last() {
                         stats.words.show(bytes);
@@ -1289,8 +1536,9 @@ impl<'a> Context<'a, '_> {
                                 other if number(other).is_some_and(|gap| gap <= -200.0) => {
                                     stats.words.gap();
                                     text.word_open = false;
+                                    text.kern -= number(other).unwrap_or(0.0) / 1000.0 * font_size;
                                 }
-                                _ => {}
+                                other => text.kern -= number(other).unwrap_or(0.0) / 1000.0 * font_size,
                             }
                         }
                     }
@@ -1305,8 +1553,10 @@ impl<'a> Context<'a, '_> {
                     let points:Vec<_>=if operation.operator=="re" && values.len()==4 {
                         let (x,y,w,h)=(values[0],values[1],values[2],values[3]);vec![shown(x,y),shown(x+w,y),shown(x+w,y+h),shown(x,y+h)]
                     }else{values.chunks_exact(2).map(|xy|shown(xy[0],xy[1])).collect()};
+                    if matches!(operation.operator.as_str(), "c" | "v" | "y") { path_curves = path_curves.saturating_add(1); }
                     for (x,y) in points {
                         if x.is_finite() && y.is_finite() {
+                            path_box = Some(match path_box { Some(b) => [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)], None => [x, y, x, y] });
                             stats.vector_bounds=Some(match stats.vector_bounds {Some(b)=>[b[0].min(x),b[1].min(y),b[2].max(x),b[3].max(y)],None=>[x,y,x,y]});
                         }else{stats.fail(2);}
                     }
@@ -1329,6 +1579,21 @@ impl<'a> Context<'a, '_> {
                     // The line's width as drawn: scaled by the transformation in force.
                     let width = line_width.abs() * (ctm[0] * ctm[3] - ctm[1] * ctm[2]).abs().sqrt();
                     path.paint(stroke, fill, width, self.display.visible, &mut stats.rules, self.layout);
+                    stats.encoding.painted(fill, path_curves, path_box.take(), self.encoding);
+                    path_curves = 0;
+                }
+                "BDC" => {
+                    // Marked content with replacement text: inline properties or a named /Properties resource.
+                    let properties = match operands.get(1) {
+                        Some(Object::Dictionary(dict)) => Some(dict),
+                        Some(Object::Name(name)) => resources.iter().find_map(|resource| {
+                            dictionary(self.document, resource.get(b"Properties").ok()?)?.get(name).ok().and_then(|object| dictionary(self.document, object))
+                        }),
+                        _ => None,
+                    };
+                    if let Some(Object::String(text, _)) = properties.and_then(|dict| dict.get(b"ActualText").ok()).and_then(|object| deref(self.document, object)).map(|(_, value)| value) {
+                        stats.encoding.actual_text(text);
+                    }
                 }
                 "BI" => {
                     if let Some(Object::Stream(image)) = operands.first() {
@@ -1337,8 +1602,9 @@ impl<'a> Context<'a, '_> {
                             (width, height) = self.image_size(&image.dict, b"Width", b"Height");
                         }
                         let bilevel = self.bilevel(&image.dict, &[b"F", b"Filter"], &[b"BPC", b"BitsPerComponent"], &[b"IM", b"ImageMask"]);
+                        let lossy = self.lossy(&image.dict, &[b"F", b"Filter"]);
                         let stored = normalized.as_ref().and_then(|n|n.stored_lengths.get(inline_index)).copied().unwrap_or(image.content.len());
-                        self.record_image(stats, None, &ctm, width, height, stored, bilevel);
+                        self.record_image(stats, None, &ctm, width, height, stored, bilevel, lossy);
                     }
                     inline_index += 1;
                 }
@@ -1350,7 +1616,8 @@ impl<'a> Context<'a, '_> {
                         Some(Object::Name(kind)) if kind == b"Image" => {
                             let (width, height) = self.image_size(&xobject.dict, b"Width", b"Height");
                             let bilevel = self.bilevel(&xobject.dict, &[b"Filter"], &[b"BitsPerComponent"], &[b"ImageMask"]);
-                            self.record_image(stats, id, &ctm, width, height, xobject.content.len(), bilevel);
+                            let lossy = self.lossy(&xobject.dict, &[b"Filter"]);
+                            self.record_image(stats, id, &ctm, width, height, xobject.content.len(), bilevel, lossy);
                         }
                         Some(Object::Name(kind)) if kind == b"Form" && depth < MAX_FORM_DEPTH => {
                             stats.form_calls += 1;
@@ -1377,7 +1644,10 @@ impl<'a> Context<'a, '_> {
                             let own = xobject.dict.get(b"Resources").ok().and_then(|object| dictionary(self.document, object));
                             let mut form_resources: Vec<&Dictionary> = own.into_iter().collect();
                             form_resources.extend_from_slice(resources);
+                            // A form runs in its own saved graphics state (`Do` wraps it in q/Q).
+                            let font_before = stats.encoding.font;
                             self.interpret(&form_content, &form_resources, multiply(&matrix, &ctm), depth + 1, stats);
+                            stats.encoding.font = font_before;
                             if stats.exhausted {
                                 return;
                             }
@@ -1511,6 +1781,80 @@ mod tests {
         assert!(!has_name(b"(no names here)", b"Encrypt"));
     }
 
+    /// A classic-xref PDF of `pages` text pages and `filler` small objects, its trailer declaring `size` objects.
+    fn many_objects(pages: usize, filler: usize, size: Option<usize>) -> Vec<u8> {
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = vec![0usize];
+        let mut put = |out: &mut Vec<u8>, number: usize, body: &str| {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{number} 0 obj\n{body}\nendobj\n").as_bytes());
+        };
+        let kids: Vec<String> = (0..pages).map(|i| format!("{} 0 R", 3 + 2 * i)).collect();
+        put(&mut out, 1, "<< /Type /Catalog /Pages 2 0 R >>");
+        put(&mut out, 2, &format!("<< /Type /Pages /Kids [{}] /Count {pages} >>", kids.join(" ")));
+        for i in 0..pages {
+            let content = "BT /F1 12 Tf 72 720 Td (Revenue beat the forecast.) Tj ET";
+            put(&mut out, 3 + 2 * i, &format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R >>", 4 + 2 * i));
+            put(&mut out, 4 + 2 * i, &format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()));
+        }
+        for i in 0..filler {
+            put(&mut out, 3 + 2 * pages + i, &format!("<< /A {i} >>"));
+        }
+        let count = offsets.len();
+        let xref = out.len();
+        out.extend_from_slice(format!("xref\n0 {count}\n0000000000 65535 f \n").as_bytes());
+        for offset in &offsets[1..] {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", size.unwrap_or(count)).as_bytes());
+        out
+    }
+
+    #[test]
+    fn reads_the_largest_declared_object_count() {
+        assert_eq!(declared_objects(b"trailer << /Size 12 /Root 1 0 R >>"), 12);
+        // Incremental updates repeat /Size; the largest counts. Arrays (function dictionaries) are not counts.
+        assert_eq!(declared_objects(b"<< /Size 9 >> << /Size [2 2] >> << /Size\r\n 40 /Root 1 0 R >>"), 40);
+        assert_eq!(declared_objects(b"<< /Type /XRef /Size 754193 /W [1 4 2] >>"), 754_193);
+        assert_eq!(declared_objects(b"no counts here /Siz"), 0);
+        // At most ten digits are read, so an absurd count cannot overflow; it only sends the file down the bounded path.
+        assert!(declared_objects(b"<< /Size 99999999999999999999999 >>") > 1_000_000);
+    }
+
+    #[test]
+    fn loads_documents_whose_objects_fit_and_reads_only_the_page_tree_of_bigger_ones() {
+        let small = many_objects(3, 100, None);
+        assert!(whole_load_fits(&small));
+        let fits = probe(Rules::bundled(), &ProbeInput::whole("a.pdf", None, &small));
+        assert_eq!(fits.pages, Some(3.0));
+        assert!(fits.pdf.is_some());
+        // Declares more objects than a whole load may take: page count from the page tree, no page facts.
+        let declared = many_objects(3, 100, Some(500_000));
+        assert!(!whole_load_fits(&declared));
+        let bounded = probe(Rules::bundled(), &ProbeInput::whole("b.pdf", None, &declared));
+        assert_eq!(bounded.pages, Some(3.0));
+        assert!(bounded.pdf.is_none());
+        assert!(bounded.notes.iter().any(|note| note.contains("too many objects")), "{:?}", bounded.notes);
+        assert!(bounded.notes.iter().any(|note| note.contains("page tree")), "{:?}", bounded.notes);
+        // The host's retry after a trap asks for the bounded path whatever the file declares.
+        let retry = probe(Rules::bundled(), &ProbeInput { bounded: true, ..ProbeInput::whole("c.pdf", None, &small) });
+        assert_eq!(retry.pages, Some(3.0));
+        assert!(retry.pdf.is_none());
+        assert!(retry.notes.iter().any(|note| note.contains("retried without loading")), "{:?}", retry.notes);
+    }
+
+    #[test]
+    fn falls_back_to_raw_page_objects_when_the_page_tree_cannot_be_read() {
+        // A startxref pointing nowhere: no xref the bounded reader can follow, but the page objects are still there.
+        let whole = many_objects(2, 10, Some(900_000));
+        let at = whole.windows(10).rposition(|window| window == b"startxref\n").unwrap() + 10;
+        let mut broken = whole[..at].to_vec();
+        broken.extend_from_slice(b"7\n%%EOF\n");
+        let result = probe(Rules::bundled(), &ProbeInput::whole("t.pdf", None, &broken));
+        assert_eq!(result.pages, Some(2.0));
+        assert!(result.notes.iter().any(|note| note.contains("raw page objects")), "{:?}", result.notes);
+    }
+
     #[test]
     fn samples_evenly_with_both_ends() {
         assert_eq!(sample_indices(5, 24), vec![0, 1, 2, 3, 4]);
@@ -1567,6 +1911,7 @@ mod tests {
             words_overflow: false,
             rules: layout::RuleSet::default(),
             display_visible: [0.0, 0.0, 612.0, 792.0],
+            encoding: encoding::PageEncoding::default(),
         };
         // The same full-bleed background on four pages: furniture, so the pages are blank.
         let slides = vec![page(&[7]), page(&[7]), page(&[7]), page(&[7])];

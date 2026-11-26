@@ -6,7 +6,9 @@
  * cost today, plus the reservations of its unsettled jobs, plus this job's reservation, stays within the cap. Admission
  * is atomic (the organization's advisory lock in Postgres, one process in memory), so concurrent workers cannot pass the
  * cap together. A job settles its ticket with the provider cost it recorded; a ticket never settled keeps its reservation
- * for the rest of the day (fail closed).
+ * for the rest of the day (fail closed). A job its provider gave way before any compute ran releases its ticket instead
+ * (releaseUnused): only that organization's own, still unsettled, cost-free ticket goes back to 0; anything else is refused
+ * and the caller settles at the reservation.
  */
 import { randomUUID } from "node:crypto";
 
@@ -26,6 +28,12 @@ export interface PageReaderOrgBudget {
   admit(request: PageReaderAdmitRequest): Promise<PageReaderAdmission>;
   /** Replace the ticket's reservation with the cost the job recorded. */
   settle(ticket: string, costCents: number): Promise<void>;
+  /**
+   * Settle `ticket` at 0 because its job never ran compute (a provider give-way before any VM ran). Only a ticket of
+   * `orgId` that is still unsettled and has recorded no cost is released; returns false otherwise (the caller then settles
+   * it at no less than its reservation).
+   */
+  releaseUnused(ticket: string, orgId: string): Promise<boolean>;
   /** The organization's committed reader cost today (settled cost plus open reservations), read without a reservation. */
   committedCents(orgId: string): Promise<number>;
 }
@@ -71,6 +79,13 @@ export class InMemoryPageReaderOrgBudget implements PageReaderOrgBudget {
     const row = this.tickets.get(ticket);
     if (row) Object.assign(row, { cost: cents(costCents), settled: true });
   }
+
+  async releaseUnused(ticket: string, orgId: string): Promise<boolean> {
+    const row = this.tickets.get(ticket);
+    if (!ticket || !orgId || !row || row.orgId !== orgId || row.settled || row.cost !== 0) return false;
+    Object.assign(row, { cost: 0, settled: true });
+    return true;
+  }
 }
 
 type Client = Sql<Record<string, unknown>>;
@@ -114,6 +129,15 @@ export class PostgresPageReaderOrgBudget implements PageReaderOrgBudget {
 
   async settle(ticket: string, costCents: number): Promise<void> {
     await this.sql`update ocr_page_reader_org_spend set cost_cents = ${cents(costCents)}, settled = true where id = ${ticket}`;
+  }
+
+  async releaseUnused(ticket: string, orgId: string): Promise<boolean> {
+    if (!ticket || !orgId) return false;
+    const rows = await this.sql<{ id: string }[]>`
+      update ocr_page_reader_org_spend set cost_cents = 0, settled = true
+      where id = ${ticket} and org_id = ${orgId} and settled = false and cost_cents = 0
+      returning id`;
+    return rows.length === 1;
   }
 }
 

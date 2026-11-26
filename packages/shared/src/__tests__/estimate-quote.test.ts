@@ -54,8 +54,8 @@ describe("quoteEstimate", () => {
     const lean = quoteEstimate({ files: [{ ...files[0]!, profile: { ...files[0]!.profile, pdf: { ...files[0]!.profile.pdf!, sampledWords: 9_000, sampledChars: 54_000, charsByFontSize: [0, 0, 0, 54_000, 0] } } }], settings: { indexing: "on-demand" } }, { env: BILLED });
     const full = quoteEstimate({ files: [{ ...files[0]!, profile: { ...files[0]!.profile, pdf: { ...files[0]!.profile.pdf!, sampledWords: 9_000, sampledChars: 54_000, charsByFontSize: [0, 0, 0, 54_000, 0] } } }] }, { env: BILLED });
     expect(lean.hosting.bytes.high).toBeLessThan(full.hosting.bytes.high);
-    const fast = quoteEstimate({ files, settings: { quality: "fast" } }, { env: BILLED });
-    expect(fast.ingest.credits!.high).toBeLessThan(base.ingest.credits!.high);
+    const ocr = quoteEstimate({ files, settings: { quality: "fastest" } }, { env: BILLED });
+    expect(base.ingest.credits!.high).toBeLessThan(ocr.ingest.credits!.high);
     const boosted = quoteEstimate({ files, settings: { speedBoost: true } }, { env: BILLED });
     expect(boosted.ingest.credits!.high).toBeGreaterThan(base.ingest.credits!.high);
   });
@@ -101,7 +101,7 @@ describe("quoteEstimate", () => {
     quoteEstimate(request, { env: BILLED });
     const runs = 20;
     const started = performance.now();
-    for (let i = 0; i < runs; i += 1) quoteEstimate({ ...request, settings: { quality: i % 2 ? "good" : "fast" } }, { env: BILLED });
+    for (let i = 0; i < runs; i += 1) quoteEstimate({ ...request, settings: { quality: i % 2 ? "smartest" : "fast" } }, { env: BILLED });
     const perQuote = (performance.now() - started) / runs;
     console.log(`[estimate-quote] 1,000 profiled files: ${perQuote.toFixed(2)} ms per quote`);
     expect(perQuote).toBeLessThan(150);

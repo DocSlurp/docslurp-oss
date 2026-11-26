@@ -49,20 +49,47 @@ function resolveIntakeTarget(flags: Record<string, string | boolean>): IntakeTar
   return { newProject: false, project: resolveProject(flags) };
 }
 
-const QUALITY_MODES = ["fast", "auto", "good"] as const;
+const QUALITY_LEVELS = ["fastest", "auto", "smartest"] as const;
+type Quality = (typeof QUALITY_LEVELS)[number];
+/** Deprecated `--quality` words and their replacements (still accepted during the window, with a note on stderr). */
+const LEGACY_QUALITY: Readonly<Record<string, { quality: Quality; readScans?: false }>> = {
+  balanced: { quality: "auto" }, smart: { quality: "smartest" },
+  fast: { quality: "fastest", readScans: false }, good: { quality: "smartest" },
+};
 
-/** `--quality fast|auto|good` as a pipeline override, or {} when the project setting applies. */
-export function resolveQualityPipeline(flags: Record<string, string | boolean>): { pipeline?: { quality: (typeof QUALITY_MODES)[number] } } {
-  if (flags.quality === undefined) return {};
-  const quality = typeof flags.quality === "string" ? flags.quality.trim().toLowerCase() : "";
-  if (!(QUALITY_MODES as readonly string[]).includes(quality)) throw new Error("--quality must be fast, auto or good.");
-  return { pipeline: { quality: quality as (typeof QUALITY_MODES)[number] } };
+/**
+ * `--quality fastest|auto|smartest` (or a deprecated word) and `--no-read-scans` as a pipeline override, or {} when the
+ * project setting applies.
+ */
+export function resolveQualityPipeline(flags: Record<string, string | boolean>): { pipeline?: { quality?: Quality; readScans?: false } } {
+  const readScans = flags.noReadScans === true ? { readScans: false as const } : {};
+  if (flags.quality === undefined) return flags.noReadScans === true ? { pipeline: readScans } : {};
+  const raw = typeof flags.quality === "string" ? flags.quality.trim().toLowerCase() : "";
+  const legacy = LEGACY_QUALITY[raw];
+  if (legacy) {
+    console.error(`Note: --quality ${raw} is deprecated; use --quality ${legacy.quality}${legacy.readScans === false ? " --no-read-scans" : ""}.`);
+    return { pipeline: { ...legacy, ...readScans } };
+  }
+  if (!(QUALITY_LEVELS as readonly string[]).includes(raw)) throw new Error("--quality must be fastest, auto or smartest.");
+  if (raw === "smartest" && flags.noReadScans === true) throw new Error("--no-read-scans works with --quality fastest only (Smartest always reads scans).");
+  return { pipeline: { quality: raw as Quality, ...readScans } };
 }
 
+/** The estimate endpoint uses pricing-profile IDs rather than ingestion presets. */
+function resolveQuoteQuality(flags: Record<string, string | boolean>): { quality: "fast" | "fastest" | "smartest" } | undefined {
+  const intake = resolveQualityPipeline(flags).pipeline;
+  if (!intake) return undefined;
+  if (intake.readScans === false || intake.quality === "fastest") return { quality: "fast" };
+  return { quality: intake.quality === "smartest" ? "smartest" : "fastest" };
+}
+
+const VISUALS_LEVELS = ["none", "figures", "charts", "charts-ai"] as const;
+type Visuals = (typeof VISUALS_LEVELS)[number];
 const CHART_EXPORT_TIERS = ["off", "free", "models"] as const;
 type ChartExportTier = (typeof CHART_EXPORT_TIERS)[number];
+const VISUALS_FOR_TIER: Readonly<Record<ChartExportTier, Visuals>> = { off: "figures", free: "charts", models: "charts-ai" };
 
-/** `--chart-export off|free|models` as a per-request override, or null when the project setting (or the API default, off) applies. */
+/** The deprecated `--chart-export off|free|models`, as the tier it names, or null when not given. */
 export function resolveChartExportFlag(flags: Record<string, string | boolean>): { tier: ChartExportTier } | null {
   if (flags.chartExport === undefined) return null;
   const tier = typeof flags.chartExport === "string" ? flags.chartExport.trim().toLowerCase() : "";
@@ -70,24 +97,61 @@ export function resolveChartExportFlag(flags: Record<string, string | boolean>):
   return { tier: tier as ChartExportTier };
 }
 
-/** `--quality` and `--chart-export` as one pipeline override, or {} when neither is given. */
-export function resolveIntakePipeline(flags: Record<string, string | boolean>): { pipeline?: { quality?: (typeof QUALITY_MODES)[number]; chartExport?: { tier: ChartExportTier } } } {
-  const quality = resolveQualityPipeline(flags).pipeline?.quality;
+/**
+ * `--visuals none|figures|charts|charts-ai`, or the deprecated `--chart-export` / `--no-figures` it replaces, or null
+ * when the project setting (or the deployment default) applies. Two flags that disagree are an error.
+ */
+export function resolveVisualsFlag(flags: Record<string, string | boolean>): Visuals | null {
+  const named: Array<{ flag: string; visuals: Visuals }> = [];
+  if (flags.visuals !== undefined) {
+    const raw = typeof flags.visuals === "string" ? flags.visuals.trim().toLowerCase() : "";
+    if (!(VISUALS_LEVELS as readonly string[]).includes(raw)) throw new Error("--visuals must be none, figures, charts or charts-ai.");
+    named.push({ flag: "--visuals", visuals: raw as Visuals });
+  }
   const chartExport = resolveChartExportFlag(flags);
-  const pipeline = { ...(quality ? { quality } : {}), ...(chartExport ? { chartExport } : {}) };
+  if (chartExport) {
+    console.error(`Note: --chart-export is deprecated; use --visuals ${VISUALS_FOR_TIER[chartExport.tier]}.`);
+    named.push({ flag: "--chart-export", visuals: VISUALS_FOR_TIER[chartExport.tier] });
+  }
+  if (flags.noFigures === true) {
+    console.error("Note: --no-figures is deprecated; use --visuals none.");
+    named.push({ flag: "--no-figures", visuals: "none" });
+  }
+  const values = new Set(named.map((entry) => entry.visuals));
+  if (values.size > 1) throw new Error(`${named.map((entry) => entry.flag).join(" and ")} disagree; use --visuals only.`);
+  return named[0]?.visuals ?? null;
+}
+
+/** `--quality` and `--visuals` (or their deprecated aliases) as one pipeline override, or {} when neither is given. */
+export function resolveIntakePipeline(flags: Record<string, string | boolean>): { pipeline?: { quality?: Quality; readScans?: false; visuals?: Visuals } } {
+  const qualityPipeline = resolveQualityPipeline(flags).pipeline ?? {};
+  const visuals = resolveVisualsFlag(flags);
+  const pipeline = { ...qualityPipeline, ...(visuals ? { visuals } : {}) };
   return Object.keys(pipeline).length ? { pipeline } : {};
+}
+
+/** Prints deprecation warnings a response carries (`warnings[]` with code `deprecated_field`) to stderr. */
+export function printDeprecationWarnings(body: unknown): void {
+  const warnings = body && typeof body === "object" ? (body as { warnings?: unknown }).warnings : undefined;
+  if (!Array.isArray(warnings)) return;
+  for (const warning of warnings) {
+    if (warning && typeof warning === "object" && (warning as { code?: unknown }).code === "deprecated_field") {
+      console.error(`Warning: ${String((warning as { message?: unknown }).message ?? "a deprecated field was used")}`);
+    }
+  }
 }
 
 function usage(): void {
   console.log(`Usage:
-  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--chart-export <off|free|models>] [--months <n>] [--json]
-  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--estimate] [--watch] [--api-url <url>]
+  docslurp estimate <files...> [--quality <fastest|auto|smartest>] [--no-read-scans] [--indexing <full|on-demand|visual>] [--visuals <none|figures|charts|charts-ai>] [--months <n>] [--json]
+  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|auto|smartest>] [--no-read-scans] [--visuals <none|figures|charts|charts-ai>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|auto|smartest>] [--no-read-scans] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
   docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
-  docslurp reprocess <runId> [--stage-from <stage>] [--chart-export <off|free|models>] [--estimate] [--watch]
+  docslurp reindex [--project <id|slug|name>] [--embedding-profile <profile>] [--late-chunking <on|off>] [--late-chunking-window <1-6>] [--chunk-overlap <on|off>] [--contextual-preambles <on|off>] [--vector-backends <a,b>] [--confirm <signature>] [--estimate] [--json]
+  docslurp reprocess <runId> [--stage-from <stage>] [--quality <fastest|auto|smartest>] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch]
   docslurp summary-tree backfill [--project <id|slug|name>] --max-cost-cents <n> [--estimate] [--watch] [--json]
   docslurp summary-tree status [--project <id|slug|name>] [--json]
   docslurp summary-tree cancel <jobId> [--project <id|slug|name>] [--json]
@@ -122,14 +186,19 @@ commands use the "default" project: your organization's default project.
 the same project. Uploads and URL ingests into a name that matches no project create
 it with that name (and --template, if given); other commands answer project not found.
 --new-project (or --template alone) uploads into a fresh self-titled project.
---quality sets processing quality for the upload (default: the project's, auto unless changed):
-fast reads the text layer only and keeps scanned pages as images, not read (lowest price);
-auto reads each page the cheapest faithful way (its price depends on the mix of pages);
-good reads every page with a vision model (highest price). Prices: https://docslurp.io/pricing
---chart-export sets chart and diagram export for this request (default: the project's setting,
-off for CLI and API calls when the project has none): off; free exports charts that carry
-their own data (Office charts, embedded chart specs, vector graphics) at no charge; models
-also reads other charts with AI, billed per chart read. upload --estimate and estimate price it.
+--quality sets processing quality for the upload (default: the project's, fastest unless changed):
+fastest reads each file with its native reader and sends only scanned pages and images to OCR, never
+to a vision model; add --no-read-scans to keep them as page images, not read (lowest price);
+smartest reads each file with its native reader and sends scans, images and hard math, layouts or
+fonts to a vision model. Prices: https://docslurp.io/pricing
+(balanced, smart, fast, auto and good are deprecated aliases.)
+--visuals sets figures and charts for this request (default: the project's setting, else the
+deployment's default, figures): none; figures keeps PDF figures as files; charts also exports
+charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no
+charge; charts-ai also reads other charts with AI, billed per chart read. upload --estimate and
+estimate price it. --chart-export off|free|models and --no-figures are deprecated aliases.
+smartest and charts-ai above the project's setting need project editor rights (or a key with
+the pipeline:billed-features scope).
 --estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
 Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
 --watch waits up to five minutes by default; --timeout sets its limit.
@@ -295,15 +364,15 @@ function normalizeCompatImportPayload(args: {
 /** Flags that take no value, by their command-line name, and the key commands read them as. */
 const BOOLEAN_FLAGS: Readonly<Record<string, string>> = {
   watch: "watch", json: "json", context: "context", estimate: "estimate", device: "device", force: "force", stream: "stream", stats: "stats",
-  "no-browser": "noBrowser", "no-email": "noEmail", "new-project": "newProject",
+  "no-browser": "noBrowser", "no-email": "noEmail", "new-project": "newProject", "no-figures": "noFigures", "no-read-scans": "noReadScans",
 };
 
 /** Flags that take a value (`--flag value` or `--flag=value`); the key is the camelCase name. */
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "project", "api-url", "api-key", "run", "source", "out", "queries-file", "concurrency", "min-score", "session", "canonical-id", "path",
-  "template", "document", "stage-from", "retention-days", "download", "quality", "chart-export", "idempotency-key",
+  "template", "document", "stage-from", "retention-days", "download", "quality", "visuals", "chart-export", "idempotency-key",
   "timeout", "limit", "cursor", "mode", "summary-tree", "tier", "reasoning", "months", "indexing", "model", "scopes", "profile",
-  "max-cost-cents",
+  "max-cost-cents", "embedding-profile", "chunk-overlap", "contextual-preambles", "confirm", "late-chunking", "late-chunking-window", "vector-backends",
 ]);
 
 const camel = (name: string) => name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
@@ -367,7 +436,12 @@ async function apiFetch(
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${await auth.token({ forceRefresh })}`);
     headers.set("X-DocSlurp-Client", cliClientTag);
-    return fetch(`${apiUrl}${pathname}`, { ...init, headers, signal: AbortSignal.timeout(Math.max(1, Math.ceil(requestTimeoutMs))) });
+    // A body-less POST goes out as an empty JSON object: the production API refuses an upload-path POST that has no
+    // content type (fetch's default when there is no body) with a 400.
+    const bodyless = init.body == null && /^(POST|PUT|PATCH)$/i.test(init.method ?? "GET");
+    if (bodyless && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    const body = bodyless ? "{}" : init.body;
+    return fetch(`${apiUrl}${pathname}`, { ...init, body, headers, signal: AbortSignal.timeout(Math.max(1, Math.ceil(requestTimeoutMs))) });
   };
   const response = await send(false);
   // A stored login refreshes once if the server refused its access token (for example after a clock skew).
@@ -385,6 +459,8 @@ function requestAuth(flags: Record<string, string | boolean>, apiUrl: string): P
 
 /** Same threshold as the SDK's DIRECT_UPLOAD_THRESHOLD_BYTES. */
 const DIRECT_UPLOAD_THRESHOLD_BYTES = 20 * 1024 * 1024;
+/** Files one direct upload session takes (the server's session schema). Larger uploads go up as several sessions, one run each. */
+const DIRECT_SESSION_MAX_FILES = 1000;
 
 /**
  * The type the file declares. The CLI keeps no format table of its own: the server resolves a missing or generic type from the file's
@@ -398,7 +474,10 @@ type DirectUploadDescriptor = {
   id: string; filename: string; mimeType: string; sizeBytes: number; mode: "single" | "multipart";
   /** Position in the create request and the client id sent with it: how a file is matched, never by (sanitized) filename. */
   index?: number | null; clientId?: string | null; status?: string;
-  putUrl?: string; partSize?: number; pendingParts?: Array<{ partNumber: number; sizeBytes: number; url: string }>;
+  // A part without `url` (the server signs a bounded number per session read; see partUrlsOmitted) is signed with parts/sign.
+  putUrl?: string; partSize?: number; pendingParts?: Array<{ partNumber: number; sizeBytes: number; url?: string }>; partUrlsOmitted?: boolean;
+  /** False when a large session's read did not check this file's object (see the session read's `inspected`). */
+  inspected?: boolean;
   completedParts?: Array<{ partNumber: number; etag: string }>;
 };
 type UploadRejection = { index?: number; clientId?: string; filename: string; statusCode: number; code: string; message: string };
@@ -406,6 +485,98 @@ type DirectSession = { sessionId: string; status?: string; files: DirectUploadDe
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Storage PUTs in flight at once, across every file and part of one upload. One stream is usually limited by round trips and the
+ * TCP window rather than the uplink, so a few parallel transfers fill the link; on a saturated uplink they share it. Bodies are
+ * file-backed blob slices, so memory does not grow with the limit.
+ */
+function uploadConcurrency(): number {
+  const raw = Number(process.env.DOCSLURP_UPLOAD_CONCURRENCY ?? 6);
+  return Number.isInteger(raw) && raw >= 1 && raw <= 32 ? raw : 6;
+}
+
+function limiter(limit: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async (task) => {
+    if (active >= limit) await new Promise<void>((resolve) => waiting.push(resolve));
+    else active++;
+    try { return await task(); }
+    finally { const next = waiting.shift(); if (next) next(); else active--; }
+  };
+}
+
+/** Runs `task` over `items` at most `limit` at a time. After the first failure no new item starts; it waits for those in flight, then throws that failure. */
+async function forEachLimited<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  let failure: { error: unknown } | null = null;
+  const lane = async () => {
+    while (!failure && next < items.length) {
+      const item = items[next++]!;
+      try { await task(item); } catch (error) { failure ??= { error }; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  if (failure) throw (failure as { error: unknown }).error;
+}
+
+const storageSlot = limiter(uploadConcurrency());
+/** `files/complete` and `confirm` take the session's lock, so this upload sends them one at a time. */
+const sessionSlot = limiter(1);
+
+/**
+ * The 409 code of a session-locked request: `upload_session_busy` when someone else holds the session's lock (the server's
+ * reconciler finalizing the session, or another request of this upload). Older servers send the generic `conflict` for that and
+ * for real conflicts alike, with a generic public message, so the caller asks the session which one it was.
+ */
+async function conflictCode(response: Response): Promise<string | null> {
+  if (response.status !== 409) return null;
+  try {
+    const body = await response.clone().json() as { code?: unknown; error?: { code?: unknown } | unknown };
+    const code = (body.error && typeof body.error === "object" ? (body.error as { code?: unknown }).code : undefined) ?? body.code;
+    return typeof code === "string" ? code : "conflict";
+  } catch {
+    return "conflict";
+  }
+}
+
+/** What the session says about an uncoded 409: the request already took effect, a repeat may succeed, or it is a real failure. */
+type SessionProbe = () => Promise<Response | "retry" | "fail">;
+
+/**
+ * Sends a session-locked request (`files/complete`, `confirm`; both idempotent, so a repeat is safe) one at a time per upload.
+ * It waits out a busy lock and rate limiting with backoff, and asks `probe` about an uncoded 409 from an older server.
+ */
+async function sendWhenSessionFree(send: () => Promise<Response>, flags: Record<string, string | boolean>, probe: SessionProbe, transient400 = 0): Promise<Response> {
+  // How long to wait out a held lock: --timeout when given, else a minute. A direct upload that is still locked out after
+  // that hands the rest to the server's reconciler (sessionCompleter), so a long wait buys nothing.
+  const waitMs = Number(flags.timeout) > 0 ? Number(flags.timeout) * 1000 : 60_000;
+  const giveUpAt = Date.now() + waitMs;
+  let bad400 = 0;
+  for (let attempt = 0; ; attempt++) {
+    const response = await sessionSlot(send);
+    const backoff = Math.min(2_000, 200 * 2 ** Math.min(attempt, 6)) * (0.5 + Math.random() / 2);
+    let waitMs: number;
+    if (response.status === 429) {
+      waitMs = Math.max(backoff, Math.min(30, retryAfterSeconds(response.headers.get("retry-after")) ?? 1) * 1000);
+    } else {
+      // An older server reports a transient storage failure while finalizing as a generic 400. Up to `transient400` times,
+      // ask the session: a file still pending in an open session is worth another try.
+      const code = response.status === 400 && bad400 < transient400 ? (bad400++, "conflict") : await conflictCode(response);
+      if (code === null || (code !== "upload_session_busy" && code !== "conflict")) return response;
+      if (code === "conflict") {
+        const verdict = await probe().catch(() => "retry" as const);
+        if (verdict instanceof Response) { await response.body?.cancel(); return verdict; }
+        if (verdict === "fail") return response;
+      }
+      waitMs = backoff;
+    }
+    if (Date.now() + waitMs >= giveUpAt) return response;
+    await response.body?.cancel();
+    await sleepMs(waitMs);
+  }
 }
 
 /** A timeout or a dropped connection: the request may or may not have reached the server. */
@@ -416,11 +587,11 @@ function isLostResponse(error: unknown): boolean {
 const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
 /** The server's coded 409 for a request whose Idempotency-Key is still being processed. */
-async function isInFlightConflict(response: Response): Promise<boolean> {
+async function isInFlightConflict(response: Response, retryBulkBusy: boolean): Promise<boolean> {
   try {
     const body = await response.clone().json() as { code?: unknown; error?: { code?: unknown } | unknown };
     const code = (body.error && typeof body.error === "object" ? (body.error as { code?: unknown }).code : undefined) ?? body.code;
-    return code === "idempotency_in_flight";
+    return code === "idempotency_in_flight" || (retryBulkBusy && code === "upload_session_busy");
   } catch {
     return false;
   }
@@ -439,7 +610,7 @@ async function apiFetchRepeatable(pathname: string, flags: Record<string, string
   for (let attempt = 0; ; attempt++) {
     try {
       const response = await apiFetch(pathname, flags, init, timeoutMs);
-      if (response.status === 409 && await isInFlightConflict(response)) {
+      if (response.status === 409 && await isInFlightConflict(response, pathname.endsWith("/bulk"))) {
         const wait = Math.min(2_000, 250 * 2 ** inFlight++);
         if (Date.now() + wait < giveUpAt) {
           await response.body?.cancel();
@@ -469,10 +640,11 @@ async function putToStorage(url: string, body: Blob, contentType?: string): Prom
   // Presigned URL: never send the API key to storage. A part is retried with backoff before the caller resumes from the server's view.
   for (let attempt = 0; ; attempt++) {
     try {
-      const response = await fetch(url, {
-        method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined,
-        signal: AbortSignal.timeout(Math.ceil(Math.max(60_000, 30_000 + (body.size / 100_000) * 1000))),
-      });
+      const response = await storageSlot(() => fetch(url, {
+        // 16 KB/s floor: several large parts may share a slow uplink. A presigned target is final: a redirect would re-send the bytes somewhere else.
+        method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined, redirect: "error",
+        signal: AbortSignal.timeout(Math.ceil(Math.max(60_000, 30_000 + (body.size / 16_000) * 1000))),
+      }));
       if (response.ok) return response.headers.get("etag");
       if (attempt >= 2 || !RETRYABLE_STATUSES.has(response.status)) throw await responseFailure(response);
       await response.body?.cancel();
@@ -484,19 +656,32 @@ async function putToStorage(url: string, body: Blob, contentType?: string): Prom
 }
 
 /** Sends one file (or its remaining parts). Returns the completion body for `files/complete`. */
-async function sendFile(descriptor: DirectUploadDescriptor, blob: Blob): Promise<Record<string, unknown>> {
+async function sendFile(descriptor: DirectUploadDescriptor, blob: Blob, signParts?: (partNumbers: number[]) => Promise<Array<{ partNumber: number; url: string }>>): Promise<Record<string, unknown>> {
   if (descriptor.mode === "single") {
     const etag = await putToStorage(descriptor.putUrl ?? "", blob, descriptor.mimeType);
     return { fileId: descriptor.id, ...(etag ? { etag } : {}) };
   }
   const parts: Array<{ partNumber: number; etag: string }> = [...(descriptor.completedParts ?? [])];
-  for (const part of descriptor.pendingParts ?? []) {
+  const pending = descriptor.pendingParts ?? [];
+  // Parts the session described without a URL are signed through parts/sign, 100 at a time.
+  const urls = new Map(pending.flatMap((part) => part.url ? [[part.partNumber, part.url] as const] : []));
+  const unsigned = pending.filter((part) => !part.url).map((part) => part.partNumber);
+  for (let start = 0; start < unsigned.length; start += 100) {
+    if (!signParts) throw new Error(`No upload URL for ${descriptor.filename} part ${unsigned[start]}`);
+    for (const part of await signParts(unsigned.slice(start, start + 100))) urls.set(part.partNumber, part.url);
+  }
+  let sent = 0;
+  // Parts share the upload's storage slots. A failed part stops new ones and waits for those in flight, so a resume never
+  // races a PUT of the same part.
+  await forEachLimited(pending, uploadConcurrency(), async (part) => {
     const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-    const etag = await putToStorage(part.url, blob.slice(start, start + part.sizeBytes));
+    const url = urls.get(part.partNumber);
+    if (!url) throw new Error(`No upload URL for ${descriptor.filename} part ${part.partNumber}`);
+    const etag = await putToStorage(url, blob.slice(start, start + part.sizeBytes));
     if (!etag) throw new Error(`Storage returned no ETag for ${descriptor.filename} part ${part.partNumber}`);
     parts.push({ partNumber: part.partNumber, etag });
-    console.error(`Uploaded ${descriptor.filename} part ${part.partNumber}/${(descriptor.pendingParts ?? []).length}`);
-  }
+    console.error(`Uploaded ${descriptor.filename} part ${part.partNumber} (${++sent}/${pending.length})`);
+  });
   return { fileId: descriptor.id, parts: parts.sort((a, b) => a.partNumber - b.partNumber) };
 }
 
@@ -512,8 +697,8 @@ function localFileFor(descriptor: DirectUploadDescriptor, files: Array<{ blob: B
 }
 
 /** After a lost confirm response, the session says whether intake already finished: poll it rather than confirming again. */
-async function pollConfirmedSession(sessionPath: string, flags: Record<string, string | boolean>): Promise<Response | null> {
-  const stopAt = Date.now() + Math.max(60_000, Number(flags.timeout ?? 30) * 1000);
+async function pollConfirmedSession(sessionPath: string, flags: Record<string, string | boolean>, minWaitMs = 60_000, intervalMs = 1000): Promise<Response | null> {
+  const stopAt = Date.now() + Math.max(minWaitMs, Number(flags.timeout ?? 30) * 1000);
   while (Date.now() < stopAt) {
     try {
       const response = await apiFetch(`${sessionPath}?statusOnly=true`, flags);
@@ -525,9 +710,237 @@ async function pollConfirmedSession(sessionPath: string, flags: Record<string, s
     } catch (error) {
       if (!isLostResponse(error)) throw error;
     }
-    await sleepMs(1000);
+    await sleepMs(intervalMs);
   }
   return null;
+}
+
+/** A coded busy session or a rate limit that outlasted our waits: nothing failed, the server just did not answer in time. */
+function isBusyFailure(error: unknown): boolean {
+  return error instanceof CliApiError && (error.status === 429 || (error.status === 409 && error.failure.code === "upload_session_busy"));
+}
+
+/** A server answer that names one remote file twice cannot be matched to local bytes: refuse it before anything moves. */
+function assertUniqueRemoteIds(ids: ReadonlyArray<string | undefined>, what: string): void {
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (typeof id !== "string" || !id) throw new Error(`Upload ${what} names a file without an id`);
+    if (seen.has(id)) throw new Error(`Upload ${what} names file ${id} more than once`);
+    seen.add(id);
+  }
+}
+
+/**
+ * The one descriptor for the original's id in a refreshed read, checked against the descriptor the local bytes were
+ * matched to (id, mode, size, and request index and client id where the original had them), so bytes never go to
+ * another file's targets.
+ */
+function refreshedDescriptor(files: readonly DirectUploadDescriptor[], original: DirectUploadDescriptor): DirectUploadDescriptor | undefined {
+  const matches = files.filter((file) => file.id === original.id);
+  if (matches.length > 1) throw new Error(`Upload session names file ${original.id} more than once`);
+  const fresh = matches[0];
+  if (!fresh) return undefined;
+  // A file matched without index and client id (an older server: by name and size) must keep its name too.
+  const legacyMatch = original.index == null && original.clientId == null;
+  const same = fresh.mode === original.mode && fresh.sizeBytes === original.sizeBytes
+    && (original.index == null || fresh.index === original.index)
+    && (original.clientId == null || fresh.clientId === original.clientId)
+    && (!legacyMatch || fresh.filename === original.filename);
+  if (!same) throw new Error(`Upload session describes ${original.filename} differently than before; not sending its bytes`);
+  return fresh;
+}
+
+/**
+ * Files a large session's read did not inspect (`inspected: false`): completed in batches of up to 100, so storage
+ * decides which still need bytes, then ONE `fileId` read per batch describes those. Only the explicit codes
+ * `upload_object_missing` and `upload_parts_incomplete` mean "send the bytes"; anything else is a failure. Only a coded
+ * busy session or a rate limit is waited out (an uncoded 409 is an answer: the probe says "fail").
+ */
+async function settleUninspected(sessionPath: string, uninspected: DirectUploadDescriptor[], flags: Record<string, string | boolean>): Promise<Map<string, DirectUploadDescriptor>> {
+  const resend = new Map<string, DirectUploadDescriptor>();
+  const post = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const answerOnly: SessionProbe = async () => "fail";
+  for (let start = 0; start < uninspected.length; start += COMPLETE_BATCH_MAX) {
+    const chunk = uninspected.slice(start, start + COMPLETE_BATCH_MAX);
+    const missing: string[] = [];
+    // Files answered retryable (the server's hold budget ran out: `upload_session_busy`; storage briefly unavailable:
+    // `upload_storage_unavailable`) go into the next batch, a few rounds with short waits.
+    let pending = chunk;
+    for (let round = 0; pending.length > 0; round++) {
+      const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, post({ files: pending.map((file) => ({ fileId: file.id })) })), flags, answerOnly);
+      if (!done.ok) throw await responseFailure(done);
+      const answer = await done.json() as { files?: Array<{ fileId?: string; status?: string; error?: { code?: string; message?: string; retryable?: boolean } }> };
+      if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
+      // Every result names a file this call sent, each once.
+      assertUniqueRemoteIds(answer.files.map((result) => result.fileId), "completion result");
+      const sent = new Set(pending.map((file) => file.id));
+      if (answer.files.some((result) => !sent.has(String(result.fileId)))) throw new Error("Upload completion result names a file this call did not send");
+      const byId = new Map(answer.files.map((result) => [result.fileId, result]));
+      const retry: DirectUploadDescriptor[] = [];
+      for (const file of pending) {
+        const result = byId.get(file.id);
+        if (result?.status === "completed") continue;
+        if (result?.error?.code && RESEND_COMPLETION_CODES.has(result.error.code)) { missing.push(file.id); continue; }
+        if (result?.error?.retryable) { retry.push(file); continue; }
+        throw new Error(`${file.filename}: ${result?.error?.message ?? "not completed"} (${result?.error?.code ?? "missing result"})`);
+      }
+      if (retry.length === 0) break;
+      if (round >= UNINSPECTED_RETRY_ROUNDS) {
+        // Still not finished: the session is busy, not broken. Answered as busy, so the upload keeps (and names) it.
+        throw new CliApiError(409, safeHttpFailure(409, { error: { code: "upload_session_busy" } }));
+      }
+      await sleepMs(UNINSPECTED_RETRY_DELAY_MS * 2 ** round);
+      pending = retry;
+    }
+    if (missing.length === 0) continue;
+    const query = missing.map((id) => `fileId=${encodeURIComponent(id)}`).join("&");
+    const refreshed = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}?${query}`, flags, {}), flags, answerOnly);
+    if (!refreshed.ok) throw await responseFailure(refreshed);
+    const state = await refreshed.json() as DirectSession;
+    if (["failed", "aborted", "expired"].includes(String(state.status ?? ""))) throw new Error(`Upload session ${String(state.status)}`);
+    const described = askedDescriptors(state.files, missing);
+    for (const id of missing) {
+      const original = chunk.find((file) => file.id === id)!;
+      const name = original.filename;
+      const fresh = refreshedDescriptor(described, original);
+      if (!fresh) throw new Error(`Upload session no longer has ${name}`);
+      if (fresh.status === "completed") continue;
+      if (fresh.status === "failed" || fresh.status === "aborted") throw new Error(`Upload of ${name} ${fresh.status}`);
+      resend.set(id, fresh);
+    }
+  }
+  return resend;
+}
+
+/**
+ * The descriptors of a `fileId`-filtered read for the files asked for. Every id in the read must be unique; files not
+ * asked for are ignored (an older server ignores the filter and describes every file), never used: bytes only go to
+ * the descriptor that `refreshedDescriptor` matches to the requested file.
+ */
+function askedDescriptors(files: readonly DirectUploadDescriptor[], asked: readonly string[]): DirectUploadDescriptor[] {
+  assertUniqueRemoteIds(files.map((file) => file.id), "session read");
+  const wanted = new Set(asked);
+  return files.filter((file) => wanted.has(file.id));
+}
+
+/** Extra completion rounds for uninspected files answered retryable, and the first wait between them (doubling). */
+const UNINSPECTED_RETRY_ROUNDS = 3;
+const UNINSPECTED_RETRY_DELAY_MS = 500;
+
+/** files/complete's answers that mean the file's bytes (or some parts) are not in storage: upload them, then complete. */
+const RESEND_COMPLETION_CODES = new Set(["upload_object_missing", "upload_parts_incomplete"]);
+
+/** Files one `files/complete` call finalizes on a server with batch completion. */
+const COMPLETE_BATCH_MAX = 100;
+
+/**
+ * Completes the files of one upload session. Files that finish while a complete call is in flight go together in the next
+ * call as one batch (`{ files: [...] }`, up to 100), so a 1,000-file upload needs about ten calls instead of a thousand. A file
+ * the server reports as retryable (a storage outage) is sent again; a session-level 409 or 429 is waited out. An older server
+ * refuses the batch body with 400; from then on each file is completed on its own, as before.
+ */
+function sessionCompleter(sessionPath: string, flags: Record<string, string | boolean>) {
+  type Pending = { body: Record<string, unknown>; tries: number; resolve: () => void; reject: (error: unknown) => void };
+  const queue: Pending[] = [];
+  let batched: boolean | null = null; // unknown until the first batch call answers
+  let draining: Promise<void> | null = null;
+  // Set when the server's reconciler keeps the session lock past our deadline: it finalizes and confirms the session itself,
+  // so we stop completing and wait for its result instead of abandoning the upload.
+  let handedOver = false;
+  const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const fileOf = (body: Record<string, unknown>) => String(body.fileId);
+
+  /** An older server's uncoded 409: ask the session whether the file is done, worth retrying, or a real failure. */
+  const probeFor = (fileIds: string[]): SessionProbe => async () => {
+    // The status-only read takes no session lock (the full one signs URLs under the lock, so it is busy whenever we are).
+    const refreshed = await apiFetchRepeatable(`${sessionPath}?statusOnly=true`, flags, {});
+    // A rate-limited, busy or unavailable read says nothing about the session: ask again later.
+    if (refreshed.status === 429 || refreshed.status === 409 || refreshed.status >= 500) { await refreshed.body?.cancel(); return "retry"; }
+    if (!refreshed.ok) return "fail";
+    const state = await refreshed.json() as DirectSession;
+    if (fileIds.every((id) => state.files.find((file) => file.id === id)?.status === "completed")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    return ["pending", "uploading"].includes(String(state.status ?? "pending")) ? "retry" : "fail";
+  };
+
+  /** Still locked out after the deadline, yet the session is open: leave the rest to the server (see `handedOver`). */
+  async function handOverIfOpen(response: Response, fileIds: string[]): Promise<boolean> {
+    if (response.status !== 409 || await probeFor(fileIds)() !== "retry") return false;
+    await response.body?.cancel();
+    if (!handedOver) console.error("The server is busy finalizing this upload; leaving the remaining files to it and waiting for its run.");
+    handedOver = true;
+    return true;
+  }
+
+  async function completeOne(item: Pending): Promise<void> {
+    const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json(item.body)), flags, probeFor([fileOf(item.body)]), 3);
+    if (done.ok || await handOverIfOpen(done, [fileOf(item.body)])) return;
+    throw await responseFailure(done);
+  }
+
+  async function completeBatch(items: Pending[]): Promise<void> {
+    const response = await sendWhenSessionFree(
+      // A batch entry carries the file id and its single-PUT etag only: the server reads a multipart file's parts from storage.
+      () => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json({ files: items.map(({ body }) => ({ fileId: body.fileId, ...(body.etag ? { etag: body.etag } : {}) })) })),
+      flags, probeFor(items.map((item) => fileOf(item.body))), batched === true ? 3 : 0);
+    if (batched === null && response.status === 400) {
+      // No batch support: settle these one by one, and every later file too.
+      await response.body?.cancel();
+      batched = false;
+      for (const item of items) await completeOne(item).then(item.resolve, item.reject);
+      return;
+    }
+    if (!response.ok) {
+      if (await handOverIfOpen(response, items.map((item) => fileOf(item.body)))) { for (const item of items) item.resolve(); return; }
+      const failure = await responseFailure(response);
+      for (const item of items) item.reject(failure);
+      return;
+    }
+    const answer = await response.json() as { files?: Array<{ fileId?: string; status?: string; error?: { statusCode?: number; code?: string; message?: string; retryable?: boolean } }> };
+    batched = true;
+    if (!Array.isArray(answer.files)) {
+      // A probe that found every file completed answers `{ ok: true }` without per-file results.
+      for (const item of items) item.resolve();
+      return;
+    }
+    // One result per file sent, each named once: anything else is not this batch's answer.
+    assertUniqueRemoteIds(answer.files.map((result) => result.fileId), "completion result");
+    const sent = new Set(items.map((item) => fileOf(item.body)));
+    if (answer.files.some((result) => !sent.has(String(result.fileId)))) throw new Error("Upload completion result names a file this call did not send");
+    const byId = new Map(answer.files.map((result) => [result.fileId, result]));
+    for (const item of items) {
+      const result = byId.get(fileOf(item.body));
+      if (result?.status === "completed") item.resolve();
+      else if (result?.error?.retryable && item.tries < 4) { item.tries++; queue.push(item); }
+      else item.reject(new Error(`${String(item.body.fileId)}: ${result?.error?.message ?? "not completed"} (${result?.error?.code ?? "missing result"})`));
+    }
+    if (queue.some((item) => item.tries > 0)) await sleepMs(1_000);
+  }
+
+  async function drain(): Promise<void> {
+    while (queue.length > 0) {
+      if (handedOver) { for (const item of queue.splice(0)) item.resolve(); break; }
+      if (batched === false) {
+        const item = queue.shift()!;
+        await completeOne(item).then(item.resolve, item.reject);
+        continue;
+      }
+      const items = queue.splice(0, COMPLETE_BATCH_MAX);
+      // An unexpected failure (a lost response after retries) fails what this call carried; settled items ignore it.
+      await completeBatch(items).catch((error) => { for (const item of items) item.reject(error); });
+    }
+  }
+
+  /** One drain at a time; a file queued while the last drain was finishing starts the next. */
+  function kick(): void {
+    draining ??= drain().finally(() => { draining = null; if (queue.length > 0) kick(); });
+  }
+
+  return {
+    get handedOver(): boolean { return handedOver; },
+    complete(body: Record<string, unknown>): Promise<void> {
+      return new Promise<void>((resolve, reject) => { queue.push({ body, tries: 0, resolve, reject }); kick(); });
+    },
+  };
 }
 
 /** Create a direct upload session, PUT each file (or its parts), complete, then confirm. Returns the confirm response. */
@@ -560,32 +973,67 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
   }));
   try {
     const claimed = new Set<number>();
-    for (const first of session.files) {
+    const completer = sessionCompleter(sessionPath, flags);
+    // Match every descriptor before sending anything, so an unknown file fails the upload before any bytes move.
+    assertUniqueRemoteIds(session.files.map((file) => file.id), "session");
+    const work = session.files.map((first) => {
       const match = localFileFor(first, files, claimed);
       if (!match) throw new Error(`Upload session returned a file this upload did not send: ${first.filename}`);
-      let descriptor = first;
+      return { first, match };
+    });
+    // Uninspected files (a large session's replayed read) are settled first, in batches: only those storage reports
+    // missing are read again and sent.
+    const resend = await settleUninspected(sessionPath, work.filter(({ first }) => first.inspected === false).map(({ first }) => first), flags);
+    // Files go up a few at a time; each one is completed as soon as its bytes are in storage.
+    await forEachLimited(work, uploadConcurrency(), async ({ first, match }) => {
+      const target = first.inspected === false ? resend.get(first.id) : first;
+      // An uninspected file whose stored object completed it needs nothing more.
+      if (!target) return;
+      let descriptor: DirectUploadDescriptor = target;
       let complete: Record<string, unknown> | null = null;
       for (let round = 0; complete === null; round++) {
         try {
-          complete = await sendFile(descriptor, match.file.blob);
+          const fileId = descriptor.id;
+          complete = await sendFile(descriptor, match.file.blob, async (partNumbers) => {
+            const signed = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/${encodeURIComponent(fileId)}/parts/sign`, flags,
+              { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ partNumbers }) }), flags, async () => "retry");
+            if (!signed.ok) throw await responseFailure(signed);
+            return ((await signed.json()) as { parts: Array<{ partNumber: number; url: string }> }).parts;
+          });
         } catch (error) {
           if (round >= 2 || !(isLostResponse(error) || (error instanceof CliApiError && (error.status === 403 || RETRYABLE_STATUSES.has(error.status))))) throw error;
           // Resume from what storage holds: the session lists the parts still missing, with fresh signed URLs.
           await sleepMs(250 * 2 ** round);
-          const refreshed = await apiFetchRepeatable(sessionPath, flags, {});
+          // The full read signs fresh URLs under the session lock: wait out a busy lock or a rate limit.
+          // Only this file: on a large session the full read inspects far fewer stored objects (server `fileId` filter).
+          const refreshed = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, flags, {}), flags, async () => "retry");
           if (!refreshed.ok) throw error;
-          const next = ((await refreshed.json()) as DirectSession).files.find((file) => file.id === descriptor.id);
+          // The refreshed targets must belong to the same file the local bytes were matched to.
+          const refreshedFiles = ((await refreshed.json()) as DirectSession).files;
+          const next = refreshedDescriptor(askedDescriptors(refreshedFiles, [descriptor.id]), descriptor);
           if (!next) throw error;
           if (next.status === "completed") { complete = { fileId: descriptor.id }; break; }
+          if (next.status === "failed" || next.status === "aborted") throw new Error(`Upload of ${descriptor.filename} ${next.status}`);
           descriptor = next;
         }
       }
-      const done = await apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json(complete));
-      if (!done.ok) throw await responseFailure(done);
-    }
+      await completer.complete(complete);
+    });
     let confirmed: Response | null;
-    try {
-      confirmed = await apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" });
+    if (completer.handedOver) {
+      // The server finalizes the files we could not complete and confirms the session itself: wait for its run.
+      confirmed = await pollConfirmedSession(sessionPath, flags, 30 * 60_000, 3000);
+      if (!confirmed) throw new Error(`The server did not finish this upload in time; its session is ${session.sessionId} (check it with the status of that session).`);
+    } else try {
+      confirmed = await sendWhenSessionFree(() => apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" }), flags, async () => {
+        // The reconciler may be confirming this session itself: its result is the answer. A closed session is a real failure.
+        const status = await apiFetchRepeatable(`${sessionPath}?statusOnly=true`, flags, {});
+        if (status.status === 429 || status.status === 409 || status.status >= 500) { await status.body?.cancel(); return "retry"; }
+        if (!status.ok) return "fail";
+        const state = await status.json() as { status?: string; result?: unknown };
+        if (state.result) return new Response(JSON.stringify(state.result), { status: 201, headers: { "content-type": "application/json" } });
+        return ["pending", "uploading", "ingesting"].includes(String(state.status ?? "")) ? "retry" : "fail";
+      });
     } catch (error) {
       if (!isLostResponse(error)) throw error;
       confirmed = await pollConfirmedSession(sessionPath, flags);
@@ -600,7 +1048,13 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
       warnings: [...((result.warnings as string[] | undefined) ?? []), warning],
     }), { status: confirmed.status, headers: { "content-type": "application/json" } });
   } catch (error) {
-    await apiFetch(`${sessionPath}/abort`, flags, { method: "POST" }).catch(() => undefined);
+    // Like the SDK: a session that stayed busy (or rate limited) past our waits is kept (and named), since the server
+    // finishes the known-size files whose bytes arrived; any other failure closes it, best effort.
+    if (isBusyFailure(error)) {
+      console.error(`Upload session ${session.sessionId} stayed busy; the server finishes its uploaded files.`);
+    } else {
+      await apiFetch(`${sessionPath}/abort`, flags, { method: "POST" }).catch(() => undefined);
+    }
     throw error;
   }
 }
@@ -619,8 +1073,9 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   if (flags.estimate === true && intake === UPLOAD_MODE) {
     const target = resolveIntakeTarget(flags);
     const estimateFiles = await profiledEstimateFiles(files);
-    const chartExport = resolveChartExportFlag(flags);
-    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}), ...(chartExport ? { chartExport } : {}) }, flags);
+    const visuals = resolveVisualsFlag(flags);
+    const qualitySettings = resolveQuoteQuality(flags);
+    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}), ...(visuals ? { visuals } : {}), ...(qualitySettings ? { settings: qualitySettings } : {}) }, flags);
     return;
   }
 
@@ -656,6 +1111,10 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   const totalBytes = blobs.reduce((sum, file) => sum + file.blob.size, 0);
   // The bulk body is timed by its size, not the 30 s a small request gets, and carries an Idempotency-Key so a timed-out
   // attempt can be sent again without uploading (and billing) the files twice.
+  if (totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES && blobs.length > DIRECT_SESSION_MAX_FILES) {
+    await uploadDirectInSessions(blobs, formData, flags, intake);
+    return;
+  }
   const response = totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES
     ? await uploadDirect(blobs, formData, flags, intake)
     : await apiFetchRepeatable(`${intake.base}/bulk`, flags, {
@@ -671,6 +1130,38 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   }
 
   await printIntakeResult(response, flags);
+}
+
+/**
+ * More files than one session takes: one session (and run) per 1,000 files, in order. A session that fails is reported and the
+ * rest still go up, so good files are never held back by bad ones; the command fails only when no session was created.
+ * Each session gets its own Idempotency-Key, derived from --idempotency-key when one was given, so a rerun repeats no session.
+ */
+async function uploadDirectInSessions(blobs: Array<{ blob: Blob; name: string }>, fields: FormData, flags: Record<string, string | boolean>, intake: IntakeMode): Promise<void> {
+  const count = Math.ceil(blobs.length / DIRECT_SESSION_MAX_FILES);
+  const baseKey = typeof flags.idempotencyKey === "string" && flags.idempotencyKey ? flags.idempotencyKey.slice(0, 240) : randomUUID();
+  const failed: string[] = [];
+  for (let index = 0; index < count; index++) {
+    const slice = blobs.slice(index * DIRECT_SESSION_MAX_FILES, (index + 1) * DIRECT_SESSION_MAX_FILES);
+    const label = `Session ${index + 1}/${count} (${slice.length} files: ${slice[0]!.name} … ${slice.at(-1)!.name})`;
+    console.error(`${label}: uploading`);
+    try {
+      const response = await uploadDirect(slice, fields, { ...flags, idempotencyKey: `${baseKey}.${index + 1}` }, intake);
+      if (!response.ok) {
+        printFailure(await responseFailure(response));
+        failed.push(label);
+        continue;
+      }
+      await printIntakeResult(response, flags);
+    } catch (error) {
+      console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      failed.push(label);
+    }
+  }
+  if (failed.length > 0) {
+    console.error(`Warning: ${failed.length} of ${count} upload sessions failed; their files were not uploaded:\n  ${failed.join("\n  ")}`);
+    if (failed.length === count) process.exitCode = 1;
+  }
 }
 
 type CostEstimate = {
@@ -726,11 +1217,12 @@ async function estimateCommand(files: string[], flags: Record<string, string | b
     return;
   }
   const settings: Record<string, unknown> = {};
-  if (typeof flags.quality === "string") settings.quality = resolveQualityPipeline(flags).pipeline?.quality;
+  const qualitySettings = resolveQuoteQuality(flags);
+  if (qualitySettings) settings.quality = qualitySettings.quality;
   if (typeof flags.indexing === "string") settings.indexing = flags.indexing;
   if (typeof flags.months === "string") settings.hostingMonths = Number.parseInt(flags.months, 10);
-  const chartExport = resolveChartExportFlag(flags);
-  if (chartExport) settings.chartExport = chartExport.tier;
+  const visuals = resolveVisualsFlag(flags);
+  if (visuals) settings.visuals = visuals;
   const body = { files: await profiledEstimateFiles(files), ...(Object.keys(settings).length ? { settings } : {}) };
   const base = (typeof flags.apiUrl === "string" ? flags.apiUrl : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
   const response = await fetch(`${base}/v1/estimate`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -766,6 +1258,7 @@ async function runEstimate(pathname: string, body: unknown, flags: Record<string
     return;
   }
   const result = await response.json() as { estimate: CostEstimate; impact?: { kind: string } };
+  printDeprecationWarnings(result);
   if (flags.json === true) console.log(JSON.stringify(result, null, 2));
   else {
     if (result.impact) console.log(`Impact:    ${result.impact.kind}`);
@@ -787,6 +1280,83 @@ async function fullIndexCommand(flags: Record<string, string | boolean>): Promis
   await startWork(base, {}, flags);
 }
 
+/** `on`/`off` (or true/false) for a reindex switch; anything else is refused. */
+function onOff(flag: string, value: string | boolean | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (value === "on" || value === "true") return true;
+  if (value === "off" || value === "false") return false;
+  throw new Error(`--${flag} must be on or off.`);
+}
+
+/** The reindex body: the index settings the flags change (none: a plain rebuild) and the confirmed estimate signature. */
+export function reindexBody(flags: Record<string, string | boolean>): { pipeline?: Record<string, unknown>; confirmEstimate?: string } {
+  const pipeline: Record<string, unknown> = {};
+  const embedding: Record<string, unknown> = {};
+  if (typeof flags.embeddingProfile === "string" && flags.embeddingProfile) embedding.profile = flags.embeddingProfile;
+  const late = onOff("late-chunking", flags.lateChunking);
+  if (late !== undefined) embedding.lateChunking = late;
+  if (flags.lateChunkingWindow !== undefined) {
+    const window = Number(flags.lateChunkingWindow);
+    if (!Number.isInteger(window) || window < 1 || window > 6) throw new Error("--late-chunking-window must be a whole number from 1 to 6.");
+    embedding.lateChunkingWindow = window;
+  }
+  if (Object.keys(embedding).length) pipeline.embedding = embedding;
+  if (flags.vectorBackends !== undefined) {
+    const backends = String(flags.vectorBackends).split(",").map((name) => name.trim()).filter(Boolean);
+    if (backends.length === 0) throw new Error("--vector-backends takes a comma-separated list, for example lancedb.");
+    pipeline.vectorBackends = backends;
+  }
+  const overlap = onOff("chunk-overlap", flags.chunkOverlap);
+  if (overlap !== undefined) pipeline.chunkOverlap = overlap;
+  const preambles = onOff("contextual-preambles", flags.contextualPreambles);
+  if (preambles !== undefined) pipeline.contextualChunkPreambles = preambles;
+  return {
+    ...(Object.keys(pipeline).length ? { pipeline } : {}),
+    ...(typeof flags.confirm === "string" && flags.confirm ? { confirmEstimate: flags.confirm } : {}),
+  };
+}
+
+/**
+ * `docslurp reindex`: changes the project's locked index settings (embedding, chunking) and re-indexes its documents in
+ * one step, or rebuilds the index as is. `--estimate` prices it and prints the signature to pass back with `--confirm`.
+ */
+async function reindexCommand(flags: Record<string, string | boolean>): Promise<void> {
+  const base = `/v1/projects/${encodeURIComponent(resolveProject(flags))}/reindex`;
+  const body = reindexBody(flags);
+  if (flags.estimate === true) {
+    const { confirmEstimate: _confirm, ...estimateBody } = body;
+    const response = await apiFetch(`${base}/estimate`, flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(estimateBody) });
+    if (!response.ok) {
+      printFailure(await responseFailure(response));
+      process.exitCode = 1;
+      return;
+    }
+    const result = await response.json() as { estimate: CostEstimate | null; impact?: { kind: string }; lockedSettings?: string[]; signature?: string };
+    if (flags.json === true) console.log(JSON.stringify(result, null, 2));
+    else {
+      if (result.lockedSettings?.length) console.log(`Changes:   ${result.lockedSettings.join(", ")}`);
+      if (result.estimate) console.log(formatEstimate(result.estimate));
+      else console.log("Nothing to re-index.");
+      if (result.signature) console.log(`Signature: ${result.signature}\nRun the same command with --confirm ${result.signature} to start it; a changed estimate is refused.`);
+      console.log("Estimate only: nothing was started.");
+    }
+    return;
+  }
+  const response = await apiFetch(base, flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok) {
+    printFailure(await responseFailure(response));
+    process.exitCode = 1;
+    return;
+  }
+  const result = await response.json() as { changedSettings?: string[]; runIds?: string[]; job?: JobStatus | null };
+  if (flags.json === true) console.log(JSON.stringify(result, null, 2));
+  else {
+    console.log(result.changedSettings?.length ? `Changed:   ${result.changedSettings.join(", ")}` : "Rebuilding the index with the current settings.");
+    if (result.job) printJob(result.job);
+    else console.log("No documents to re-index; the settings apply to new uploads.");
+  }
+}
+
 async function reprocessCommand(runId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
   if (!runId) {
     console.error("Error: run ID required");
@@ -794,8 +1364,13 @@ async function reprocessCommand(runId: string | undefined, flags: Record<string,
     return;
   }
   const base = `/v1/runs/${encodeURIComponent(runId)}/reprocess`;
-  const chartExport = resolveChartExportFlag(flags);
-  const body = { ...(typeof flags.stageFrom === "string" && flags.stageFrom ? { stageFrom: flags.stageFrom } : {}), ...(chartExport ? { chartExport } : {}) };
+  const visuals = resolveVisualsFlag(flags);
+  const quality = resolveQualityPipeline(flags).pipeline?.quality;
+  const body = {
+    ...(typeof flags.stageFrom === "string" && flags.stageFrom ? { stageFrom: flags.stageFrom } : {}),
+    ...(quality ? { quality } : {}),
+    ...(visuals ? { visuals } : {}),
+  };
   if (flags.estimate === true) return runEstimate(`${base}/estimate`, body, flags);
   await startWork(base, body, flags);
 }
@@ -809,6 +1384,7 @@ async function startWork(pathname: string, body: unknown, flags: Record<string, 
   }
   // Reprocess answers the run itself, or { run, warnings } when its start was deferred.
   const result = await response.json() as { runId?: string; id?: string; run?: { id?: string }; job?: JobStatus };
+  printDeprecationWarnings(result);
   if (flags.json === true) console.log(JSON.stringify(result, null, 2));
   else {
     const runId = result.runId ?? result.id ?? result.run?.id;
@@ -1006,9 +1582,9 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     // An estimate never starts an ingest (council #387 M1): sizes come from each URL's own headers, read from here.
     const files = await urlEstimateFiles(urls);
     const target = resolveIntakeTarget(flags);
-    const chartExport = resolveChartExportFlag(flags);
-    const quality = resolveQualityPipeline(flags).pipeline?.quality;
-    await runEstimate("/v1/uploads/estimate", { files, ...(target.project ? { project: target.project } : {}), ...(chartExport ? { chartExport } : {}), ...(quality ? { settings: { quality } } : {}) }, flags);
+    const visuals = resolveVisualsFlag(flags);
+    const qualitySettings = resolveQuoteQuality(flags);
+    await runEstimate("/v1/uploads/estimate", { files, ...(target.project ? { project: target.project } : {}), ...(visuals ? { visuals } : {}), ...(qualitySettings ? { settings: qualitySettings } : {}) }, flags);
     return;
   }
   const response = await apiFetch(`${intake.base}/url`, flags, {
@@ -1067,7 +1643,7 @@ async function urlEstimateFiles(urls: string[]): Promise<Array<{ name: string; s
 }
 
 /** Commands that read `--estimate`; anywhere else the flag is refused, so it can never silently run billed work. */
-const ESTIMATE_COMMANDS: ReadonlySet<string> = new Set(["upload", "ingest-url", "full-index", "reprocess", "summary-tree"]);
+const ESTIMATE_COMMANDS: ReadonlySet<string> = new Set(["upload", "ingest-url", "full-index", "reindex", "reprocess", "summary-tree"]);
 
 /** `docslurp extract`: files or URLs (not both), with the retention options. */
 async function extractCommand(inputs: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -1200,6 +1776,8 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
         processedDocuments: number;
         pagesTotal: number;
         pagesProcessed: number;
+        pagesSearchable?: number | null;
+        pagesCountedAt?: string | null;
       };
     };
 
@@ -1214,6 +1792,10 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
       `Stage:     ${run.stage}`,
       `Documents: [${renderBar(run.processedDocuments, run.totalDocuments)}] ${run.processedDocuments}/${run.totalDocuments} (${docPct}%)`,
       `Pages:     [${renderBar(run.pagesProcessed, run.pagesTotal)}] ${run.pagesProcessed}/${run.pagesTotal} (${pagePct}%)`,
+      // Extraction reaches 100% before the run can be searched; servers that report searchable pages get their own bar.
+      ...(typeof run.pagesSearchable === "number"
+        ? [`Indexed:   [${renderBar(run.pagesSearchable, run.pagesTotal)}] ${run.pagesSearchable}/${run.pagesTotal}${run.pagesCountedAt === null ? " (still counting pages)" : ""}`]
+        : []),
       `Elapsed:   ${elapsed}`
     ];
 
@@ -1770,6 +2352,9 @@ async function main(): Promise<void> {
       break;
     case "full-index":
       await fullIndexCommand(flags);
+      break;
+    case "reindex":
+      await reindexCommand(flags);
       break;
     case "reprocess":
       await reprocessCommand(positional[0], flags);

@@ -21,10 +21,9 @@ import {
 } from "@docslurp/shared";
 import { assessAttention } from "./attention.js";
 import { readRoutingFlags } from "./flags.js";
-import { TRUST_RULE, freeTrustVerdict } from "./trust.js";
+import { PAGE_EVIDENCE, mathGlyphNeed, textLayerUnread, textLayerUnreliable } from "../lib/page-evidence.js";
+import { freeTrustVerdict } from "./trust.js";
 
-/** A page whose math glyph share is this many times the trust threshold needs math handling outright (was a bare 12). */
-const MATH_GLYPH_RATIO_FULL_NEED = 8;
 import {
   applyBudgetGuard,
   estimateChunk,
@@ -70,6 +69,11 @@ export interface PageNeeds {
   source: "decision-model" | "features" | "heuristic";
   /** Calibrated decision probabilities handed to the estimator. */
   probs: CalibratedProbabilities;
+  /**
+   * The source could not read the text layer (page evidence textLayerUnread: a failed or low-confidence page): every
+   * text-layer-only role becomes a render (OCR) role, and a page-level table or math role gets an OCR role beside it.
+   */
+  renderRequired?: boolean;
 }
 
 export interface PlannerConfig {
@@ -186,11 +190,12 @@ export function needsFromFeatures(
   } else if (verdict.mathGated) {
     trust = Math.min(MATH_GATED_TRUST, 0.5 + 0.45 * f.native.plausibility);
   } else if (status === "suspect") trust = 0.3 * f.native.plausibility;
-  if (f.native.garbled || f.native.unmappedGlyphRatio > 0.1) trust = Math.min(trust, 0.2);
+  if (textLayerUnreliable(f.native)) trust = Math.min(trust, 0.2);
   if (f.raster.fullPageImage && f.native.wordCount < 30) trust = Math.min(trust, 0.1);
   // Needs come from the page's own glyphs and ruling, not from the text routes classify-route labels it with.
-  const needsMath = Math.min(1, f.native.mathGlyphRatio / (TRUST_RULE.mathGlyphRatio * MATH_GLYPH_RATIO_FULL_NEED));
-  const needsTables = Math.min(1, f.native.tableRuleScore / 4);
+  const needsMath = mathGlyphNeed(f.native.mathGlyphRatio);
+  // The table rule score is page evidence's (routerTableRuleScore): grids on the table path, unknown included, are full.
+  const needsTables = Math.min(1, f.native.tableRuleScore / PAGE_EVIDENCE.fullTableRuleScore);
   const scanned = f.raster.fullPageImage && f.native.wordCount < 30 ? 0.9 : status === "absent" ? 0.6 : 0;
   const images: ImageNeed[] = page.images.map((img) => {
     const g = guessImageKind(page, img, cfg.tinyImageCoverage);
@@ -208,6 +213,7 @@ export function needsFromFeatures(
     images,
     source: "features",
     probs: {},
+    ...(textLayerUnread(page.unusualFeatures) ? { renderRequired: true } : {}),
   };
 }
 
@@ -257,6 +263,7 @@ export function needsFromDecisions(
     images,
     source: "decision-model",
     probs,
+    ...(base.renderRequired ? { renderRequired: true } : {}),
   };
 }
 
@@ -340,6 +347,20 @@ export function rolesForPage(needs: PageNeeds, cfg: PlannerConfig): RoleRequest[
       floorBoost: img.kind === "handwriting" ? 0.05 : 0,
     });
   }
+  if (needs.renderRequired) return withRender(out);
+  return out;
+}
+
+/**
+ * A page whose text layer the source could not read (PageNeeds.renderRequired) is never served from its text layer alone:
+ * text-layer roles become OCR, and a page-level table or math role gets a page OCR role beside it.
+ */
+function withRender(roles: RoleRequest[]): RoleRequest[] {
+  const reason = "text layer unread (failed or low-confidence page facts): render required";
+  const out = roles.map((r) => r.scope.kind === "page" && (r.role === "accept-text" || r.role === "extract-text")
+    ? { ...r, role: "ocr" as const, reason: `${r.reason}; ${reason}` } : r);
+  const pageRole = (role: AssignmentRole) => out.some((r) => r.scope.kind === "page" && r.role === role);
+  if (!pageRole("ocr") && (pageRole("table") || pageRole("math"))) out.push({ role: "ocr", scope: { kind: "page" }, reason });
   return out;
 }
 

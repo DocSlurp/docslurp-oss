@@ -9,11 +9,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../config.js";
 import type { Document, ProjectRun } from "../models.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
-import { type CheckpointStore, WorkflowState } from "../pipeline/pipeline.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
 import { sha256Bytes } from "../sandbox/source-integrity.js";
 import { QuarantineStage } from "../stages/quarantine.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 
 // Authored EICAR test string: the industry-standard harmless test file every engine reports as infected.
 const EICAR = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
@@ -37,12 +38,12 @@ async function fixture(extra: Document[] = []) {
     pipeline: { ...defaultPipelineFeatures }, error: null, stats: {}, artifacts: {}, claimId: null, createdAt: now, updatedAt: now };
   const state = WorkflowState.create(run, documents);
   state.docConcurrency = 2;
-  const store: CheckpointStore = {
+  const store = memoryCheckpointStore({
     startDocumentStage: vi.fn(async () => {}), completeDocumentStage: vi.fn(async () => {}), failDocumentStage: vi.fn(async () => {}),
-    updateProgress: vi.fn(async () => {}), startRunStage: vi.fn(async () => {}), completeRunStage: vi.fn(async () => {}), failRunStage: vi.fn(async () => {}),
-    appendEvent: vi.fn(async () => {}), setPageStageComplete: vi.fn(async () => {}), getCompletedPages: vi.fn(async () => new Set<number>()),
-  };
-  state.store = store;
+    updateProgress: vi.fn(async () => {}), appendEvent: vi.fn(async () => {}),
+  });
+  for (const document of documents) store.records.add(document.id, { runId: run.id, orgId: run.orgId });
+  state.bindStore(store);
   let sequence = 0;
   const storage = {
     downloadSourceToTempFile: async (key: string) => { const p = join(await mkdtemp(join(dir, "doc-")), `${sequence++}-${key}`); await writeFile(p, sources.get(key)!); return p; },
@@ -50,15 +51,15 @@ async function fixture(extra: Document[] = []) {
     uri: (key: string) => `s3://test/${key}`,
   } as unknown as ArtifactStore;
   // The scanner double reports what clamd reports for these bytes; the real stage, refusal and checkpoint code run.
-  const sessions: Array<{ tenantKey: string | null | undefined; scanned: string[] }> = [];
-  const current = new AsyncLocalStorage<{ tenantKey: string | null | undefined; scanned: string[] }>();
+  const sessions: Array<{ scanned: string[] }> = [];
+  const current = new AsyncLocalStorage<{ scanned: string[] }>();
   const runner = {
     scanForMalware: vi.fn(async (p: string) => {
       current.getStore()?.scanned.push(p);
       return { status: (await readFile(p, "utf8")) === EICAR ? "infected" : "clean", engine: "clamdscan", signature: "Eicar-Test-Signature", databaseStatus: "fresh", healthWarnings: [] };
     }),
-    withMalwareScanner: vi.fn(async (tenantKey: string | null | undefined, fn: () => Promise<unknown>) => {
-      const session = { tenantKey, scanned: [] as string[] };
+    withMalwareScanner: vi.fn(async (fn: () => Promise<unknown>) => {
+      const session = { scanned: [] as string[] };
       sessions.push(session);
       return await current.run(session, fn);
     }),
@@ -86,8 +87,7 @@ describe("quarantine scanner flags", () => {
     expect(healthyDocuments(f.state).map((document) => document.id)).toEqual(["report.txt"]);
     // Snapshot off: the stage never opens a scanner session (exactly today's path).
     expect(f.runner.withMalwareScanner).toHaveBeenCalledTimes(scannerSessions);
-    expect(f.sessions.every((session) => session.tenantKey === "org-a")).toBe(true);
-    // M1: no scanner session ever scans a second document.
+    // Today each document opens its own session (a choice, not an isolation rule; AGENTS.md).
     expect(f.sessions.every((session) => session.scanned.length === 1)).toBe(true);
   });
 });

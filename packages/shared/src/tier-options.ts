@@ -8,7 +8,8 @@
  *   from distinct providers. They are host candidates only: which model answers a chat tier is CHAT_TIER_MODELS
  *   (project-chat-models.ts) plus a project's admin overrides, and nothing routes chat through these options yet.
  * - Every option passes the call-time policy (model-call-policy.ts) at load and again at selection: no Pro/Ultra, no
- *   denied model, no known output price at or above $50 per 1M tokens; a host observed at or above that cap is skipped.
+ *   denylisted model, no known output price at or above $50 per 1M tokens; a host observed at or above that cap is
+ *   skipped.
  * - Pools are `llm://` entries, one per host (`?_provider=`); pool options (`_sort`, `_fallbacks`, `_timeout`,
  *   `_minUptime`, `_maxAge`, `_preferredMargin`) are written once, on the first entry. See provider-pools.ts.
  * - evalScore is the option's composite on its capability's tier benchmark: for page-ocr, the mean tolerant-markdown@v1
@@ -18,8 +19,11 @@
  *   composite on a shared scale yet.
  * - Together is omitted from every pool (owner, 2026-11-12): its DeepSeek V4.1 Flash 1017 endpoint fabricated page
  *   bodies on the tier benchmark (composite 0.673 and 0.333 against Fireworks 0.938 and 0.938).
- * - DeepSeek V4.1 Flash is never an option (owner, 2026-11-13): it is never selected automatically
- *   (automatic-model-selection.ts), and assertTierOptions refuses it.
+ * - Margin: every tier pick passes the automatic-call margin gate at the time of the request (selectTierRoute,
+ *   automatic-call-margin.ts): a host whose current price, time of day included, leaves the billed value under the
+ *   minimum margin is skipped. No model is refused by name for its price (DeepSeek V4.1 Flash was, 2026-11-13 to
+ *   2026-11-15; owner decision 2026-11-15 replaced that with the gate). It is still not an option here: adding one needs
+ *   the eval and disclosure review above.
  */
 import { defineTierOptions, type RouteTier, type TierOption } from "./provider-tiers.js";
 
@@ -32,17 +36,21 @@ export const TIER_OPTIONS: readonly TierOption[] = defineTierOptions([
   {
     id: "page-ocr/glm-5.3-flash",
     capability: "page-ocr",
-    pool: [`${GLM}?_provider=wafer/nvfp4&_sort=price`, `${GLM}?_provider=friendli`, `${GLM}?_provider=inference-net/fp4`],
+    // Hosts with a stated US region only (capability-pools.ts VISION_GLM_HOSTS, 2026-11-17).
+    pool: [`${GLM}?_provider=wafer/us&_sort=price`, `${GLM}?_provider=friendli`, `${GLM}?_provider=inference-net/us`],
     tiers: ["fastest", "balanced", "smart"],
     // Tier benchmark v1, development page OCR (67 items), production pool: composite 0.934 (tolerant text 0.919,
-    // tables 0.930, math 1.000).
+    // tables 0.930, math 1.000). Pinned hosts of this pool: wafer/us 0.932, friendli 0.932, inference-net/us 0.927
+    // (dev-page-ocr-20261116-glm-wafer, dev-page-ocr-20261117-pool-candidates).
     evalScore: 0.934,
     evalRef: "tier-benchmark-v1/page-ocr/development/dev-page-ocr-20261112-r2",
   },
   {
     id: "page-ocr/mimo-v2.6-flash",
     capability: "page-ocr",
-    pool: [`${MIMO}?_provider=relace&_sort=order&_fallbacks=true`, `${MIMO}?_provider=deepinfra`],
+    // A stated-US host only (2026-11-17). Unscored: the worker refuses MiMo until its image-token bound is proven, so
+    // "smart" must not rank it (it measured 0.936 in a scratch harness, dev-page-ocr-20261117-pool-candidates).
+    pool: [`${MIMO}?_provider=gmicloud/bf16&_sort=price`],
     tiers: ["fastest", "balanced", "smart"],
     evalScore: null,
     evalRef: null,
@@ -118,6 +126,28 @@ export const OCR_ROUTE_OPTIONS: readonly OcrRouteOption[] = Object.freeze([
     evalRef: "tier-benchmark-v1/page-ocr/development/dev-page-ocr-20261113-runpod",
   },
   {
+    // The default escalation reader (ocr-escalation-routes.ts), behind its per-request price ceiling.
+    id: "scan-ocr/hosted-escalation-glm",
+    reader: "hosted-escalation",
+    model: "llm://openrouter/z-ai/glm-5.3-flash",
+    tiers: ["balanced", "smart"],
+    // Tier benchmark v1, development page OCR (67 items), production pool: composite 0.934 (tolerant text 0.919,
+    // tables 0.930, math 1.000).
+    evalScore: 0.934,
+    evalRef: "tier-benchmark-v1/page-ocr/development/dev-page-ocr-20261112-r2",
+  },
+  {
+    // The default escalation reader's second host (ocr-escalation-routes.ts), tried when Wafer refuses or cannot serve.
+    id: "scan-ocr/hosted-escalation-glm-morph",
+    reader: "hosted-escalation",
+    model: "llm://openrouter/z-ai/glm-5.3-flash",
+    tiers: ["balanced", "smart"],
+    // Pinned morph/fp8, escalation prompt: composite 0.927 (tolerant text 0.907, tables 0.931, math 1.000).
+    evalScore: 0.927,
+    evalRef: "tier-benchmark-v1/page-ocr/development/dev-page-ocr-20261117-pool-candidates",
+  },
+  {
+    // The last escalation reader, tried when both GLM hosts are refused or cannot serve.
     id: "scan-ocr/hosted-escalation",
     reader: "hosted-escalation",
     model: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -156,7 +186,7 @@ export interface OcrRouteAvailability {
  * smart: the best-scored available reader of every scanned page, the hosted escalation reader as the fallback.
  * balanced: the page reader on the pages the recogniser doubts when one is registered and measured, else hosted
  * escalation of those pages. A reader without a score, or scoring at or under the recogniser alone, is never chosen; a
- * hosted escalation model other than the one measured is unmeasured.
+ * hosted escalation model other than the measured ones (ocr-escalation-routes.ts) is unmeasured.
  */
 export function selectOcrRoute(tier: RouteTier, available: OcrRouteAvailability, options: readonly OcrRouteOption[] = OCR_ROUTE_OPTIONS): OcrRoute {
   const escalation = available.hostedEscalation;

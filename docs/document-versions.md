@@ -9,6 +9,8 @@ A document's version key is, in order:
 1. `canonicalId`, when you supply one on upload.
 2. Otherwise `path:` plus a hash of the project id, the normalized folder path and the filename.
 
+A document ingested from a URL (`/v1/uploads/url` or a website crawl) gets `url:` plus the sha256 of the URL as fetched, unless you supply a `canonicalId`, so re-ingesting the same URL makes a new version. Two canonical IDs are reserved for DocSlurp and refused from callers with `400 invalid_request`: anything starting with `docslurp:`, and `url:` followed by exactly 64 hex characters. Any other `url:` value is yours to use. The SDK refuses both before sending. The server also refuses, with the same error, a `canonicalId` that is the version key of a URL import made before URL keys became opaque (the URL itself, as those imports stored it) in the same project, so an upload cannot join that URL's history.
+
 Normalization applies Unicode NFC, case folding, `\` to `/`, collapsed repeated slashes, and trimmed slashes and whitespace. A `..` segment, or a path longer than 1024 characters, is rejected.
 
 - The same filename in two folders of one project gives two independent chains, both live.

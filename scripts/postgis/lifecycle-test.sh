@@ -8,12 +8,11 @@ name="docslurp-geo-lifecycle-$$-$RANDOM"
 scratch="$(mktemp -d "$TMPDIR/geo-lifecycle.XXXXXX")"
 cleanup() { docker exec "$name" sh -c 'rm -f /var/run/postgresql/.s.PGSQL.*' >/dev/null 2>&1 || true; docker rm -fv "$name" >/dev/null 2>&1 || true; rm -rf -- "$scratch"; }
 trap cleanup EXIT
-socket_mount=()
 if [[ "${GEO_QUERY_INTEGRATION:-0}" == 1 ]]; then
- mkdir "$scratch/socket"; chmod 0777 "$scratch/socket"
- socket_mount=(--mount "type=bind,source=$scratch/socket,target=/var/run/postgresql")
+  echo "The API query integration requires an application checkout; use the pre-retirement tree for the bundled API." >&2
+  exit 1
 fi
-docker run -d "${socket_mount[@]}" --name "$name" --network none --memory 768m --cpus 1 --pids-limit 128 --tmpfs /var/lib/postgresql/data:rw,size=384m --shm-size 64m -e POSTGRES_HOST_AUTH_METHOD=trust "$image" >/dev/null
+docker run -d --name "$name" --network none --memory 768m --cpus 1 --pids-limit 128 --tmpfs /var/lib/postgresql/data:rw,size=384m --shm-size 64m -e POSTGRES_HOST_AUTH_METHOD=trust "$image" >/dev/null
 for attempt in $(seq 1 60); do
  if docker exec "$name" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then break; fi
  sleep 1
@@ -21,8 +20,8 @@ done
 python - "$root" > "$scratch/migrations.sql" <<'PY'
 import json,sys,pathlib
 r=pathlib.Path(sys.argv[1]).parents[1]/'server/db/migrations'
-for entry in json.loads((r/'meta/_journal.json').read_text())['entries']:
- print('BEGIN;');print((r/(entry['tag']+'.sql')).read_text());print('COMMIT;')
+for path in sorted(r.glob('*.sql'), key=lambda p: p.name):
+ print('BEGIN;');print(path.read_text());print('COMMIT;')
 print('CREATE EXTENSION IF NOT EXISTS postgis;')
 for name in json.loads((r/'postgis/journal.json').read_text()):print((r/'postgis'/name).read_text())
 PY
@@ -51,7 +50,3 @@ fi
 wait "$writer"
 rg -q 'Stale or ineligible geo source' "$scratch/stale.log"
 echo 'PASS: two-backend stale publication refused after writer committed'
-
-if [[ "${GEO_QUERY_INTEGRATION:-0}" == 1 ]]; then
- GEO_TEST_SOCKET="$scratch/socket" pnpm --filter @docslurp/server exec vitest run src/__tests__/geo-query.integration.test.ts
-fi

@@ -42,43 +42,69 @@ afterAll(async () => {
 });
 
 describe("postgres source quarantine", () => {
-  it("records the document's source hash with its owner and refuses every document with those bytes", async () => {
+  it("records the document's source hash for its own organization and refuses that organization's documents with those bytes", async () => {
     const store = postgresSourceQuarantine(sql);
+    await sql`delete from org_quarantined_sources`;
     expect(await store.find("hostile")).toBeNull();
     expect(await store.record({ documentId: "hostile", runId: "run-1", stage: "render-images", detail: "pdftoppm teardown could not be verified", ttlHours: 168 }))
       .toEqual({ sourceSha256: "aaaa", orgId: "o1", projectId: "w1" });
-    // Recording again (a second worker raced it) keeps the first attribution.
-    expect(await store.record({ documentId: "same-bytes-other-org", detail: "again", ttlHours: 168 })).toEqual({ sourceSha256: "aaaa", orgId: "o1", projectId: "w1" });
+    // Recording again (a second worker raced it) keeps the first attribution and counts it.
+    expect(await store.record({ documentId: "hostile", detail: "again", ttlHours: 168 })).toEqual({ sourceSha256: "aaaa", orgId: "o1", projectId: "w1" });
     expect(await store.find("hostile")).toEqual({ sourceSha256: "aaaa", orgId: "o1", projectId: "w1" });
-    expect(await store.find("same-bytes-other-org")).toMatchObject({ sourceSha256: "aaaa" });
     expect(await store.find("innocent")).toBeNull();
     expect(await store.find("missing")).toBeNull();
+    const rows = await sql`select org_id, teardown_count from org_quarantined_sources where source_sha256 = 'aaaa'`;
+    expect(rows).toEqual([{ org_id: "o1", teardown_count: 2 }]);
   });
 
-  it("expires, so a false positive heals itself, and keeps every organization that hit it", async () => {
+  it("organization isolation: another organization's identical upload is admitted and never sees, extends or revives the listing", async () => {
     const store = postgresSourceQuarantine(sql);
-    await sql`delete from quarantined_sources`;
+    await sql`delete from org_quarantined_sources`;
+    await store.record({ documentId: "hostile", detail: "o1", ttlHours: 168 });
+    // o2 uploads the same bytes: admitted (it learns nothing), and a refusal note for it changes nothing.
+    expect(await store.find("same-bytes-other-org")).toBeNull();
+    expect(await store.find("same-bytes-other-org", "aaaa")).toBeNull();
+    await store.noteRefusal({ documentId: "same-bytes-other-org", sourceSha256: "aaaa" });
+    expect(await sql`select org_id, refused_count from org_quarantined_sources`).toEqual([{ org_id: "o1", refused_count: 0 }]);
+    // o2's own teardown on those bytes lists them for o2 only, attributed to o2, without touching o1's row.
+    const [before] = await sql`select expires_at from org_quarantined_sources where org_id = 'o1'`;
+    expect(await store.record({ documentId: "same-bytes-other-org", detail: "o2", ttlHours: 1000 })).toEqual({ sourceSha256: "aaaa", orgId: "o2", projectId: "w2" });
+    const [after] = await sql`select expires_at, teardown_count from org_quarantined_sources where org_id = 'o1'`;
+    expect(after).toEqual({ expires_at: before!.expires_at, teardown_count: 1 });
+    // o1's listing expires: o2's later teardown never revives it.
+    await sql`update org_quarantined_sources set expires_at = now() - interval '1 second' where org_id = 'o1'`;
+    await store.record({ documentId: "same-bytes-other-org", detail: "o2 again", ttlHours: 168 });
+    expect(await store.find("hostile")).toBeNull();
+    expect(await store.find("same-bytes-other-org")).toEqual({ sourceSha256: "aaaa", orgId: "o2", projectId: "w2" });
+  });
+
+  it("expires, so a false positive heals itself; refusals count on the organization's own row", async () => {
+    const store = postgresSourceQuarantine(sql);
+    await sql`delete from org_quarantined_sources`;
     await store.record({ documentId: "hostile", runId: "run-1", stage: "render-images", detail: "held", ttlHours: 168 });
-    const [listed] = await sql`select expires_at - created_at as ttl, org_ids, teardown_count, refused_count from quarantined_sources where source_sha256 = 'aaaa'`;
+    const [listed] = await sql`select expires_at - created_at as ttl, teardown_count, refused_count from org_quarantined_sources where source_sha256 = 'aaaa'`;
     expect(String(listed!.ttl)).toMatch(/^(7 days|168:00:00)/);
-    expect(listed!.org_ids).toEqual(["o1"]);
-    // A refusal of the same bytes in another organization joins the attribution.
-    await store.noteRefusal({ documentId: "same-bytes-other-org", sourceSha256: "aaaa" });
-    await store.noteRefusal({ documentId: "same-bytes-other-org", sourceSha256: "aaaa" });
-    const [refused] = await sql`select org_id, org_ids, last_org_id, last_document_id, refused_count from quarantined_sources where source_sha256 = 'aaaa'`;
-    expect(refused).toEqual({ org_id: "o1", org_ids: ["o1", "o2"], last_org_id: "o2", last_document_id: "same-bytes-other-org", refused_count: 2 });
+    await store.noteRefusal({ documentId: "hostile", sourceSha256: "aaaa" });
+    await store.noteRefusal({ documentId: "hostile", sourceSha256: "aaaa" });
     // A refusal note for another document's bytes changes nothing.
     await store.noteRefusal({ documentId: "innocent", sourceSha256: "aaaa" });
-    expect((await sql`select refused_count from quarantined_sources where source_sha256 = 'aaaa'`)[0]!.refused_count).toBe(2);
-    // Once expired, the bytes are admitted again.
-    await sql`update quarantined_sources set expires_at = now() - interval '1 second' where source_sha256 = 'aaaa'`;
+    expect((await sql`select refused_count from org_quarantined_sources where source_sha256 = 'aaaa'`)[0]!.refused_count).toBe(2);
+    await sql`update org_quarantined_sources set expires_at = now() - interval '1 second' where source_sha256 = 'aaaa'`;
     expect(await store.find("hostile")).toBeNull();
-    expect(await store.find("same-bytes-other-org")).toBeNull();
     // A new attributable failure lists them again, keeps the first attribution and counts it.
-    expect(await store.record({ documentId: "same-bytes-other-org", detail: "again", ttlHours: 1 })).toEqual({ sourceSha256: "aaaa", orgId: "o1", projectId: "w1" });
+    expect(await store.record({ documentId: "hostile", detail: "again", ttlHours: 1 })).toEqual({ sourceSha256: "aaaa", orgId: "o1", projectId: "w1" });
     expect(await store.find("hostile")).toMatchObject({ sourceSha256: "aaaa" });
-    const [again] = await sql`select teardown_count, org_ids, expires_at > now() + interval '50 minutes' as fresh from quarantined_sources where source_sha256 = 'aaaa'`;
-    expect(again).toEqual({ teardown_count: 2, org_ids: ["o1", "o2"], fresh: true });
+    const [again] = await sql`select teardown_count, expires_at > now() + interval '50 minutes' as fresh from org_quarantined_sources where source_sha256 = 'aaaa'`;
+    expect(again).toEqual({ teardown_count: 2, fresh: true });
+  });
+
+  it("refuses a document without an organization outright, and never lists it", async () => {
+    const store = postgresSourceQuarantine(sql);
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, source_sha256)
+      values ('orgless', null, 'u1', 'w1', 'run-1', 'n.pdf', 'application/pdf', 'k9', 'processing', 1, 'nnnn')`;
+    expect(await store.find("orgless")).toMatchObject({ orgId: null });
+    expect(await store.record({ documentId: "orgless", detail: "x", ttlHours: 1 })).toBeNull();
+    await sql`delete from documents where id = 'orgless'`;
   });
 
   it("cannot list a document without a source hash", async () => {
@@ -93,7 +119,7 @@ describe("postgres source quarantine", () => {
 describe("postgres source quarantine keyed by the staged hash", () => {
   it("cross-tenant poisoning: a teardown on swapped bytes lists those bytes, never the hash the server recorded", async () => {
     const store = postgresSourceQuarantine(sql);
-    await sql`delete from quarantined_sources`;
+    await sql`delete from org_quarantined_sources`;
     // 'swapped' claims P's hash (pppp) but the worker staged other bytes (xxxx). (Staging refuses such a
     // mismatch before any command; this is the store's own guarantee if a record ever happened.)
     expect(await store.record({ documentId: "swapped", stagedSha256: "x".repeat(64), detail: "held", ttlHours: 168 }))
@@ -101,8 +127,10 @@ describe("postgres source quarantine keyed by the staged hash", () => {
     // The other organization's popular file P stays admitted.
     expect(await store.find("popular-other-org", "pppp")).toBeNull();
     expect(await store.find("popular-other-org")).toBeNull();
-    // The staged hash is what is checked: the listed bytes are refused under any server hash.
+    // The staged hash is what is checked: the listed bytes are refused under any server hash (same organization).
     expect(await store.find("innocent", "x".repeat(64))).toMatchObject({ sourceSha256: "x".repeat(64) });
+    // ...but never for another organization's document with those staged bytes.
+    expect(await store.find("popular-other-org", "x".repeat(64))).toBeNull();
     // A document without a server hash is keyed by its staged hash.
     expect(await store.record({ documentId: "unhashed", stagedSha256: "u".repeat(64), detail: "held", ttlHours: 1 }))
       .toMatchObject({ sourceSha256: "u".repeat(64) });

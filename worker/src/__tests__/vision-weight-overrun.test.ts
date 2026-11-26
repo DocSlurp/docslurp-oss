@@ -20,11 +20,13 @@ import { resetStreamingSupportForTest } from "../tools/vision-stream.js";
  * for that org only. Every other org keeps the route, at a weight raised by the route's billed/bound correction.
  */
 const cfg = {
-  openRouterApiKey: "or-key", openAiApiKey: "sk-test", openAiBaseUrl: "https://api.openai.com/v1",
+  openRouterApiKey: "or-key", openAiApiKey: "sk-test", deepInfraApiKey: "di-key", openAiBaseUrl: "https://api.openai.com/v1",
   costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03, visionStreaming: false,
 } as Config;
 
-const OPENAI = "llm://openai/gpt-4.1-mini";
+// A direct provider route (DeepInfra); the direct OpenAI route is refused (no stated US or EU region).
+const DIRECT = "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct";
+const DIRECT_MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct";
 const OPENROUTER = "llm://openrouter/google/gemini-3.1-flash-lite";
 
 const answer = (usage: Record<string, unknown>) =>
@@ -32,7 +34,7 @@ const answer = (usage: Record<string, unknown>) =>
     { headers: { "content-type": "application/json" } });
 
 /** The admitted weight of one request on `model` for the 4-byte (size unknown) test image. */
-function weightOf(model: string, billing: "openai" | "openrouter"): number {
+function weightOf(model: string, billing: "deepinfra" | "openrouter"): number {
   return visionRequestPricing({
     model, runtime: "openai-compatible", billing, inputTokens: visionInputTokenBound(null, visionPrompt(), model), imageTokens: visionImageTokenBound(null, model),
   }).weightCents;
@@ -101,14 +103,14 @@ describe("billed usage above the admitted weight", () => {
     // Far more prompt tokens than the catalog's image bound allows: a provider counting more image tokens.
     const usage = { prompt_tokens: 400_000, completion_tokens: 300 };
     stubFetch(() => answer(usage));
-    const { outcome, prompt } = await guardedRead(backend, vision(OPENAI));
+    const { outcome, prompt } = await guardedRead(backend, vision(DIRECT));
     expect(outcome.admitted).toBe(true);
     promptForWeight = prompt;
-    const bound = weightOf("gpt-4.1-mini", "openai");
-    const billed = visionListPriceCents("gpt-4.1-mini", { inputTokens: 400_000, outputTokens: 300 })!;
+    const bound = weightOf(DIRECT_MODEL, "deepinfra");
+    const billed = visionListPriceCents(DIRECT_MODEL, { inputTokens: 400_000, outputTokens: 300 })!;
     expect(billed).toBeGreaterThan(bound);
     const line = warnings.find((warning) => warning.startsWith("[vision-weight] overrun"));
-    expect(line).toContain("model=gpt-4.1-mini provider=openai upstream=ProvA");
+    expect(line).toContain(`model=${DIRECT_MODEL} provider=deepinfra upstream=ProvA`);
     expect(line).toContain(`billed=${billed.toFixed(4)} bound=${bound.toFixed(4)}`);
     // The request's own weight plus the top-up: the org count now equals the billed cost.
     expect(backend.orgCents("org-1")).toBeCloseTo(billed, 3);
@@ -118,10 +120,10 @@ describe("billed usage above the admitted weight", () => {
   it("does nothing for usage within the bound", async () => {
     const backend = new MemoryVisionAttemptBackend();
     stubFetch(() => answer({ prompt_tokens: 1_200, completion_tokens: 300 }));
-    const { prompt } = await guardedRead(backend, vision(OPENAI));
+    const { prompt } = await guardedRead(backend, vision(DIRECT));
     promptForWeight = prompt;
     expect(warnings.filter((warning) => warning.startsWith("[vision-weight] overrun"))).toEqual([]);
-    expect(backend.orgCents("org-1")).toBeCloseTo(weightOf("gpt-4.1-mini", "openai"), 3);
+    expect(backend.orgCents("org-1")).toBeCloseTo(weightOf(DIRECT_MODEL, "deepinfra"), 3);
   });
 
   it("counts a reported OpenRouter cost above the bound even when the token counts are within it", async () => {
@@ -147,11 +149,11 @@ describe("billed usage above the admitted weight", () => {
     expect(sends).toHaveLength(3);
     expect(warnings.some((warning) => warning.includes("refused=route-overrun") && warning.includes("route=openrouter/google/gemini-3.1-flash-lite routeOverruns=3/3"))).toBe(true);
     // With a fallback on another route: the fallback serves.
-    const served = await guardedRead(backend, vision(OPENROUTER, OPENAI), 5);
+    const served = await guardedRead(backend, vision(OPENROUTER, DIRECT), 5);
     expect(served.outcome.admitted).toBe(true);
     const result = (served.outcome as { result: VisionExecutionResult }).result;
-    expect(result).toMatchObject({ fallbackUsed: true, route: { provider: "openai", model: "gpt-4.1-mini" } });
-    expect(sends).toEqual(["openrouter.ai", "openrouter.ai", "openrouter.ai", "api.openai.com"]);
+    expect(result).toMatchObject({ fallbackUsed: true, route: { provider: "deepinfra", model: DIRECT_MODEL } });
+    expect(sends).toEqual(["openrouter.ai", "openrouter.ai", "openrouter.ai", "api.deepinfra.com"]);
   });
 
   it("one org's overruns never refuse another org: the route's weight correction raises its weight, and it still runs", async () => {

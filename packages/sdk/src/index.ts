@@ -31,11 +31,65 @@ export type JsonObject = Record<string, unknown>;
 export type IndexingMode = "full" | "map" | "visual";
 
 /**
- * Processing quality (`pipeline.quality`): `fast` reads the text layer only and keeps scanned pages as page
- * images, never read (lowest price); `auto` (default) reads each page the cheapest faithful way (its price depends on
- * the mix of pages); `good` reads every page with a vision model (highest price). Prices: https://docslurp.io/pricing
+ * Processing quality (`pipeline.quality`): `fastest` (default) reads each file with its native reader and sends only
+ * scanned pages and images to OCR, never to a vision model (with `readScans: false` they are kept as page images and
+ * not read, the lowest price); `smartest` reads each file with its native reader and sends scans, images and hard math,
+ * layouts or fonts to a vision model. `smartest` above the project's quality needs project editor rights or an API key
+ * with the `pipeline:billed-features` scope. Prices: https://docslurp.io/pricing
  */
-export type QualityMode = "fast" | "auto" | "good";
+export type Quality = "fastest" | "smartest";
+
+/**
+ * Figures and charts (`pipeline.visuals`), an ordered ladder: `none`; `figures` (PDF figures as files); `charts` (also
+ * chart data from files that carry it, no model, no charge); `charts-ai` (also reads other charts with AI, billed per
+ * chart). Unset: the deployment's default for the caller (`ProjectRecord.visualsDefaults`). Replaces `figures` and
+ * `chartExport.tier`.
+ */
+export type Visuals = "none" | "figures" | "charts" | "charts-ai";
+
+/**
+ * @deprecated The former quality words; use {@link Quality}: `balanced` and `auto` are `fastest`, `fast` is `fastest`
+ * with `readScans: false`, `smart` and `good` are `smartest`. Still accepted; the server answers with a `Deprecation`
+ * header and `warnings`.
+ */
+export type LegacyQualityMode = "fast" | "auto" | "good" | "balanced" | "smart";
+
+/** A quality value the API accepts: {@link Quality}, or a deprecated {@link LegacyQualityMode} word. */
+export type QualityMode = Quality | LegacyQualityMode;
+
+/** A deprecated request field the server mapped (its `Deprecation: true` response carries these in `warnings`). */
+export type DeprecatedFieldWarning = { code: "deprecated_field"; field: string; replacement: string; message: string };
+
+/** A project's extraction settings in the current names (`ProjectRecord.extraction`). */
+export type ExtractionSettings = { quality: Quality; /** Fastest only: false keeps scans as page images. */ readScans?: boolean; visuals: Visuals | null };
+
+/** What unset visuals run as on this deployment per origin, and the rungs a caller may choose (`ProjectRecord.visualsDefaults`). */
+export type VisualsDefaults = { app: Visuals; machine: Visuals; available: Visuals[] };
+
+/** A lowering a run recorded: by the project's privacy mode, a deployment switch, the vision profile, or a replay cap. */
+export type ExtractionCap = { field: "quality" | "visuals"; from: string; to: string; reason: "privacy" | "switch" | "profile" | "replay" | string };
+
+/** What a run executes (`ProjectRun.extraction`): its stamp, or for older runs its settings mapped on read (`legacy: true`). */
+export type RunExtraction = { quality: Quality; visuals: Visuals; readsPages: boolean; capsApplied: ExtractionCap[]; legacy: boolean };
+
+/**
+ * Auto ladder rung (`pipeline.ladder`): `fast` reads the text layer only; `ocr` transcribes pixels (scans, table rescue)
+ * with OCR or plain page transcription; `intelligent` lets a vision model read figure pages (charts, diagrams, images).
+ * Docs: https://docslurp.io/docs/extraction/auto-ladder
+ */
+export type LadderRung = "fast" | "ocr" | "intelligent";
+
+/**
+ * Auto ladder limits (`pipeline.ladder`), applied in `auto` quality only. `maxRung` is the highest rung any page may be
+ * read on and holds the quality level: `ocr` (the default) is `fastest`, `fast` is `fastest` with `readScans: false`,
+ * `intelligent` is `smartest`; prefer `quality` and `readScans`. `maxEscalationShare.aboveFast` / `.aboveOcr` (0..1, unset by default) cap the share of
+ * each document's pages read above `fast` / above `ocr` (floor of share x pages, at least 1 while above 0). Set either to
+ * null to remove it. A non-editor's per-upload override can only tighten the project's limits.
+ */
+export type PipelineLadder = {
+  maxRung?: LadderRung;
+  maxEscalationShare?: { aboveFast?: number | null; aboveOcr?: number | null } | null;
+};
 
 export type ProjectRecord = JsonObject & {
   id: string;
@@ -46,6 +100,12 @@ export type ProjectRecord = JsonObject & {
   indexedPageCount?: number;
   /** False when the service has deferred indexing profiles off; hide indexing controls. */
   deferredIndexingAvailable?: boolean;
+  /** Quality and visuals in the current names (the stored `pipeline` keeps the deprecated fields during the window). */
+  extraction?: ExtractionSettings;
+  /** What unset visuals run as on this deployment, and the rungs a caller may choose. */
+  visualsDefaults?: VisualsDefaults;
+  /** Present when the request used a deprecated field. */
+  warnings?: DeprecatedFieldWarning[];
 };
 
 export type RetrievalStage = "chunk" | "page-text" | "map-node" | "page-image";
@@ -195,6 +255,10 @@ export type EstimateResponse = {
   profile?: EstimateProfile; pricingVersion?: string;
   /** Upload estimates only: the full quote (ingest, monthly hosting and usage) for the project's settings. */
   quote?: EstimateQuote;
+  /** Project and reindex estimates: the locked index settings the change alters (an update needs `apply: "reindex"`). */
+  lockedSettings?: ReindexSetting[];
+  /** Project and reindex estimates: pass as `confirmEstimate` to refuse stale work. */
+  signature?: string;
 };
 
 /**
@@ -226,13 +290,71 @@ export type FileProfile = {
 
 /** Settings accepted by project PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
 export type UpdateProjectInput = JsonObject & {
-  /** "reindex" queues a re-index of existing documents; "new-uploads" only changes future ingestion. */
+  /**
+   * "reindex" applies the change and re-indexes existing documents (equivalent to {@link DocSlurpClient.reindexProject});
+   * "new-uploads" only changes future ingestion. Once a project has indexed documents, changing an
+   * {@link INDEX_IDENTITY_SETTINGS} setting without "reindex" is refused: 409 `reindex_required`, nothing saved
+   * ({@link DocSlurpApiError.reindex} has the work and the estimate signature).
+   */
   apply?: "new-uploads" | "reindex";
+  /** Default `apply` for recommended re-indexes. Never unlocks an index-identity change. */
   autoConfirmReindex?: boolean;
+  /** With `apply: "reindex"`: the estimate `signature`; refused with 409 `estimate_stale` when the work changed since. */
+  confirmEstimate?: string;
   retainDocumentVersions?: number | null;
   /** False keeps China-based model providers out of this project's requests; true cannot widen an organization opt-out. */
   allowChinaProviders?: boolean;
 };
+/**
+ * Pipeline settings that define a project's search index (embedding, chunking, vector backends). Locked once the
+ * project has indexed documents: change them with {@link DocSlurpClient.reindexProject}, or an update with
+ * `apply: "reindex"`.
+ */
+export const INDEX_IDENTITY_SETTINGS = ["embedding", "chunkOverlap", "contextualChunkPreambles", "vectorBackends"] as const;
+export type IndexIdentitySetting = (typeof INDEX_IDENTITY_SETTINGS)[number];
+/**
+ * Every setting the reindex command takes and a `reindex_required` refusal may name: the index settings plus the vector
+ * switches (`embed`, `indexVectors`), which are locked while vectors were built under another index config.
+ */
+export const REINDEX_SETTINGS = [...INDEX_IDENTITY_SETTINGS, "embed", "indexVectors"] as const;
+export type ReindexSetting = (typeof REINDEX_SETTINGS)[number];
+
+/**
+ * `POST /v1/projects/:id/reindex` body. `pipeline` takes only {@link REINDEX_SETTINGS}; omitted, the index is rebuilt
+ * as is, which re-embeds every live document (billed).
+ */
+export type ReindexProjectInput = {
+  pipeline?: Partial<Record<ReindexSetting, unknown>>;
+  /** Explicit opt-in to speed-boosted processing for the re-index runs. */
+  speedBoost?: boolean;
+  /** The `signature` from {@link DocSlurpClient.reindexProjectEstimate} (or a `reindex_required` refusal); stale is 409 `estimate_stale`. */
+  confirmEstimate?: string;
+};
+export type ReindexProjectResponse = {
+  project: ProjectRecord;
+  /** Index settings this call changed (empty for a plain rebuild). */
+  changedSettings: ReindexSetting[];
+  /** `queued` / `blocked`: re-index runs exist; `saved`: settings saved, no documents to re-index; `unchanged`: nothing to do. */
+  outcome: "queued" | "blocked" | "saved" | "unchanged";
+  impact: ConfigChangeImpact;
+  estimate: CostEstimate | null;
+  /** The queued re-index runs; empty when the project has no documents to re-index. */
+  runIds: string[];
+  job: JobStatus | null;
+};
+
+/** `error.details.reindex` of a 409 `reindex_required`: what the refused change needs. */
+export type ReindexRequiredDetails = {
+  lockedSettings: ReindexSetting[];
+  documents: number;
+  pages: number;
+  credits: { low: number; high: number } | null;
+  /** Pass as `confirmEstimate` to {@link DocSlurpClient.reindexProject} or a confirming update. */
+  signature: string;
+  /** The reindex command's path. */
+  reindexUrl: string;
+};
+
 export type ProjectUpdateResponse = { project: ProjectRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
 /** The stored search and chat settings `PATCH /v1/projects/:id/search-settings` returns. */
 export type ProjectSearchSettingsResponse = { projectId: string; retrievalDefaults: JsonObject; chat: JsonObject } & JsonObject;
@@ -248,7 +370,9 @@ export type UploadEstimateInput = {
   }>;
   /** Knobs to quote with instead of the project's own; the answer's `quote` reflects them. */
   settings?: Partial<QuoteSettings>;
-  /** Price the upload with this chart export tier instead of the project's (or the API default, off). */
+  /** Price the upload with these visuals instead of the project's (or the deployment's default). */
+  visuals?: Visuals;
+  /** @deprecated Use `visuals`. Price the upload with this chart export tier instead of the project's. */
   chartExport?: ChartExportOverride;
   project?: string };
 
@@ -259,7 +383,15 @@ export type ChartExportOverride = { tier: ChartExportTier };
 
 /** The knobs of a quote, in customer terms; omitted ones take a new project's defaults. */
 export type QuoteSettings = {
-  quality: "fast" | "auto" | "good";
+  /**
+   * `fastest` or `smartest` (deprecated words accepted). Quotes answer with the pricing profile: `fast` (Fastest with
+   * `readScans: false`), `fastest`, `smartest`, or `visual` (visual indexing).
+   */
+  quality: QualityMode | "visual";
+  /** Fastest only: `false` quotes scans kept as page images, not read. */
+  readScans?: boolean;
+  /** Visuals to quote with (`charts-ai` adds a `charts` line); replaces `chartExport`. */
+  visuals?: Visuals;
   /**
    * `full` indexes every page on upload; `on-demand` indexes pages when a query first needs them; `visual` embeds every
    * page image on upload (a read of every page; not with `fast` quality).
@@ -275,7 +407,10 @@ export type QuoteSettings = {
    * Chart and diagram export tier. Omitted: the project's, else off for API callers. `models` (reading charts with AI)
    * adds a `charts` line; `free` costs nothing. Refused where the deployment does not offer `models`.
    */
+  /** @deprecated Use `visuals`. */
   chartExport: ChartExportTier;
+  /** Auto ladder above-fast share (0..1): the largest share of each document's pages a model may read. Omitted: the project's. */
+  aboveFastShare?: number | null;
 };
 export type EstimateInput = {
   files: Array<{ name: string; size: number; type?: string; pages?: number; durationSeconds?: number; profile?: FileProfile }>;
@@ -297,12 +432,14 @@ export type EstimateQuote = {
 /** What upload pricing reads from a project; returned by `uploadEstimate`. */
 export type EstimateProfile = {
   pricingVersion: string;
-  quality: "fast" | "auto" | "good";
+  quality: "fast" | "fastest" | "smartest" | "visual";
   documentFeatures: { documentSummary: boolean; structuredFields: boolean; knowledgeGraph: boolean; propositions: boolean };
   videoFrames: boolean;
   workerSlots?: number;
   stageCount: number;
   billing: "enforced" | "disabled";
+  /** The project's Auto ladder above-fast share, when set (`pipeline.ladder`). */
+  aboveFastShare?: number;
 };
 
 /** Counts across a job's runs. */
@@ -317,11 +454,27 @@ export type StreamJobOptions = RequestOptions & { pollIntervalMs?: number };
 
 export type ProjectRun = JsonObject & {
   id: string;
+  /** The quality and visuals this run executes, with any `capsApplied` lowering. */
+  extraction?: RunExtraction;
   status: "queued" | "processing" | "completed" | "failed";
   controlState?: string | null;
   /** Why the worker paused the run for spend (credit_exhausted, project_budget_paused, org_budget_paused, plan_not_entitled); it resumes by itself once the org may spend. */
   pauseReason?: string | null;
   error?: string | null;
+  /** Pages the run covers; provisional until `pagesCountedAt` is set. */
+  pagesTotal?: number;
+  /** Page checkpoints of the extraction stages. Reaches `pagesTotal` before the run can be searched; see `pagesSearchable`. */
+  pagesProcessed?: number;
+  /**
+   * Pages of documents that finished indexing and are served by search. Advances a document at a time; on a completed
+   * run it stays below `pagesTotal` when documents failed. Null or absent: not reported (an older server, or a run
+   * that predates the field), so fall back to `pagesProcessed`.
+   */
+  pagesSearchable?: number | null;
+  /** When `pagesTotal` became final. Null while documents are still being counted; absent when not reported. */
+  pagesCountedAt?: string | null;
+  /** When a worker first picked the run up. Null while the run waits for a worker; absent when not reported. */
+  workerStartedAt?: string | null;
 };
 
 export type DocumentRecord = JsonObject & {
@@ -473,10 +626,17 @@ export type UploadFileInput = {
 };
 
 /** Structural Node ReadStream/async iterable support, without Node runtime imports. */
-/** `docslurp:` canonical IDs are minted by the server; the API refuses them from callers (400). */
+/**
+ * Canonical IDs the server mints, which the API refuses from callers (400): the
+ * `docslurp:` prefix and the server's URL identity shape, `url:` plus a 64-character hex hash.
+ */
 function assertClientCanonicalIds(ids: Array<string | null | undefined>): void {
   for (const id of ids) {
-    if (typeof id === "string" && /^docslurp:/i.test(id.trim())) throw new RangeError("canonicalId must not start with docslurp: (reserved for DocSlurp)");
+    if (typeof id !== "string") continue;
+    const trimmed = id.trim();
+    if (/^docslurp:/i.test(trimmed) || /^url:[0-9a-f]{64}$/i.test(trimmed)) {
+      throw new RangeError("canonicalId must not start with docslurp: or be a url:<sha256> URL identity (reserved for DocSlurp)");
+    }
   }
 }
 
@@ -516,8 +676,12 @@ export type UploadOptions = RequestOptions & {
   /** Folder path for a single-file or streamed upload. Use UploadFileInput.path for several files. */
   path?: string;
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (fastest by default). */
   quality?: QualityMode;
+  /** Fastest only: `false` keeps scanned pages and images as page images, not read. Omitted uses the project's. */
+  readScans?: boolean;
+  /** Figures and charts for these files (`pipeline.visuals`); omitted uses the project's, else the deployment default. */
+  visuals?: Visuals;
   /**
    * Chart and diagram export for this request. Omitted: the project's setting; a project with no setting is `off` for
    * API, SDK, CLI and MCP calls. `free` exports charts that carry their own data at no charge; `models` also reads
@@ -532,6 +696,11 @@ export type UploadOptions = RequestOptions & {
    * create that timed out is retried safely and never makes a second session.
    */
   directUpload?: "auto" | boolean;
+  /**
+   * Storage PUTs in flight at once for a direct upload, shared by every file and part (1–32, default 6). Files and the
+   * parts of a large file go up in parallel up to this limit.
+   */
+  transferConcurrency?: number;
   filename?: string;
   idempotencyKey?: string;
   /** Without `project`: create a fresh self-titled project instead of using the client project. */
@@ -543,6 +712,8 @@ export type UploadOptions = RequestOptions & {
   project?: string;
 };
 
+type TransferSlot = <T>(task: () => Promise<T>) => Promise<T>;
+
 export type UploadInput = {
   /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
@@ -552,8 +723,12 @@ export type UploadInput = {
   idempotencyKey?: string;
   /** Stamp these documents with an indexing mode instead of the project's. */
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (fastest by default). */
   quality?: QualityMode;
+  /** Fastest only: `false` keeps scanned pages and images as page images, not read. Omitted uses the project's. */
+  readScans?: boolean;
+  /** Figures and charts for these files (`pipeline.visuals`); omitted uses the project's, else the deployment default. */
+  visuals?: Visuals;
   /**
    * Chart and diagram export for this request. Omitted: the project's setting; a project with no setting is `off` for
    * API, SDK, CLI and MCP calls. `free` exports charts that carry their own data at no charge; `models` also reads
@@ -630,8 +805,12 @@ export type UploadUrlsInput = {
   tags?: string[];
   idempotencyKey?: string;
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (fastest by default). */
   quality?: QualityMode;
+  /** Fastest only: `false` keeps scanned pages and images as page images, not read. Omitted uses the project's. */
+  readScans?: boolean;
+  /** Figures and charts for these files (`pipeline.visuals`); omitted uses the project's, else the deployment default. */
+  visuals?: Visuals;
   /**
    * Chart and diagram export for this request. Omitted: the project's setting; a project with no setting is `off` for
    * API, SDK, CLI and MCP calls. `free` exports charts that carry their own data at no charge; `models` also reads
@@ -641,7 +820,7 @@ export type UploadUrlsInput = {
   newProject?: boolean;
   orgId?: string;
   templateKey?: ProjectTemplateKey;
-  /** Each URL's canonical ID defaults to the URL; pass an object to map it elsewhere (e.g. "/products"). */
+  /** Each URL's canonical ID defaults to an opaque ID derived from the URL (`url:<sha256>`; the same URL always matches); pass an object to map it elsewhere (e.g. "/products"). */
   urls: Array<string | { url: string; canonicalId?: string }>;
   /** Project ID, slug or name. A name that matches no project creates one with that name. */
   project?: string;
@@ -948,6 +1127,18 @@ export type DeletedDocument = JsonObject & {
 export type FigureResumeBlockReason = "attempts" | "vm-budget" | "no-progress" | "figures-off" | "resume-off" | "stale" | "refused" | "unscanned";
 
 /** Answer of {@link DocSlurpClient.resumeDocumentFigures}. */
+/** One page extract record (GET /v1/documents/{id}/page-extracts). */
+export type PageExtractRecord = {
+  pageNumber: number; runId: string;
+  /** `video-frames` is a video's sampled-frame read: it contributes to the page's transcript and is never final. */
+  pass: "extract" | "scan-ocr" | "critique" | "vision" | "human" | "video-frames";
+  method: "text-layer" | "ocr" | "ocr-second-read" | "vision" | "transcription" | "correction" | "kept-as-image" | "none";
+  engine: string | null; billedClass: "fast" | "ocr" | "rich" | null; tags: string[];
+  confidence: number | null; plausibility: number | null; textBytes: number | null; finishReason: string | null; durationMs: number | null;
+  adopted: boolean; isFinal: boolean; supersededByPass: string | null; createdAt: string;
+};
+export type DocumentPageExtracts = { documentId: string; records: PageExtractRecord[]; nextCursor: string | null };
+
 export type FigureResumeRequest = {
   documentId: string;
   status: "queued" | "already-queued" | "not-resumable" | "capped" | "off";
@@ -969,7 +1160,15 @@ export type ProjectFigureResumeRequest = {
 };
 
 /** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
-export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBoost?: boolean; chartExport?: ChartExportOverride };
+export type ReprocessRunInput = {
+  stageFrom?: string; stages?: string[]; speedBoost?: boolean;
+  /** Quality for the reprocess; omitted: the source run's, capped at the project's now. */
+  quality?: Quality;
+  /** Visuals for the reprocess; omitted: the source run's, capped at the project's now. */
+  visuals?: Visuals;
+  /** @deprecated Use `visuals`. */
+  chartExport?: ChartExportOverride;
+};
 /** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
 export type ReprocessRunResult = { run: ProjectRun; job?: JobStatus; warnings: string[] };
 export type BulkDocumentsInput = {
@@ -1010,6 +1209,39 @@ export type ActivityEvent = {
   progress: JsonObject;
   createdAt?: string;
   event: JsonObject;
+};
+
+/** Remaining-time bucket. Shown as a bucket, never a countdown. */
+export type EtaBucket = "<1m" | "1-5m" | "5-15m" | "15-60m" | "1-3h" | ">3h";
+/** An ETA: `estimate` is true when it comes from project history rather than the run's own progress. */
+export type RunEta = { seconds: number; bucket: EtaBucket; basis: "observed" | "historical"; estimate: boolean; pagesPerMinute: number };
+type ActivityCounts = { runs: number; documents: number; pages: number };
+/** Your organization's ingestion at a glance (`GET /v1/runs/activity/summary`, `GET /v1/runs?activity=true`, and the stream's `activity-summary` event). */
+export type ActivitySummary = {
+  queued: ActivityCounts;
+  inProgress: ActivityCounts & { pagesProcessed: number; pagesTotal: number };
+  recentlyCompleted: ActivityCounts;
+  recentWindowMinutes: number;
+  /** Observed throughput of processing runs; null with nothing to observe. */
+  pagesPerMinute: number | null;
+  /** Until every active run finishes; null while estimating. */
+  eta: { seconds: number; bucket: EtaBucket; estimate: boolean } | null;
+  /** More active runs than the summary reads: counts cover the oldest ones and eta is null. */
+  truncated: boolean;
+  generatedAt: string;
+};
+/** Upload-session progress: transfer, then the run it started (null until ingestion starts). */
+export type UploadSessionProgress = {
+  files: { total: number; completed: number };
+  bytes: { total: number; completed: number };
+  run: {
+    id: string;
+    status: string;
+    documents: { total: number; processed: number };
+    pages: { total: number; processed: number };
+    pagesPerMinute: number | null;
+    eta: RunEta | null;
+  } | null;
 };
 
 export type StreamActivityOptions = RequestOptions & {
@@ -1085,6 +1317,80 @@ function positiveDuration(value: number, name: string): number {
   return value;
 }
 
+/** Repeats of a session call refused as busy or rate limited. */
+const SESSION_BUSY_ATTEMPTS = 8;
+const SESSION_BUSY_MAX_DELAY_MS = 5_000;
+/** A repeat is not worth sending with less time than this left before the call's deadline. */
+const SESSION_RETRY_MIN_REMAINING_MS = 250;
+/** The final complete of a stream upload: the only way its size reaches the server, so it gets its own, longer deadline. */
+const STREAM_FINAL_COMPLETE_TIMEOUT_MS = 120_000;
+/** Uninspected files completed per call (the server's batch limit is 100). */
+const UNINSPECTED_COMPLETE_BATCH = 100;
+/** Extra completion rounds for uninspected files answered retryable, and the first wait between them (doubling). */
+const UNINSPECTED_RETRY_ROUNDS = 3;
+const UNINSPECTED_RETRY_DELAY_MS = 500;
+
+/** The session is held by another request (or the server's reconciler), or the caller is rate limited: wait, repeat. */
+function isSessionBusyError(error: unknown): error is DocSlurpApiError {
+  return error instanceof DocSlurpApiError && (error.status === 429 || (error.status === 409 && error.code === "upload_session_busy"));
+}
+
+/** files/complete's answers that mean the file's bytes (or some parts) are not in storage: upload them, then complete. */
+const RESEND_COMPLETION_CODES = new Set(["upload_object_missing", "upload_parts_incomplete"]);
+function isResendableCompletion(error: unknown): boolean {
+  return error instanceof DocSlurpApiError && RESEND_COMPLETION_CODES.has(error.code ?? "");
+}
+
+/** A server answer that names one remote file twice cannot be matched to local bytes: refuse it before anything moves. */
+function assertUniqueRemoteIds(ids: ReadonlyArray<string | undefined>, what: string): void {
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (typeof id !== "string" || !id) throw new Error(`Upload ${what} names a file without an id`);
+    if (seen.has(id)) throw new Error(`Upload ${what} names file ${id} more than once`);
+    seen.add(id);
+  }
+}
+
+/**
+ * The one descriptor for `id` in a refreshed read, checked against the descriptor the local bytes were matched to: the
+ * same file (id, mode, size, and request index and client id where the original had them). Anything else is refused,
+ * so bytes never go to another file's targets.
+ */
+function refreshedDescriptor(files: readonly DirectUploadDescriptor[], original: DirectUploadDescriptor): DirectUploadDescriptor | undefined {
+  const matches = files.filter((file) => file.id === original.id);
+  if (matches.length > 1) throw new Error(`Upload session names file ${original.id} more than once`);
+  const fresh = matches[0];
+  if (!fresh) return undefined;
+  // A file matched without index and client id (an older server: by name and size) must keep its name too.
+  const legacyMatch = original.index == null && original.clientId == null;
+  const same = fresh.mode === original.mode && fresh.sizeBytes === original.sizeBytes
+    && (original.index == null || fresh.index === original.index)
+    && (original.clientId == null || fresh.clientId === original.clientId)
+    && (!legacyMatch || fresh.filename === original.filename);
+  if (!same) throw new Error(`Upload session describes ${original.filename} differently than before; not sending its bytes`);
+  return fresh;
+}
+
+/**
+ * The descriptors of a `fileId`-filtered read for the files asked for. Every id in the read must be unique; files not
+ * asked for are ignored (an older server ignores the filter and describes every file), never used: bytes only go to
+ * the descriptor that `refreshedDescriptor` matches to the requested file.
+ */
+function askedDescriptors(files: readonly DirectUploadDescriptor[], asked: readonly string[]): DirectUploadDescriptor[] {
+  assertUniqueRemoteIds(files.map((file) => file.id), "session read");
+  const wanted = new Set(asked);
+  return files.filter((file) => wanted.has(file.id));
+}
+
+/** Puts the upload session's id on an error thrown out of an upload, so a caller can inspect or clean it up. */
+function withSessionId(error: unknown, sessionPath: string): unknown {
+  const sessionId = decodeURIComponent(sessionPath.slice(sessionPath.lastIndexOf("/") + 1));
+  if (error && typeof error === "object" && !("sessionId" in error)) {
+    try { Object.defineProperty(error, "sessionId", { value: sessionId, enumerable: true }); } catch { /* frozen error */ }
+  }
+  return error;
+}
+
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     signal.throwIfAborted();
@@ -1136,6 +1442,31 @@ function deadline(timeoutMs: number, external?: AbortSignal) {
  */
 export type DocSlurpErrorLinks = Partial<Record<"billing" | "buyCredits" | "autoTopUp" | "apiKeys" | "docs", string>>;
 
+/** The deleted and remaining ids of a bulk delete the server stopped part-way (`details.policy: "bulk_delete_partial"`). */
+function serverPartialDelete(error: unknown): { deletedDocumentIds: string[]; remainingDocumentIds: string[] } | null {
+  if (!(error instanceof DocSlurpApiError)) return null;
+  const details = (error.body as { error?: { details?: Record<string, unknown> } } | null)?.error?.details;
+  if (details?.policy !== "bulk_delete_partial") return null;
+  const ids = (value: unknown) => (Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : null);
+  const deletedDocumentIds = ids(details.deletedDocumentIds);
+  const remainingDocumentIds = ids(details.remainingDocumentIds);
+  return deletedDocumentIds && remainingDocumentIds ? { deletedDocumentIds, remainingDocumentIds } : null;
+}
+
+/** The most documents one `bulkDocuments` request may name (the server's limit). */
+export const BULK_DOCUMENTS_MAX = 500;
+
+/**
+ * A `bulkDocuments` call split into several requests stopped part-way: `completed` is the merged result of the
+ * requests that succeeded, `remainingDocumentIds` were not sent (or their request failed), `cause` the failure.
+ */
+export class DocSlurpBulkDocumentsPartialError extends Error {
+  constructor(readonly completed: BulkDocumentsResult, readonly remainingDocumentIds: string[], override readonly cause: unknown) {
+    super(`bulkDocuments stopped after ${completed.documentIds instanceof Array ? completed.documentIds.length : 0} documents`);
+    this.name = "DocSlurpBulkDocumentsPartialError";
+  }
+}
+
 export class DocSlurpApiError extends Error {
   readonly body: unknown;
   /** Reviewed structured retry timing, independent of raw diagnostics in body. */
@@ -1148,6 +1479,8 @@ export class DocSlurpApiError extends Error {
   readonly requestId?: string;
   /** Buy-credits, auto top-up, billing and docs URLs for credit, budget and rate-limit errors. */
   readonly links?: DocSlurpErrorLinks;
+  /** On 409 `reindex_required`: the locked settings, the re-index work and the estimate signature to confirm. */
+  readonly reindex?: ReindexRequiredDetails;
 
   constructor(message: string, status: number, body: unknown, retryAfterSeconds?: number) {
     const safe = safeHttpFailure(status, body);
@@ -1164,7 +1497,16 @@ export class DocSlurpApiError extends Error {
     if (envelope?.code) this.code = envelope.code;
     if (safe.requestId) this.requestId = safe.requestId;
     if (envelope?.links) this.links = envelope.links;
+    if (envelope?.reindex) this.reindex = envelope.reindex;
   }
+}
+
+function reindexDetails(value: unknown): ReindexRequiredDetails | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const r = value as Record<string, unknown>;
+  if (!Array.isArray(r.lockedSettings) || typeof r.signature !== "string" || typeof r.reindexUrl !== "string") return undefined;
+  if (typeof r.documents !== "number" || typeof r.pages !== "number") return undefined;
+  return r as unknown as ReindexRequiredDetails;
 }
 
 const ERROR_LINK_NAMES = ["billing", "buyCredits", "autoTopUp", "apiKeys", "docs"] as const;
@@ -1180,16 +1522,18 @@ function errorLinks(value: unknown): DocSlurpErrorLinks | undefined {
 }
 
 /** Reads `{ error: { code, requestId, details: { links } } }`; legacy bodies, OpenAI errors without a string code and text yield nothing. */
-function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; links?: DocSlurpErrorLinks } | null {
+function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; links?: DocSlurpErrorLinks; reindex?: ReindexRequiredDetails } | null {
   if (!body || typeof body !== "object") return null;
   const error = (body as { error?: unknown }).error;
   if (!error || typeof error !== "object") return null;
-  const { code, requestId, details } = error as { code?: unknown; requestId?: unknown; details?: { links?: unknown } };
+  const { code, requestId, details } = error as { code?: unknown; requestId?: unknown; details?: { links?: unknown; reindex?: unknown } };
   const links = errorLinks(details?.links);
+  const reindex = reindexDetails(details?.reindex);
   return {
     ...(typeof code === "string" && code ? { code } : {}),
     ...(typeof requestId === "string" && requestId ? { requestId } : {}),
     ...(links ? { links } : {}),
+    ...(reindex ? { reindex } : {}),
   };
 }
 
@@ -1203,7 +1547,7 @@ export type UploadContentIdentity = { algorithm: "sha256"; digest: string };
 
 export type DirectUploadDescriptor = {
   identity?: UploadContentIdentity | null;
-  transferState?: "complete" | "missing" | "incomplete" | "unavailable";
+  transferState?: "complete" | "missing" | "incomplete" | "unavailable" | "unknown";
   verifiedBytes?: number | null;
   /** Position of the file in the create request; the server sanitizes filenames, so match by this, never by name. */
   index?: number | null;
@@ -1219,7 +1563,16 @@ export type DirectUploadDescriptor = {
   headers?: Record<string, string>;
   expiresInSeconds?: number;
   partSize?: number;
-  pendingParts?: Array<{ partNumber: number; sizeBytes: number; url: string }>;
+  /** A part without `url` (the server signs at most a bounded number per session read; see `partUrlsOmitted`) is signed with parts/sign. */
+  pendingParts?: Array<{ partNumber: number; sizeBytes: number; url?: string }>;
+  partUrlsOmitted?: boolean;
+  /**
+   * False when a large session's read did not check this file's object: complete it first, send bytes only if the
+   * server answers `upload_object_missing` or `upload_parts_incomplete`. An uninspected multipart file has no part list.
+   */
+  inspected?: boolean;
+  /** Stored state of the file (`pending`, `completed`, `failed`, `aborted`) on reads that report it. */
+  status?: string;
 };
 
 export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
@@ -1233,8 +1586,51 @@ export type UploadSession = {
   result?: UploadResponse | null;
   /** Files the server left out of the session (the others were accepted), keyed by request index. */
   rejected?: RejectedUpload[];
+  /** Files and bytes received, then the run's documents, pages, pages per minute and ETA bucket. */
+  progress?: UploadSessionProgress;
 };
 export type CompleteUploadFileInput = { fileId: string; sizeBytes?: number; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
+/** One file's answer from a batched completion: completed, or failed with the status the single-file call would have answered. */
+/**
+ * Why a file failed to complete, and what to do about it:
+ * - `retryable` / `action: "retry"`: repeat the same request for this file as it is (storage briefly unavailable, the
+ *   session busy, or the call's time budget spent).
+ * - `action: "reupload"`: put the file's bytes again (or finish its parts), then repeat.
+ * - `action: "none"`: a repeat cannot fix it (unknown file, refused type or size).
+ * - `blocksSession`: left as is, this file makes the whole session fail once the client stops completing files.
+ */
+export type UploadFileCompletionError = { statusCode: number; code: string; message: string; retryable: boolean; action: "retry" | "reupload" | "none"; blocksSession: boolean };
+export type UploadFileCompletion =
+  | { fileId: string; status: "completed" }
+  | { fileId: string; status: "failed"; error: UploadFileCompletionError };
+export type CompleteUploadFilesResult = { ok: boolean; files: UploadFileCompletion[]; completedCount: number; failedCount: number; sessionComplete: boolean };
+/** A session-level failure part-way through `completeUploadFiles`: what the earlier batches already completed. */
+export type CompleteUploadFilesPartial = { partialResults: CompleteUploadFilesResult };
+
+function completionResult(files: UploadFileCompletion[], sessionComplete: boolean): CompleteUploadFilesResult {
+  const completedCount = files.filter(file => file.status === "completed").length;
+  return { ok: completedCount === files.length, files, completedCount, failedCount: files.length - completedCount, sessionComplete };
+}
+
+/** An older server validates only the single-file body: it refuses `{ files }` for a missing top-level `fileId`. */
+function isLegacyCompletionRefusal(error: unknown): boolean {
+  if (!(error instanceof DocSlurpApiError) || error.status !== 400) return false;
+  const issues = (error.body as { error?: { details?: { issues?: Array<{ path?: unknown }> } } } | null)?.error?.details?.issues;
+  return Array.isArray(issues) && issues.some(issue => issue?.path === "fileId");
+}
+
+/** The batch answer's per-file description, rebuilt from a single-file call's error (fallback for older servers). */
+function legacyFileError(error: DocSlurpApiError): UploadFileCompletionError {
+  const retryable = error.status >= 500 || error.status === 429 || error.code === "upload_session_busy";
+  // A coded answer decides; an uncoded one (an older server) falls back to its message, never to its status alone.
+  const missing = isResendableCompletion(error) || (!error.code && /^(No object found|Upload parts are incomplete|Multipart completion for)/.test(error.message));
+  const reupload = !retryable && (missing || /^Uploaded size for|changed while its upload was being completed; upload it again/.test(error.message));
+  const blocksSession = !retryable && error.status < 500 && error.status !== 409 && error.status !== 404
+    && error.code !== "upload_object_missing" && !/^No object found/.test(error.message);
+  return { statusCode: error.status, code: error.code ?? "rejected", message: error.message, retryable, action: retryable ? "retry" : reupload ? "reupload" : "none", blocksSession };
+}
+/** The most files the server finalizes in one `files/complete` call; `completeUploadFiles` splits larger lists. */
+export const UPLOAD_COMPLETE_BATCH_SIZE = 100;
 
 function normalizeApiUrl(apiUrl: string): string {
   return apiUrl.replace(/\/+$/, "");
@@ -1438,6 +1834,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     const credential = await bearer();
     if (credential) headers.set("Authorization", `Bearer ${credential}`);
     if (SEND_CLIENT_TAG) headers.set(CLIENT_HEADER, CLIENT_TAG);
+    if (init.body == null && /^(POST|PUT|PATCH)$/i.test(init.method ?? "GET") && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     // A provider gets one forced refresh after a 401, when the body can be sent again.
     let refreshedAfter401 = typeof tokenSource !== "function" || isStreamBody(init.body);
     const timeoutMs = positiveDuration(requestOptions.timeoutMs ?? defaultTimeoutMs, "timeoutMs");
@@ -1453,6 +1850,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         bound.signal.throwIfAborted();
         const response = await fetchImpl(`${apiUrl}${path}`, {
           ...init,
+          // A body-less POST goes out as an empty JSON object: the API refuses an upload-path POST with no content type.
+          ...(init.body == null && /^(POST|PUT|PATCH)$/i.test(init.method ?? "GET") ? { body: "{}" } : {}),
           credentials: init.credentials ?? (hasBearer ? "omit" : "include"),
           headers,
           signal: bound.signal,
@@ -1494,6 +1893,34 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     } finally {
       if (onAbort) bound.signal.removeEventListener("abort", onAbort);
       bound.dispose();
+    }
+  }
+
+  /**
+   * A call that takes an upload session's lock (part signing, file completion, the session read, confirm): a busy
+   * session (409 `upload_session_busy`) or a rate limit (429) is waited out with backoff that honours Retry-After,
+   * within the call's own deadline. These calls are idempotent, so repeating them is safe.
+   */
+  async function requestSessionCall<T>(path: string, init: RequestInit, requestOptions: RequestOptions = {}, retryable = false,
+    /** Busy or rate-limited repeats allowed; the deadline bounds them either way. */
+    busyAttempts = SESSION_BUSY_ATTEMPTS): Promise<T> {
+    // One deadline for the call, all attempts and waits included: each attempt gets only the time that is left.
+    const giveUpAt = Date.now() + positiveDuration(requestOptions.timeoutMs ?? defaultTimeoutMs, "timeoutMs");
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await request<T>(path, init, { ...requestOptions, timeoutMs: Math.max(1, giveUpAt - Date.now()) }, retryable);
+      } catch (error) {
+        if (!isSessionBusyError(error) || attempt >= busyAttempts) throw error;
+        // The server's Retry-After wins (even past the backoff cap) when it fits before the deadline; otherwise the
+        // caller gets the busy answer, Retry-After included.
+        const backoffMs = Math.min(SESSION_BUSY_MAX_DELAY_MS, 250 * 2 ** attempt);
+        const delayMs = Math.max((error.retryAfterSeconds ?? 0) * 1000, backoffMs);
+        // Too little time would be left for another attempt: answer with this busy reply now.
+        if (Date.now() + delayMs + SESSION_RETRY_MIN_REMAINING_MS >= giveUpAt) throw error;
+        await sleep(delayMs, requestOptions.signal ?? new AbortController().signal);
+        // A sleep can overrun (a suspended timer, a busy event loop): past the deadline, answer with the last busy reply.
+        if (giveUpAt - Date.now() < SESSION_RETRY_MIN_REMAINING_MS) throw error;
+      }
     }
   }
 
@@ -1881,8 +2308,13 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   }
 
   /** Quality is a pipeline override; Speed boost is an explicit request-level opt-in. */
-  function pipelineFields(metadata: { quality?: QualityMode; speedBoost?: boolean; chartExport?: ChartExportOverride }): { pipeline?: { quality?: QualityMode; chartExport?: ChartExportOverride }; speedBoost?: boolean } {
-    const pipeline = { ...(metadata.quality ? { quality: metadata.quality } : {}), ...(metadata.chartExport ? { chartExport: { tier: metadata.chartExport.tier } } : {}) };
+  function pipelineFields(metadata: { quality?: QualityMode; readScans?: boolean; visuals?: Visuals; speedBoost?: boolean; chartExport?: ChartExportOverride }): { pipeline?: { quality?: QualityMode; readScans?: boolean; visuals?: Visuals; chartExport?: ChartExportOverride }; speedBoost?: boolean } {
+    const pipeline = {
+      ...(metadata.quality ? { quality: metadata.quality } : {}),
+      ...(metadata.readScans !== undefined ? { readScans: metadata.readScans } : {}),
+      ...(metadata.visuals ? { visuals: metadata.visuals } : {}),
+      ...(metadata.chartExport ? { chartExport: { tier: metadata.chartExport.tier } } : {}),
+    };
     return { ...(Object.keys(pipeline).length ? { pipeline } : {}),
       ...(metadata.speedBoost !== undefined ? { speedBoost: metadata.speedBoost } : {}) };
   }
@@ -2105,7 +2537,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (options.path) fields.path = options.path;
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
     if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
-    if (metadata.quality || metadata.chartExport) fields.pipeline = JSON.stringify(pipelineFields(metadata).pipeline);
+    if (metadata.quality || metadata.readScans !== undefined || metadata.chartExport) fields.pipeline = JSON.stringify(pipelineFields(metadata).pipeline);
     if (metadata.speedBoost !== undefined) fields.speedBoost = String(metadata.speedBoost);
     for (const [name, value] of Object.entries(extractFields(options))) fields[name] = String(value);
     const headers = new Headers();
@@ -2222,7 +2654,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
       const descriptor = session.files[0];
       if (!descriptor || descriptor.mode !== "multipart") throw new Error("Stream upload requires a multipart session");
-      const partSize = descriptor.partSize ?? 8 * 1024 * 1024;
+      const partSize = descriptor.partSize ?? 16 * 1024 * 1024;
       if (!Number.isSafeInteger(partSize) || partSize < 1) throw new Error("Invalid upload part size");
       const parts: Array<{ partNumber: number; etag: string }> = [];
       let buffer = new Uint8Array(partSize);
@@ -2234,7 +2666,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         signal.throwIfAborted();
         const number = ++partNumber;
         if (number > 10_000) throw new RangeError("Stream exceeds the multipart upload part limit");
-        const signed = await request<{ parts: Array<{ partNumber: number; url: string }> }>(`${sessionPath}/files/${encodeURIComponent(descriptor.id)}/parts/sign`, jsonRequest("POST", { partNumbers: [number] }), transferOptions);
+        const signed = await requestSessionCall<{ parts: Array<{ partNumber: number; url: string }> }>(`${sessionPath}/files/${encodeURIComponent(descriptor.id)}/parts/sign`, jsonRequest("POST", { partNumbers: [number] }), transferOptions);
         const url = signed.parts.find((part) => part.partNumber === number)?.url;
         if (!url) throw new Error(`No upload URL for part ${number}`);
         const task = putToStorage(url, new Blob([bytes as Uint8Array<ArrayBuffer>]), undefined, transferOptions).then((etag) => {
@@ -2267,21 +2699,31 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       await Promise.all(active);
       if (failure) throw failure;
       parts.sort((a, b) => a.partNumber - b.partNumber);
-      await request(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, sizeBytes, parts }), transferOptions);
+      // The size reaches the server only through this call, so it gets its own, longer deadline (busy replies waited out).
+      await requestSessionCall(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, sizeBytes, parts }),
+        { ...transferOptions, timeoutMs: STREAM_FINAL_COMPLETE_TIMEOUT_MS }, false, Number.POSITIVE_INFINITY);
       transferCompleted = true;
       return await waitUploadSession(sessionPath, transferOptions);
     } catch (error) {
       stopped.abort(error);
       close();
       await Promise.all(active);
-      if (sessionPath && !transferCompleted) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+      // A stream declares no size, so the server's reconciler can never finish it: close it (best effort) and name the
+      // session on the error.
+      if (sessionPath && !transferCompleted) {
+        await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+        withSessionId(error, sessionPath);
+      }
       throw error;
     } finally { close(); observable.off?.("error", onSourceError); signal.removeEventListener("abort", close); bound.dispose(); }
   }
 
-  /** PUT to a presigned storage URL: no API credentials, its own long deadline. */
+  /**
+   * PUT to a presigned storage URL: no API credentials, its own long deadline. The deadline grows with the body (16 KB/s
+   * floor) so a large part sharing a slow uplink with the other transfers still finishes.
+   */
   async function putToStorage(url: string, body: Blob, contentType: string | undefined, options: UploadOptions): Promise<string | null> {
-    const bound = deadline(positiveDuration(options.timeoutMs ?? 30 * 60_000, "timeoutMs"), options.signal);
+    const bound = deadline(positiveDuration(options.timeoutMs ?? 30 * 60_000, "timeoutMs") + Math.ceil(body.size / 16), options.signal);
     try {
       for (let attempt = 0; ; attempt++) {
         let response: Response;
@@ -2289,6 +2731,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           method: "PUT",
           body,
           credentials: "omit",
+          // A presigned target is final: a redirect would re-send the bytes somewhere else.
+          redirect: "error",
           headers: contentType ? { "Content-Type": contentType } : undefined,
           signal: bound.signal,
         }); } catch (error) {
@@ -2351,36 +2795,184 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
+  /** Storage PUTs in flight at once for one upload. */
+  function transferConcurrencyFor(options: UploadOptions): number {
+    const value = options.transferConcurrency ?? 6;
+    if (!Number.isInteger(value) || value < 1 || value > 32) throw new RangeError("transferConcurrency must be an integer from 1 to 32.");
+    return value;
+  }
+
+  /** At most `limit` tasks run at once; the rest start in the order they were queued. */
+  function transferSlots(limit: number): TransferSlot {
+    let active = 0;
+    const waiting: Array<() => void> = [];
+    return async (task) => {
+      if (active >= limit) await new Promise<void>((resolve) => waiting.push(resolve));
+      else active++;
+      try { return await task(); }
+      finally {
+        const next = waiting.shift();
+        if (next) next(); else active--;
+      }
+    };
+  }
+
   /**
-   * Sends one file's bytes. When a part or the single PUT fails after its own retries, the session is read again: storage knows which
+   * Sends one file's bytes through the shared transfer slots: the single PUT, or every missing part in parallel. When a PUT fails
+   * after its own retries, no new part starts, the parts in flight finish, and the session is read again: storage knows which
    * parts arrived, so the transfer resumes from the server's pendingParts (with fresh signed URLs) instead of restarting.
    */
-  async function transferFile(sessionPath: string, first: DirectUploadDescriptor, blob: Blob, options: UploadOptions): Promise<void> {
+  /** Every pending part's URL: the ones the session described, and the rest signed through parts/sign (100 per call). */
+  async function partUrls(sessionPath: string, descriptor: DirectUploadDescriptor, options: UploadOptions): Promise<Map<number, string>> {
+    const urls = new Map<number, string>();
+    const unsigned: number[] = [];
+    for (const part of descriptor.pendingParts ?? []) {
+      if (part.url) urls.set(part.partNumber, part.url); else unsigned.push(part.partNumber);
+    }
+    for (let start = 0; start < unsigned.length; start += 100) {
+      const signed = await requestSessionCall<{ parts: Array<{ partNumber: number; url: string }> }>(
+        `${sessionPath}/files/${encodeURIComponent(descriptor.id)}/parts/sign`, jsonRequest("POST", { partNumbers: unsigned.slice(start, start + 100) }), options);
+      for (const part of signed.parts) urls.set(part.partNumber, part.url);
+    }
+    for (const partNumber of unsigned) if (!urls.has(partNumber)) throw new Error(`No upload URL for part ${partNumber}`);
+    return urls;
+  }
+
+  async function transferFile(sessionPath: string, first: DirectUploadDescriptor, blob: Blob, options: UploadOptions, slot: TransferSlot): Promise<void> {
     let descriptor = first;
     for (let round = 0; ; round++) {
       try {
         if (descriptor.mode === "single") {
-          await putToStorage(descriptor.putUrl ?? "", blob, descriptor.mimeType, options);
+          const single = descriptor;
+          await slot(() => putToStorage(single.putUrl ?? "", blob, single.mimeType, options));
           return;
         }
-        for (const part of descriptor.pendingParts ?? []) {
-          const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-          await putToStorage(part.url, blob.slice(start, start + part.sizeBytes), undefined, options);
-        }
+        const urls = await partUrls(sessionPath, descriptor, options);
+        const partSize = descriptor.partSize;
+        let failed: { error: unknown } | undefined;
+        await Promise.all((descriptor.pendingParts ?? []).map((part) => slot(async () => {
+          if (failed) return;
+          const start = (part.partNumber - 1) * (partSize ?? part.sizeBytes);
+          try { await putToStorage(urls.get(part.partNumber)!, blob.slice(start, start + part.sizeBytes), undefined, options); }
+          catch (error) { failed ??= { error }; }
+        })));
+        if (failed) throw failed.error;
         return;
       } catch (error) {
         if (round >= 2 || options.signal?.aborted || !isTransientTransferError(error)) throw error;
-        let refreshed: DirectUploadDescriptor | undefined;
+        let session: UploadSession;
         try {
           await sleep(250 * 2 ** round, options.signal ?? new AbortController().signal);
-          const session = await request<UploadSession>(sessionPath, {}, options, true);
-          refreshed = session.files.find((file) => file.id === descriptor.id);
+          // Only this file: a large session's full read inspects far fewer objects.
+          session = await requestSessionCall<UploadSession>(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, {}, options, true);
         } catch { throw error; }
+        // The refreshed targets must belong to the same file the local bytes were matched to.
+        const refreshed = refreshedDescriptor(askedDescriptors(session.files, [descriptor.id]), descriptor);
         if (!refreshed) throw error;
-        if ((refreshed as { status?: string }).status === "completed") return;
+        if (refreshed.status === "completed") return;
+        if (refreshed.status === "failed" || refreshed.status === "aborted") throw new Error(`Upload of ${descriptor.filename} ${refreshed.status}`);
         descriptor = refreshed;
       }
     }
+  }
+
+  /**
+   * Files a large session's read did not inspect (`inspected: false`): completed in batches (one call per 100), so
+   * their stored objects decide. Returns the files whose bytes must still be sent, freshly described by ONE `fileId`
+   * read per batch. Only `upload_object_missing` and `upload_parts_incomplete` mean "send the bytes"; any other
+   * failure is thrown (a coded busy reply too: it is never taken for a missing object).
+   */
+  async function settleUninspected(sessionPath: string, uninspected: DirectUploadDescriptor[], options: UploadOptions): Promise<Map<string, DirectUploadDescriptor>> {
+    const resend = new Map<string, DirectUploadDescriptor>();
+    const signal = options.signal ?? new AbortController().signal;
+    for (let start = 0; start < uninspected.length; start += UNINSPECTED_COMPLETE_BATCH) {
+      const chunk = uninspected.slice(start, start + UNINSPECTED_COMPLETE_BATCH);
+      const missing: string[] = [];
+      // Files answered retryable (the server's hold budget ran out: `upload_session_busy`; storage briefly unavailable:
+      // `upload_storage_unavailable`) go into the next batch, a few rounds with short waits.
+      let pending = chunk;
+      for (let round = 0; pending.length > 0; round++) {
+        const retry: DirectUploadDescriptor[] = [];
+        const settled = await completeUninspectedRound(sessionPath, pending, options);
+        for (const file of pending) {
+          const outcome = settled.get(file.id)!;
+          if (outcome === "completed") continue;
+          if (outcome === "missing") missing.push(file.id);
+          else if (outcome === "retry") retry.push(file);
+          else throw new Error(`Upload of ${file.filename} could not be completed (${outcome.code})`);
+        }
+        if (retry.length === 0) break;
+        if (round >= UNINSPECTED_RETRY_ROUNDS) {
+          // Still not finished: the session is busy, not broken. Answered as busy, so the upload keeps (and names) it.
+          throw new DocSlurpApiError("Upload session is busy finalizing these files", 409,
+            { error: { code: "upload_session_busy", message: `${retry.length} files were not finalized in time` } });
+        }
+        await sleep(UNINSPECTED_RETRY_DELAY_MS * 2 ** round, signal);
+        pending = retry;
+      }
+      if (!missing.length) continue;
+      const query = missing.map((id) => `fileId=${encodeURIComponent(id)}`).join("&");
+      const session = await requestSessionCall<UploadSession>(`${sessionPath}?${query}`, {}, options, true);
+      if (["failed", "aborted", "expired"].includes(session.status)) throw new Error(`Upload session ${session.status}`);
+      const described = askedDescriptors(session.files, missing);
+      for (const id of missing) {
+        const original = chunk.find((file) => file.id === id)!;
+        const name = original.filename;
+        const fresh = refreshedDescriptor(described, original);
+        if (!fresh) throw new Error(`Upload session no longer has ${name}`);
+        if (fresh.status === "completed") continue;
+        if (fresh.status === "failed" || fresh.status === "aborted") throw new Error(`Upload of ${name} ${fresh.status}`);
+        resend.set(id, fresh);
+      }
+    }
+    return resend;
+  }
+
+  /**
+   * One completion round for uninspected files: one batch call (or, on an older server without batches, one call per
+   * file). Each file is `completed`, `missing` (send its bytes), `retry` (a retryable per-file answer, or a busy or
+   * unavailable single-file call) or a failure with its code.
+   */
+  async function completeUninspectedRound(sessionPath: string, files: DirectUploadDescriptor[], options: UploadOptions): Promise<Map<string, "completed" | "missing" | "retry" | { code: string }>> {
+    const outcomes = new Map<string, "completed" | "missing" | "retry" | { code: string }>();
+    type Answered = Array<{ fileId?: string; status?: string; error?: { code?: string; message?: string; retryable?: boolean } }>;
+    let answered: Answered | null = null;
+    try {
+      const answer = await requestSessionCall<{ files?: Answered }>(`${sessionPath}/files/complete`,
+        jsonRequest("POST", { files: files.map((file) => ({ fileId: file.id })) }), options);
+      if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
+      answered = answer.files;
+    } catch (error) {
+      if (!isLegacyCompletionRefusal(error)) throw error;
+    }
+    if (answered !== null) {
+      const results = answered as Answered;
+      assertUniqueRemoteIds(results.map((result) => result.fileId), "completion result");
+      const sent = new Set(files.map((file) => file.id));
+      if (results.some((result) => !sent.has(result.fileId ?? ""))) throw new Error("Upload completion result names a file this call did not send");
+      const byId = new Map(results.map((result) => [result.fileId, result]));
+      for (const file of files) {
+        const result = byId.get(file.id);
+        const code = result?.error?.code;
+        outcomes.set(file.id, result?.status === "completed" ? "completed"
+          : code && RESEND_COMPLETION_CODES.has(code) ? "missing"
+          : result?.error?.retryable ? "retry"
+          : { code: code ?? "missing result" });
+      }
+      return outcomes;
+    }
+    // An older server without batch completion: one call per file, the same rules.
+    for (const file of files) {
+      try {
+        await requestSessionCall(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: file.id }), options);
+        outcomes.set(file.id, "completed");
+      } catch (error) {
+        if (isResendableCompletion(error)) outcomes.set(file.id, "missing");
+        else if (isSessionBusyError(error) || (error instanceof DocSlurpApiError && error.status >= 500)) outcomes.set(file.id, "retry");
+        else throw error;
+      }
+    }
+    return outcomes;
   }
 
   /** The local file a session descriptor belongs to: by request index, then the client id, and only for older servers by name and size. */
@@ -2404,6 +2996,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     target: { newProject: boolean; project?: string };
   }, options: UploadOptions): Promise<UploadResponse> {
     const { metadata } = args;
+    const concurrency = transferConcurrencyFor(options);
     const idempotencyKey = metadata.idempotencyKey ?? newIdempotencyKey();
     const session = await postUploadSession<UploadSession>(`${intakeBase(options)}/direct/sessions`, {
       ...extractFields(options),
@@ -2433,14 +3026,36 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       filename: typeof rejection.index === "number" ? args.names[rejection.index] ?? rejection.filename : rejection.filename,
     }));
     try {
-      for (const descriptor of session.files) {
+      // Match every descriptor before sending anything, so an unknown or repeated file fails the upload before any bytes move.
+      assertUniqueRemoteIds(session.files.map((descriptor) => descriptor.id), "session");
+      const work = session.files.map((descriptor) => {
         const match = sourceForDescriptor(descriptor, sources, claimed);
         if (!match) throw new Error(`Direct upload session returned a file this upload did not send: ${descriptor.filename}`);
-        await transferFile(sessionPath, descriptor, match.source.blob, options);
-      }
+        return { descriptor, blob: match.source.blob };
+      });
+      const resend = await settleUninspected(sessionPath, work.filter((item) => item.descriptor.inspected === false).map((item) => item.descriptor), options);
+      // Every file and part shares one set of slots. The first file that fails for good stops the others.
+      const stop = new AbortController();
+      const transferOptions = { ...options, signal: options.signal ? AbortSignal.any([options.signal, stop.signal]) : stop.signal };
+      const slot = transferSlots(concurrency);
+      let failure: { error: unknown } | undefined;
+      await Promise.all(work.map(({ descriptor, blob }) => {
+        const target = descriptor.inspected === false ? resend.get(descriptor.id) : descriptor;
+        if (!target) return undefined;
+        return transferFile(sessionPath, target, blob, transferOptions, slot).catch((error) => {
+          if (!failure) { failure = { error }; stop.abort(error); }
+        });
+      }));
+      // The caller's cancel wins over the error it caused.
+      options.signal?.throwIfAborted();
+      if (failure) throw failure.error;
     } catch (error) {
-      await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
-      throw error;
+      // No final complete is sent here (the reconciler finalizes known sizes). A session that stayed busy (or rate
+      // limited) past our deadline is left open for the server's reconciler, which finishes the files whose bytes
+      // arrived: aborting it would discard them. Any other failure closes the session (best effort). Either way the
+      // error names the session.
+      if (!isSessionBusyError(error)) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+      throw withSessionId(error, sessionPath);
     }
     // Once bytes have arrived, a status failure must not cancel accepted ingestion.
     const result = await waitUploadSession(sessionPath, options);
@@ -2454,6 +3069,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     streamRun,
     streamActivity,
     waitForRun,
+
+    /** Your organization's queued, in-progress and recently completed work, pages per minute and ETA bucket; null when unavailable. */
+    async getActivitySummary(options?: RequestOptions): Promise<ActivitySummary | null> {
+      return (await request<{ summary?: ActivitySummary | null }>("/v1/runs/activity/summary", {}, options, true)).summary ?? null;
+    },
 
     /** One page of run history (highest priority, then newest first). Follow `nextCursor` for the rest. */
     listRunsPage,
@@ -2476,6 +3096,18 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     /** Impact and cost of an {@link UpdateProjectInput}, without applying it. */
     updateProjectEstimate(id: string | undefined, input: UpdateProjectInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`${wsPath(id)}/estimate`, input, requestOptions);
+    },
+    /**
+     * Applies index-identity setting changes ({@link INDEX_IDENTITY_SETTINGS}) and re-indexes the project's existing
+     * documents in one step; with no `pipeline`, rebuilds the index under the current settings. Spends credits: price it
+     * with {@link reindexProjectEstimate} and pass its `signature` as `confirmEstimate`. Server keys need `projects:manage`.
+     */
+    reindexProject(id: string | undefined, input: ReindexProjectInput = {}, requestOptions?: RequestOptions): Promise<ReindexProjectResponse> {
+      return request<ReindexProjectResponse>(`${wsPath(id)}/reindex`, jsonRequest("POST", input as JsonObject), requestOptions);
+    },
+    /** What {@link reindexProject} would do and cost (`lockedSettings`, `signature`), without changing anything. */
+    reindexProjectEstimate(id: string | undefined, input: ReindexProjectInput = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      return estimateAt(`${wsPath(id)}/reindex/estimate`, input as JsonObject, requestOptions);
     },
     /**
      * Changes a project's retrieval defaults, ranking controls and chat settings (omitted fields keep their
@@ -2686,6 +3318,22 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
     },
 
+    /**
+     * How each page of a document got its text: method (`text-layer`, `ocr`, `ocr-second-read`, `vision`, `transcription`,
+     * `correction`, `kept-as-image`, `none`), pass, billed class, tags and quality signals. Labels only. Server keys need
+     * `artifacts`. Page through with `after` (the previous `nextCursor`); `final: true` keeps each page's final record.
+     */
+    getDocumentPageExtracts(documentId: string, input: { after?: string; limit?: number; final?: boolean; run?: string } = {},
+      requestOptions?: RequestOptions): Promise<DocumentPageExtracts> {
+      const query = new URLSearchParams();
+      if (input.after !== undefined) query.set("after", input.after);
+      if (input.limit !== undefined) query.set("limit", String(input.limit));
+      if (input.final !== undefined) query.set("final", String(input.final));
+      if (input.run !== undefined) query.set("run", input.run);
+      const suffix = query.toString() ? `?${query.toString()}` : "";
+      return request<DocumentPageExtracts>(`/v1/documents/${encodeURIComponent(documentId)}/page-extracts${suffix}`, {}, requestOptions, true);
+    },
+
     /** The ingest version this deployment produces; a document whose `ingestVersion` is lower can be reprocessed to update it. */
     getIngestVersion(requestOptions?: RequestOptions): Promise<WorkspaceIngestVersion> {
       return request<WorkspaceIngestVersion>("/v1/ingest-version", {}, requestOptions, true);
@@ -2693,7 +3341,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     /**
      * Finish extracting the figures a document's pass left out (a timed-out shard, a budget stop). Only queues the work: the
-     * service runs it in a fresh VM under its own caps (three attempts, one document per organization at a time). Server
+     * service runs it in a VM under its own caps (three attempts, one document per organization at a time). Server
      * keys need `ingest`. `status` is `queued`, `already-queued`, `not-resumable`, `capped` (attempts spent) or `off`
      * (the project's figures or resumes are off).
      */
@@ -2742,9 +3390,40 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     /**
      * Reprocesses, retags, deletes or exports many documents at once. Server keys need `ingest` (`artifacts` for
      * `export-artifacts`), and every document must be in a project the key can use (404 before any change otherwise).
+     * The server takes at most BULK_DOCUMENTS_MAX (500) documents per request: `delete`, `apply-tags` and
+     * `remove-tags` are sent in requests of that size and their results merged. A failure part-way throws
+     * DocSlurpBulkDocumentsPartialError: `completed` holds what was done (a delete the server stopped part-way counts
+     * the ids it reports deleted) and `remainingDocumentIds` what to retry, nothing else. `reprocess` and
+     * `export-artifacts` over the limit throw RangeError before sending.
      */
-    bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
-      return request(`/v1/documents/bulk`, jsonRequest("POST", input), requestOptions);
+    async bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
+      const send = (documentIds: string[]) => request<BulkDocumentsResult>(`/v1/documents/bulk`, jsonRequest("POST", { ...input, documentIds }), requestOptions);
+      if (input.documentIds.length <= BULK_DOCUMENTS_MAX) return send(input.documentIds);
+      if (input.action === "reprocess" || input.action === "export-artifacts") {
+        throw new RangeError(`${input.action} takes at most ${BULK_DOCUMENTS_MAX} documents per request; split the batch`);
+      }
+      const counted = input.action === "delete" ? "deleted" : "updated";
+      let total = 0;
+      const done: string[] = [];
+      for (let start = 0; start < input.documentIds.length; start += BULK_DOCUMENTS_MAX) {
+        const chunk = input.documentIds.slice(start, start + BULK_DOCUMENTS_MAX);
+        try {
+          const result = await send(chunk);
+          total += typeof result[counted] === "number" ? (result[counted] as number) : 0;
+          done.push(...chunk);
+        } catch (error) {
+          // The server deleted part of this request before it stopped (details.policy bulk_delete_partial): those ids
+          // are done, and only its remaining ones (and the requests not sent) are left.
+          const partial = serverPartialDelete(error);
+          if (partial) {
+            total += partial.deletedDocumentIds.length;
+            done.push(...partial.deletedDocumentIds);
+          }
+          const remaining = [...(partial ? partial.remainingDocumentIds : chunk), ...input.documentIds.slice(start + BULK_DOCUMENTS_MAX)];
+          throw new DocSlurpBulkDocumentsPartialError({ [counted]: total, documentIds: done }, remaining, error);
+        }
+      }
+      return { [counted]: total, documentIds: done };
     },
 
     uploadUrls,
@@ -2769,16 +3448,66 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return postUploadSession<UploadSession>("/v1/uploads/direct/sessions", { ...input, ...intakeTarget(input) }, options ?? {}, options?.idempotencyKey ?? newIdempotencyKey());
     },
     getUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadSession> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}`, {}, options, true);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}`, {}, options, true);
     },
     completeUploadFile(sessionId: string, input: CompleteUploadFileInput, options?: RequestOptions): Promise<{ ok: boolean }> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`, jsonRequest("POST", input), options);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`, jsonRequest("POST", input), options);
+    },
+    /**
+     * Completes many files of one session in batches of up to 100, one server call per batch. Good files complete and each
+     * bad one is reported in `files` (never thrown); a session-level failure (not found, closed, busy) throws. Against a
+     * server without batch support, falls back to one `completeUploadFile` call per file.
+     */
+    async completeUploadFiles(sessionId: string, files: CompleteUploadFileInput[], options?: RequestOptions): Promise<CompleteUploadFilesResult> {
+      const path = `/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`;
+      const results: UploadFileCompletion[] = [];
+      let sessionComplete = false;
+      let batched = true;
+      try {
+        for (let start = 0; start < files.length; start += UPLOAD_COMPLETE_BATCH_SIZE) {
+          const chunk = files.slice(start, start + UPLOAD_COMPLETE_BATCH_SIZE);
+          if (batched) {
+            try {
+              // A batch entry carries only what the server uses: storage's own part list is authoritative.
+              const entries = chunk.map(({ fileId, etag, sizeBytes }) => ({ fileId, ...(etag !== undefined ? { etag } : {}), ...(sizeBytes !== undefined ? { sizeBytes } : {}) }));
+              const answer = await requestSessionCall<Partial<CompleteUploadFilesResult>>(path, jsonRequest("POST", { files: entries }), options);
+              if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
+              // One result per file sent, each named once: anything else is not this batch's answer.
+              assertUniqueRemoteIds(answer.files.map((file) => file.fileId), "completion result");
+              const sent = new Set(chunk.map((file) => file.fileId));
+              if (answer.files.some((file) => !sent.has(file.fileId))) throw new Error("Upload completion result names a file this call did not send");
+              results.push(...answer.files);
+              sessionComplete = Boolean(answer.sessionComplete);
+              continue;
+            } catch (error) {
+              // Fall back only for an older server's refusal of the batch body, and only before anything was batched.
+              if (start !== 0 || !isLegacyCompletionRefusal(error)) throw error;
+              batched = false;
+            }
+          }
+          for (const file of chunk) {
+            try {
+              await requestSessionCall(path, jsonRequest("POST", file), options);
+              results.push({ fileId: file.fileId, status: "completed" });
+            } catch (error) {
+              // A busy, closed or unavailable session is the caller's to retry or abandon, not a per-file answer.
+              if (!(error instanceof DocSlurpApiError) || ![400, 404, 409, 413, 415].includes(error.status) || error.code === "upload_session_busy") throw error;
+              results.push({ fileId: file.fileId, status: "failed", error: legacyFileError(error) });
+            }
+          }
+        }
+      } catch (error) {
+        // Keep what earlier batches completed: the caller repeats only the rest.
+        if (error && typeof error === "object") (error as CompleteUploadFilesPartial).partialResults = completionResult([...results], sessionComplete);
+        throw error;
+      }
+      return completionResult(results, sessionComplete);
     },
     signUploadParts(sessionId: string, fileId: string, partNumbers: number[], options?: RequestOptions): Promise<{ parts: Array<{ partNumber: number; url: string }> }> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/parts/sign`, jsonRequest("POST", { partNumbers }), options);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/parts/sign`, jsonRequest("POST", { partNumbers }), options);
     },
     completeUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadResponse> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/confirm`, { method: "POST" }, options);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/confirm`, { method: "POST" }, options);
     },
     abortUploadSession(sessionId: string, options?: RequestOptions): Promise<{ ok: boolean }> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/abort`, { method: "POST" }, options);

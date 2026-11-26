@@ -1,4 +1,5 @@
 import { configuredVisionProvider } from "./vision.js";
+import { modelRecordUri } from "@docslurp/shared";
 import { RunPolicyError } from "../lib/document-failure.js";
 import { videoPolicy } from "./video-policy.js";
 import { scanVideo, prepareVideoFrame, describeVideoChunk } from "./video-processing.js";
@@ -11,8 +12,7 @@ import {
   UNIT_CHARGE_PROVIDER,
   mediaRichPages,
   pageCredits,
-  unitChargeMetadata,
-} from "@docslurp/shared";
+  unitChargeMetadata, switchDisabled } from "@docslurp/shared";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -29,6 +29,7 @@ import { buildMediaCanonicalDocument, type VisualSegment } from "./canonical.js"
 import { diarize, type DiarizationOutcome } from "./diarize.js";
 import { SegmentAssembler, planChunkWindows, toTimedSegments, type TimedSegment } from "./segments.js";
 import { buildMediaSummary } from "./summary.js";
+import { recordPageExtracts, videoFramePageRecord, type PageExtractInput } from "../pipeline/page-extracts.js";
 import type { MediaJournal, SpeakerTurn } from "./types.js";
 import { mediaWindowConcurrency, readMediaWindowConcurrency, runOrderedWindows } from "./windows.js";
 import { recordShardTiming } from "../pipeline/shard-calibration.js";
@@ -90,8 +91,9 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
       const { duration, hasAudio, hasVideo } = await inspectMedia(runner, source, config, signal);
       // Missing project configuration opts in; explicit false wins even for silent video.
       // Platform, privacy, budget and durable quota checks still apply.
+      // DOCSLURP_DISABLE=ai turns off the vision read of video frames (transcription is the baseline read, like OCR).
       const visualEnabled = process.env.MEDIA_VIDEO_ENABLED === "true" && hasVideo
-        && state.run.pipeline.mediaVideo?.enabled !== false;
+        && state.run.pipeline.mediaVideo?.enabled !== false && !switchDisabled(process.env, "ai");
       if (!hasAudio && !visualEnabled) throw new Error(DOCUMENT_FAILURE_MARKERS.silentVideo);
       const policy = hasVideo ? videoPolicy(duration, state.run.pipeline.mediaVideo) : undefined;
       if (policy) {
@@ -140,6 +142,8 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
           maxDocumentCostCents: policy?.maxCostCents, managedProvider: !(provider instanceof LeasedMediaProvider) && provider.id === "deepinfra", signal });
         segments = diarization.segments; speakerTurns = diarization.turns; costUsd += diarization.costUsd;
       }
+      /** Request time of each described frame batch, by batch index (for the page's frame record). */
+      const frameMs: number[] = [];
       if (vision && policy) {
         const scan = await scanVideo(runner, source, policy, signal);
         scanStats = { candidateCount: scan.candidateCount, selectedCount: scan.selectedCount, largestGapSeconds: scan.largestGapSeconds };
@@ -157,8 +161,11 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
             return frames;
           },
           process: (frames) => describeVideoChunk({ state, scope, storage, journal: args.journal!, provider: vision, frames, policy, config, signal }),
-          onTiming: (batch, index, ms) => recordShardTiming(state, { stage: "media-vision", executor: `${vision.id}/${vision.model}`,
-            documentId: document.id, pages: batch.length, ms, shardIndex: index, shardCount: scan.batches.length }),
+          onTiming: (batch, index, ms) => {
+            frameMs[index] = ms;
+            recordShardTiming(state, { stage: "media-vision", executor: `${vision.id}/${vision.model}`,
+              documentId: document.id, pages: batch.length, ms, shardIndex: index, shardCount: scan.batches.length });
+          },
         });
         for (const [index, batch] of scan.batches.entries()) {
           const result = descriptions[index]!;
@@ -193,6 +200,17 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
       state.artifactLedger.recordDocument(document.id, "canonical-document", storage.uri(`${prefix}.canonical.json`));
       state.artifactLedger.recordDocument(document.id, "markdown-manifest", storage.uri(`${prefix}.manifest.json`));
       document.pageCount = 1;
+      // Page extract record: the one page is the transcript. The engine stays a route word; the model that transcribed
+      // it is recorded beside it (operator-facing, not in the customer view).
+      // The sampled frames' read gets its own record on the same page, named by the vision model; it contributes to the
+      // transcript and is never the page's final pass (finalizePageExtracts ranks only the passes that write the text).
+      const frameRecord = vision ? videoFramePageRecord({ pageNumber: 1, provider: vision.id, model: vision.model,
+        batches: visualSegments.map((segment, index) => ({ text: segment.text, durationMs: frameMs[index] ?? null })) }) : null;
+      const records: PageExtractInput[] = [{ pageNumber: 1, pass: "extract", method: "transcription", engine: `media-${mediaKind}`,
+        textBytes: Buffer.byteLength(text, "utf8"), finishReason: text.trim() ? "stop" : "empty",
+        modelUri: modelRecordUri({ provider: provider.id, model: provider.model }) }];
+      if (frameRecord) records.push(frameRecord);
+      recordPageExtracts(state, document, records);
       return { artifactUri: storage.uri(`${prefix}.md`), stats: { provider: provider.id, model: provider.model,
         durationSeconds: duration, segments: segments.length, speakers: summary.speakerCount, visualSegments: visualSegments.length, coverage } };
     } finally {

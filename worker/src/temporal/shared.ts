@@ -39,7 +39,7 @@ export interface StageOutput {
   /** Set when the stage ran with readControlState: the run's pause/cancel request at its completion checkpoint. */
   controlRequested?: boolean;
   /** In-process only (a stage group's next stage); never part of an activity result. */
-  preloaded?: import("../db/store.js").PreloadedRunState;
+  preloaded?: import("../db/run-ledger.js").PreloadedRunState;
 }
 
 export interface UsageSummary {
@@ -53,11 +53,14 @@ export interface InitRunInput {
   executionGeneration?: string;
   runId: string;
   totalStages: number;
+  initialQuarantineSharding?: DocumentShardingInput;
 }
 
 export interface InitRunOutput {
   documentIds: string[];
   artifacts: Record<string, string>;
+  /** Shard demand committed by init, if the worker supports publishing it early. */
+  initialQuarantineDemand?: number;
   /** Page count per entry of documentIds (absent on older histories). */
   documentPages?: number[];
   /** MIME type per entry of documentIds (absent on older histories). */
@@ -226,6 +229,7 @@ export interface PipelineWorkflowInput {
 
 /** Several consecutive light stages run back to back in one activity. */
 export interface StageGroupInput {
+  executionGeneration?: string;
   stageNames: string[];
   runId: string;
   totalStages: number;
@@ -259,6 +263,7 @@ export interface FirstPassPlanOutput {
 
 export interface FirstPassCountInput {
   runId: string;
+  executionGeneration?: string;
   documentIds: string[];
 }
 
@@ -272,6 +277,7 @@ export const FIRST_PASS_BATCH_FINAL_FAILURE = "FirstPassBatchFinal";
 
 export interface FirstPassBatchInput {
   runId: string;
+  executionGeneration?: string;
   batchIndex: number;
   documentIds: string[];
   totalStages: number;
@@ -310,15 +316,22 @@ export interface VisionPageBatchInput {
   pageBundleSize: number;
   slotGate: boolean;
   activityTaskQueue?: string;
+  spendAdmissionGeneration?: string | null;
 }
 
 export interface VisionPageBatchPlan {
   /** Page tasks stored for the run (page_work_tasks rows with a payload). */
   total: number;
+  spendAdmissionGeneration?: string | null;
 }
 
 /** Temporal ApplicationFailure type for "org (or fleet) has no free worker slot". */
 export const WORKER_SLOT_UNAVAILABLE = "WorkerSlotUnavailable";
+/**
+ * A page task refused because its run is out of funds (worker pipeline/page-basis.ts UnfundedPagesError): non-retryable, so
+ * Temporal does not retry it against a paused run; the page fan-out requeues the bundle and waits for the run to resume.
+ */
+export const PAGE_TASK_SPEND_PAUSED = "PageTaskSpendPaused";
 /** Provider 429/5xx that survived in-process retries; Temporal retries with nextRetryDelay. */
 export const PROVIDER_RATE_LIMITED = "ProviderRateLimited";
 /**
@@ -343,6 +356,18 @@ export interface VisionPageTask {
   fallbackText?: boolean;
   /** A scan beside native text: read by the VM OCR engine (DOCSLURP_OCR_MODE=vm), never a hosted vision model. */
   vmOcr?: boolean;
+  /** The execution that admitted a capped vision stage. */
+  spendAdmissionGeneration?: string | null;
+  /**
+   * A read only table-leak signals (`table-rescue`) or extractor encoding facts (`encoding-read`) authorized: admitted under the
+   * guard's durable per-document page budget for that purpose (vision-extract budgetedReadPurpose). Absent: a page read.
+   */
+  readPurpose?: "table-rescue" | "encoding-read";
+  /**
+   * Payload version: 2 carries `readPurpose`. Absent (1): a payload persisted before it (page_work_tasks), whose purpose
+   * runPageTask resolves from the run's plan data alone. A payload's purpose can only make a read stricter.
+   */
+  payloadVersion?: number;
   /** Set by slot-gated workflows only. */
   slotGate?: boolean;
 }

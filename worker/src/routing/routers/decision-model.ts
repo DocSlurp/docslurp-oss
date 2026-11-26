@@ -32,7 +32,8 @@ import {
 import type { DecisionClient } from "../decision-client.js";
 import { insetVerdict, withInsetAssessments, type InsetGate } from "../inset-gate.js";
 import type { InsetTriageResult } from "../inset-triage.js";
-import { TRUST_RULE, freeTrustVerdict, insetGateCandidates } from "../trust.js";
+import { mathGlyphsWithholdTrust } from "../../lib/page-evidence.js";
+import { freeTrustVerdict, insetGateCandidates } from "../trust.js";
 import { isUncertain, type EmbeddingPrefilter } from "./embedding-prefilter.js";
 
 /** Thrown (instead of being swallowed) when `failOnTriageError` is set; carries the calls already billed. */
@@ -94,7 +95,7 @@ export function hasHealthyBody(page: PageInput): boolean {
     f.native.wordCount >= 150 &&
     !f.native.garbled &&
     f.native.plausibility >= 0.9 &&
-    f.native.mathGlyphRatio < TRUST_RULE.mathGlyphRatio &&
+    !mathGlyphsWithholdTrust(f.native.mathGlyphRatio) &&
     f.native.tableRuleScore < 1 &&
     f.native.unmappedGlyphRatio < 0.02
   );
@@ -111,7 +112,7 @@ function bodyIsPlainProse(page: PageInput): boolean {
   return (
     f.native.wordCount >= 150 &&
     !f.native.garbled &&
-    f.native.mathGlyphRatio < TRUST_RULE.mathGlyphRatio &&
+    !mathGlyphsWithholdTrust(f.native.mathGlyphRatio) &&
     f.native.tableRuleScore < 1 &&
     f.native.unmappedGlyphRatio < 0.02 &&
     (page.textFacts.textLayerStatus === "ocr-layer" || f.native.plausibility >= 0.9)

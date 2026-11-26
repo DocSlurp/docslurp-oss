@@ -7,7 +7,8 @@
  *   the worker refuses to start without a ready provider (page-reader-mode.ts).
  * - Only plain page transcription goes to the reader: a transcription prompt template with no output schema and no task
  *   prompt (vision-runtime.ts isPageTranscription), on a PDF page the renderer wrote as PNG, in a `standard` privacy
- *   project whose vision route is hosted. Schema and task-prompt reads, figure and chart pages, table-rescue pages,
+ *   project whose vision route is hosted. Schema and task-prompt reads, figure and chart pages, table-rescue and
+ *   encoding-read pages (read under the guard's durable per-document budgets, vision-extract budgetedReadPurpose),
  *   critique passes, routed (page router) pages, page-task (fan-out) pages, raster uploads and documents without page
  *   triage keep the hosted route; so does a `local-only` or `strict-privacy` project, and a run whose configured vision
  *   route is not hosted (a local or operator-private model).
@@ -21,7 +22,7 @@
  *   goes to the run's hosted vision route as it would without the reader. The hosted route is the run's own configured
  *   model, never an automatic fallback the system picks.
  */
-import { PRIVATE_MODEL_PROVIDER, resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
+import { PRIVATE_MODEL_PROVIDER, privacyModeAllowsHosted, resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
 
 import { pageImageReaderProvider, type PageImageReaderProvider } from "../extractors/plugins.js";
 import { visionPageReaderMode } from "../ocr/page-reader-mode.js";
@@ -30,6 +31,14 @@ import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
 import { isPageTranscription } from "../tools/vision-runtime.js";
 
 export { VISION_PAGE_READER_METRIC } from "../ocr/page-reader-mode.js";
+
+/**
+ * Pages one hosted read takes while the run's warm-started reader boots (page-reader-warm.ts): small, so the reader's
+ * readiness is checked again within a hosted round or two and later pages move to it once it is ready.
+ */
+export const VISION_READER_WARMING_HOSTED_CHUNK = 4;
+/** Lanes a document's reader pages are read with under warm start (at most two of them run reader jobs at once). */
+export const VISION_READER_WARMING_LANES = 4;
 
 export type VisionPageReaderRefusal = "off" | "no-provider" | "privacy-mode" | "no-org-scope" | "not-transcription" | "configured-route" | "region-policy" | "cost-capped";
 
@@ -69,7 +78,7 @@ export function visionPageReaderDecision(
   if (!provider) return { refused: "no-provider" };
   // Only a project that allows hosted vision may have its pages read by the reader: local-only and strict-privacy keep
   // the route their own policy admits.
-  if ((state.run.pipeline.privacyMode ?? "standard") !== "standard") return { refused: "privacy-mode" };
+  if (!privacyModeAllowsHosted(state.run.pipeline.privacyMode ?? "standard")) return { refused: "privacy-mode" };
   // A cost-capped run admits one hosted page at a time; a reader job of many pages could pass the cap by its batch.
   if ((state.run.pipeline.maxCostCents ?? 0) > 0) return { refused: "cost-capped" };
   if (typeof state.run.orgId !== "string" || !state.run.orgId || !state.run.id) return { refused: "no-org-scope" };

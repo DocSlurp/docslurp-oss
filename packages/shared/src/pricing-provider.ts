@@ -14,16 +14,27 @@
  */
 import type { CostEstimate } from "./jobs.js";
 import { OPEN_PRICING } from "./pricing-open.js";
-import type { QualityMode } from "./quality.js";
+import type { PipelineProfileId } from "./billing.js";
 import type { SearchMode } from "./project.js";
+import { serviceProfileActive } from "./deployment-profile.js";
 
-/** What a search is priced on: the mode it ran in and whether LLM query strategies ran. */
-export type SearchPriceOptions = { llmStrategies?: boolean; mode?: SearchMode };
+/**
+ * What a search is priced on: the mode it ran in, whether LLM query strategies ran, whether the hosted reranker ranked
+ * its candidates, and the measured provider cost (cents) of metered calls a provider may pass through (every hosted
+ * reranker call, a fallback's included). `providerCostCents` covers the whole charge, not each of its `searches`.
+ */
+export type SearchPriceOptions = { llmStrategies?: boolean; mode?: SearchMode; hostedRerank?: boolean; providerCostCents?: number };
 
 export const PRICING_PROVIDER_API_VERSION = 1;
 
-/** How one page is charged: a page whose text layer is used, or a page a model reads. */
-export type PageMode = "fast" | "rich";
+/**
+ * How one page is charged, cheapest first: `fast` (its text layer is used), `ocr` (an OCR engine transcribed it: the OCR
+ * route's recogniser, page reader or hosted OCR model) and `rich` (a vision model interpreted it). A provider's prices must
+ * keep that order for any page count: fast <= ocr <= rich (`assertPricingProvider` checks it at install).
+ */
+export type PageMode = "fast" | "ocr" | "rich";
+/** The page classes in price order, cheapest first. */
+export const PAGE_MODES: readonly PageMode[] = ["fast", "ocr", "rich"];
 /** Chat answer price tiers; the provider maps models to them. */
 export type ChatAnswerTier = "standard" | "advanced" | "premium";
 export const CHAT_ANSWER_TIERS: readonly ChatAnswerTier[] = ["standard", "advanced", "premium"];
@@ -46,7 +57,7 @@ export type IngestEstimateInput = {
   pages: number;
   /** Fractions of pages per class; normalized, so any positive weights work. */
   mix: Partial<PageMix>;
-  profile?: QualityMode;
+  profile?: PipelineProfileId;
   /** Org concurrent worker ceiling (default: the provider's funded worker slots). */
   workerSlots?: number;
   /** Number of files in the batch. */
@@ -61,7 +72,7 @@ export type IngestEstimateInput = {
 
 export type IngestEstimate = {
   pages: number;
-  profile: QualityMode;
+  profile: PipelineProfileId;
   workers: number;
   effectiveParallelism: number;
   workerSeconds: number;
@@ -69,12 +80,14 @@ export type IngestEstimate = {
   pagesPerMinute: number;
   minutesPer100Pages: number;
   fastPages: number;
+  /** Pages an OCR engine reads (scanned and image pages under `auto`). */
+  ocrPages: number;
   richPages: number;
   /** Rich pages counted for audio and video minutes. */
   mediaRichPages: number;
   credits: {
     totalCredits: number;
-    breakdown: { fast: number; rich: number; media: number; features: number };
+    breakdown: { fast: number; ocr: number; rich: number; media: number; features: number };
   };
   /** Credits per enabled optional feature, across all documents. */
   featureCredits: Partial<Record<DocumentFeature, number>>;
@@ -119,6 +132,39 @@ export type ComputeRateOverrides = Partial<{
   storageCentsPerGbMonth: number;
 }>;
 
+/**
+ * Model calls the system makes on its own choice (a fallback, an escalation, a failover, a chart generator, a tier pool):
+ * each is margin-checked before it is made (automatic-call-margin.ts).
+ */
+export const AUTOMATIC_CALL_KINDS = ["page-transcription", "chart-read", "chat-answer"] as const;
+export type AutomaticCallKind = (typeof AUTOMATIC_CALL_KINDS)[number];
+/** One automatic call as the margin gate plans it: the kind, the model and its planning token shape. */
+export type AutomaticCallValueInput = {
+  kind: AutomaticCallKind;
+  model: string;
+  /**
+   * Why the system makes the call: `fallback` (a second try of a read the primary may already have billed),
+   * `escalation` (a better read of a page already charged), `failover` (a second try of a chat answer), `pick` (the
+   * system's choice of model for a first call). A provider states the value the call adds: a retry of an already
+   * charged unit may add none (0).
+   */
+  role: "fallback" | "escalation" | "failover" | "pick";
+  inputTokens: number;
+  outputTokens: number;
+  /**
+   * `fallback` only: whether the primary's attempt of this read may have been billed (a rejected or cut-off answer, a
+   * route overrun). False when the primary was refused before acceptance (no host under its routing constraints, a
+   * throttle, an unavailable route): the fallback then serves the page's only billed read. Absent: unknown, treat as
+   * billed.
+   */
+  primaryBilled?: boolean;
+  /**
+   * `fallback` only: whether the caller bills the page this read serves (a vision page read). False for reads whose
+   * value is not a page charge (critique, chart export, document-map OCR, materialize). Absent: unknown, treat as false.
+   */
+  billsPage?: boolean;
+};
+
 /** Price ceilings for a chart & diagram export generator, USD per million tokens. */
 export type ChartGeneratorPriceCeiling = { inputUsdPerMTok: number; outputUsdPerMTok: number };
 
@@ -138,7 +184,7 @@ export interface PricingProvider {
    */
   pageEquivalentAllowance: number;
 
-  /** Credits for `pages` pages charged in `mode` (fractional). */
+  /** Credits for `pages` pages charged in `mode` (fractional). Must hold fast <= ocr <= rich for the same pages. */
   pageCredits(mode: PageMode, pages: number): number;
   /** Rich pages one model read of a page counts as, given its output tokens (unknown: 1). */
   richPagesForOutputTokens(outputTokens: number | null | undefined): number;
@@ -148,9 +194,9 @@ export interface PricingProvider {
   storageCreditsPerMonth(bytes: number): number;
   /** Credits for keeping `bytes` for `months` (30-day months) beyond an extract's free window. */
   extractRetentionCredits(bytes: number, months: number): number;
-  /** Searches one search counts as (LLM query strategies may count more). */
+  /** Searches one search counts as (LLM query strategies and the hosted reranker may count more). */
   searchUnits(opts: SearchPriceOptions): number;
-  /** Credits for `searches` searches; `mode` is the search mode that ran (omitted: deep). */
+  /** Credits for `searches` searches; `mode` is the search mode that ran (omitted: deep). May add `providerCostCents`. */
   searchCredits(searches: number, opts: SearchPriceOptions): number;
   webSearchCredits(opts: { deep?: boolean; includeContent?: boolean }): number;
   webPageCredits(pages: number): number;
@@ -180,11 +226,19 @@ export interface PricingProvider {
    * (`summaryTreeBillingActive`) then builds no summary tree: the unit is never priced from a default.
    */
   summaryTreeCallCredits?(): number;
+  /**
+   * What one automatic call of this kind, role and planning shape bills the customer, in USD, or null when this
+   * deployment does not bill it (no margin check then). Required where pricing is required (pricingRequired): a provider
+   * without it is refused at install, and a null answer there refuses the call (fail closed). Core compares it with the call's worst-case provider
+   * cost at the highest current price the route can reach (automatic-call-margin.ts).
+   */
+  automaticCallValueUsd?(call: AutomaticCallValueInput): number | null;
   /** Multiplier on unit charges for the opt-in speed boost (1 when off). */
   speedBoostMultiplier(speedBoost: boolean): number;
   /** Share of the completion page charge a run pays, given the stages it executes and reuses. */
   pageChargeShare(plan: { stageOrder: readonly string[]; reusedStages: readonly string[] }): number;
-  qualityModePricing(mode: QualityMode): QualityModePricing;
+  /** Price of one pricing profile (`fast`, `fastest`, `smartest`, `visual`; billing.ts PIPELINE_PROFILE_IDS). */
+  qualityModePricing(mode: PipelineProfileId): QualityModePricing;
   /** Body of the public price list (`GET /v1/billing/prices`), beyond `pricingVersion` and plans. */
   publicPrices(): Record<string, unknown>;
   /** Planning estimate of ingesting pages and media. */
@@ -250,6 +304,12 @@ export function assertPricingProvider(value: unknown): asserts value is PricingP
     || !(plans.starterCredits >= 0)) {
     throw new Error(`pricing provider ${provider.id} has invalid plans`);
   }
+  // Where pricing is required, every automatic call is margin-checked against the provider's value: a provider that
+  // cannot state one would silently stop every fallback, escalation and failover. Refused at install (startup).
+  if (pricingRequired() && typeof provider.automaticCallValueUsd !== "function") {
+    throw new Error(`pricing provider ${provider.id} has no automaticCallValueUsd(), required where pricing is required`);
+  }
+  assertPageModeOrder(provider as PricingProvider);
   const cost = provider.internalCost;
   if (!cost || typeof cost.computeRates !== "function" || typeof cost.listCredits !== "function"
     || typeof cost.sandboxCostCents !== "function" || typeof cost.sandboxRatesObservedAt !== "function"
@@ -258,14 +318,32 @@ export function assertPricingProvider(value: unknown): asserts value is PricingP
   }
 }
 
+/**
+ * Throw unless the provider's page prices are finite, non-negative and ordered fast <= ocr <= rich. Checked at a few page
+ * counts: an upgrade from a cheaper class to a dearer one charges the difference, which must never be negative.
+ */
+function assertPageModeOrder(provider: PricingProvider): void {
+  for (const pages of [1, 1_000]) {
+    const credits = PAGE_MODES.map((mode) => provider.pageCredits(mode, pages));
+    if (credits.some((value) => !Number.isFinite(value) || value < 0)) {
+      throw new Error(`pricing provider ${provider.id} returned an invalid page price`);
+    }
+    for (let index = 1; index < credits.length; index += 1) {
+      if (credits[index]! < credits[index - 1]!) {
+        throw new Error(`pricing provider ${provider.id} prices ${PAGE_MODES[index]} pages below ${PAGE_MODES[index - 1]} pages`);
+      }
+    }
+  }
+}
+
 /** The id the open default uses; a deployment provider may not claim it. */
 export const OPEN_PRICING_ID = "open";
 
 let installed: PricingProvider | null = null;
 
-/** Whether this process runs the hosted service profile, where the open default is never allowed. */
+/** Whether this process runs the hosted service profile (DOCSLURP_PROFILE or DOCSLURP_SERVICE_PROFILE), where the open default is never allowed. */
 export function pricingServiceProfile(env: Record<string, string | undefined> | undefined = processEnv()): boolean {
-  return env?.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() === "service";
+  return env !== undefined && serviceProfileActive(env);
 }
 
 function processEnv(): Record<string, string | undefined> | undefined {

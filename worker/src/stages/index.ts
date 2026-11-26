@@ -47,15 +47,14 @@ export function createStages(args: {
   /** Database client for the deferred-indexing stages. */
   sql?: Sql<Record<string, unknown>>;
   /** Store the rendered-area authorization reads the run and the balance from; required with `sql`. */
-  store?: Parameters<typeof createPageAreaSink>[1];
+  store?: Parameters<typeof createPageAreaSink>[0];
 }): Stage[] {
   // Rendered page areas raise the page's measured equivalents (db/page-equivalents.ts), from every raster cache instance.
   if (args.sql) {
-    const sql = args.sql;
     // Fail closed: a worker that can raise billing_pages from rendered areas must be able to authorize them.
     const store = args.store;
     if (!store) throw new Error("createStages: rendered page areas need a store to authorize measured pages");
-    configurePageAreaSink(createPageAreaSink(sql, store));
+    configurePageAreaSink(createPageAreaSink(store));
   }
   // Chart export's deterministic rungs: staged inputs go to the parser-VM guest through this worker's runner.
   setDeterministicVisualExtractor(createVmDeterministicVisualExtractor({ runner: args.runner, storage: args.storage }));

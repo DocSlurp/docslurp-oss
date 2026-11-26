@@ -3,9 +3,17 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { memoryCheckpointStore, type MemoryDocumentRecords } from "../pipeline/checkpoint-store-memory.js";
 
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { readMarkdownSlotBytes, storeFirstPassFigures } from "../pipeline/first-pass.js";
+
+/** An in-memory store whose document records are replaced by the given ones (PII withholding). */
+const withRecords = (records: Partial<MemoryDocumentRecords>) => {
+  const store = memoryCheckpointStore();
+  Object.assign(store.records, records);
+  return store;
+};
 
 // The first pass's figure step (stage first-pass:figures) queues the asset ledger write for its checkpoint in every case:
 // a stored folder (its rows spilled), a provider failure, and a refused folder.
@@ -83,14 +91,14 @@ describe("first pass: figures stored after the PII stage are withheld with it (H
       const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action } });
       const appended: string[][] = [];
       const recordedAtAppend: number[] = [];
-      (env.state as any).store = {
+      (env.state as any).store = withRecords({
         documentPiiWithholds: async () => true,
-        appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => {
+        appendWithheldArtifactUris: async (_scope: unknown, uris: readonly string[]) => {
           recordedAtAppend.push(Object.keys(env.state.artifactLedger.all()).length);
           uploadedAtAppend.push([...env.objects.keys()].filter((key) => key.includes("/doppler/")).length);
           appended.push([...uris]);
         },
-      };
+      });
       const uploadedAtAppend: number[] = [];
       const result = await run(env, await folder());
       expect(result.stats.dopplerFigures).toMatchObject({ status: "stored", piiWithheld: true });
@@ -113,11 +121,11 @@ describe("first pass: figures stored after the PII stage are withheld with it (H
   it("page-scoped block_indexing: figures of clean pages stay servable; withheld pages' figures and every other file join the list", async () => {
     const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing" } });
     const appended: string[] = [];
-    (env.state as any).store = {
+    (env.state as any).store = withRecords({
       documentPiiWithholds: async () => true,
       documentPiiWithholding: async () => ({ scope: "pages", pages: new Set([3]) }),
-      appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => { appended.push(...uris); },
-    };
+      appendWithheldArtifactUris: async (_scope: unknown, uris: readonly string[]) => { appended.push(...uris); },
+    });
     await run(env, await folder());
     const slots = Object.entries(env.state.artifactLedger.all() as Record<string, string>).filter(([slot]) => slot.startsWith(`${DOC_ID}:doppler`));
     const figurePage = (slot: string) => /:doppler-figure:p(\d+)\./.exec(slot)?.[1];
@@ -133,13 +141,13 @@ describe("first pass: figures stored after the PII stage are withheld with it (H
   it("page-scoped block_indexing: the withheld page's figure and the index are on the list before any object is uploaded", async () => {
     const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing" } });
     const firstAppend: { uris: string[]; objectsBefore: number } = { uris: [], objectsBefore: -1 };
-    (env.state as any).store = {
+    (env.state as any).store = withRecords({
       documentPiiWithholds: async () => true,
       documentPiiWithholding: async () => ({ scope: "pages", pages: new Set([3]) }),
-      appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => {
+      appendWithheldArtifactUris: async (_scope: unknown, uris: readonly string[]) => {
         if (firstAppend.objectsBefore === -1) { firstAppend.objectsBefore = env.objects.size; firstAppend.uris = [...uris]; }
       },
-    };
+    });
     const before = env.objects.size;
     await run(env, await folder());
     expect(firstAppend.objectsBefore).toBe(before);
@@ -159,11 +167,11 @@ describe("first pass: figures stored after the PII stage are withheld with it (H
     function scopedEnv() {
       const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing" } });
       const appended: string[] = [];
-      (env.state as any).store = {
+      (env.state as any).store = withRecords({
         documentPiiWithholds: async () => true,
         documentPiiWithholding: async () => ({ scope: "pages", pages: new Set([3]) }),
-        appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => { appended.push(...uris); },
-      };
+        appendWithheldArtifactUris: async (_scope: unknown, uris: readonly string[]) => { appended.push(...uris); },
+      });
       return { env, appended };
     }
 
@@ -207,11 +215,11 @@ describe("first pass: figures stored after the PII stage are withheld with it (H
   it("page-scoped outcome unreadable: every file joins the list (fail closed)", async () => {
     const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing" } });
     const appended: string[] = [];
-    (env.state as any).store = {
+    (env.state as any).store = withRecords({
       documentPiiWithholds: async () => true,
       documentPiiWithholding: async () => ({ scope: "document", reason: "malformed-metadata" }),
-      appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => { appended.push(...uris); },
-    };
+      appendWithheldArtifactUris: async (_scope: unknown, uris: readonly string[]) => { appended.push(...uris); },
+    });
     await run(env, await folder());
     const slots = Object.entries(env.state.artifactLedger.all() as Record<string, string>).filter(([slot]) => slot.startsWith(`${DOC_ID}:doppler`));
     // Every stored slot, plus `document.md` (withheld before upload, then never stored).
@@ -222,7 +230,7 @@ describe("first pass: figures stored after the PII stage are withheld with it (H
   it("a PII scan with nothing withheld stores document.md and withholds nothing; page facts are never stored", async () => {
     const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "redact_artifacts" } });
     const appended: string[] = [];
-    (env.state as any).store = { documentPiiWithholds: async () => false, appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => { appended.push(...uris); } };
+    (env.state as any).store = withRecords({ documentPiiWithholds: async () => false, appendWithheldArtifactUris: async (_scope: unknown, uris: readonly string[]) => { appended.push(...uris); } });
     await run(env, await folder());
     expect(appended).toEqual([]);
     expect(env.objects.has(`u/r/doppler/${DOC_ID}/document.md`)).toBe(true);
@@ -240,7 +248,7 @@ describe("first pass: figures stored after the PII stage are withheld with it (H
 
   it("an append that fails records no slot", async () => {
     const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing" } });
-    (env.state as any).store = { documentPiiWithholds: async () => true, appendWithheldArtifactUris: async () => { throw new Error("db down"); } };
+    (env.state as any).store = withRecords({ documentPiiWithholds: async () => true, appendWithheldArtifactUris: async () => { throw new Error("db down"); } });
     const result = await run(env, await folder());
     expect(result.stats.dopplerFigures).toMatchObject({ status: "failed" });
     expect(Object.keys(env.state.artifactLedger.all()).some((slot) => slot.includes("doppler"))).toBe(false);
@@ -254,7 +262,7 @@ describe("first pass: document.md is exactly the scanned Markdown slot (M1, L2)"
 
   it("stores the slot's bytes (what pii-detect scanned), never the batch's raw output with its stripped front matter", async () => {
     const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "redact_artifacts" } });
-    (env.state as any).store = { documentPiiWithholds: async () => false, appendWithheldArtifactUris: async () => undefined };
+    (env.state as any).store = withRecords({ documentPiiWithholds: async () => false, appendWithheldArtifactUris: async () => undefined });
     const dir = path.join(work, "images");
     await cp(path.join(FIXTURE, "images"), dir, { recursive: true });
     // The slot as the drains committed it, read the way the batch loop reads it.
@@ -273,7 +281,7 @@ describe("first pass: document.md is exactly the scanned Markdown slot (M1, L2)"
 
   it("L2: an append that fails stores nothing and deletes nothing (withheld before upload; orphan GC is the only deleter)", async () => {
     const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing" } });
-    (env.state as any).store = { documentPiiWithholds: async () => true, appendWithheldArtifactUris: async () => { throw new Error("db down"); } };
+    (env.state as any).store = withRecords({ documentPiiWithholds: async () => true, appendWithheldArtifactUris: async () => { throw new Error("db down"); } });
     const deleted: string[][] = [];
     const remove = env.storage.deleteKeys;
     env.storage.deleteKeys = async (keys: string[]) => { deleted.push(keys); await remove(keys); };

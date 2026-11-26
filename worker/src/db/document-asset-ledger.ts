@@ -1,3 +1,4 @@
+import { figuresOnSqlText } from "@docslurp/shared";
 /*
  * The document asset ledger (migration 0141): one `document_assets` row per image Doppler reports for a document and one
  * `document_extraction_levels` row per document, written together in one transaction with an explicit organization and
@@ -91,6 +92,8 @@ export interface DocumentAssetLedgerWrite {
    * an attempt already stored are kept (owner rule: orphan GC is the only deleter).
    */
   levelOnly?: boolean;
+  /** Only that the document's Markdown committed (markFigureLevelMarkdownComplete); the level and assets fields are unused. */
+  markdownOnly?: boolean;
 }
 
 /**
@@ -251,6 +254,11 @@ export interface DocumentAssetLedgerResult { upserted: number; removed: number; 
  */
 export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>, write: DocumentAssetLedgerWrite): Promise<DocumentAssetLedgerResult> {
   assertScope(write.scope);
+  if (write.markdownOnly) {
+    if (!write.level.markdownComplete) throw new DocumentAssetLedgerError("invalid-level");
+    await markFigureLevelMarkdownComplete(sql, write.scope);
+    return { upserted: 0, removed: 0, resumes: 0 };
+  }
   if (write.levelOnly) {
     // The level only: no rows, no manifest and no shards (the shard rules apply to a full write).
     if ((write.shards?.length ?? 0) > 0 || write.level.manifest) throw new DocumentAssetLedgerError("invalid-level");
@@ -523,7 +531,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     const facts = sharded
       ? { ...(level.run ?? { manifestResumes: 0, complete: false, resumable: false, deadlineMs: null }), sourceSha256: shardState!.source, settingsSha256: null, lastCutPage: shardState!.cut }
       : level.run;
-    const leveled = await tx`
+    const leveled = await tx<{ markdown_complete: boolean }[]>`
       insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status,
         images_exit_code, manifest_version, doppler_build, manifest_key, manifest_sha256, source_sha256, settings_sha256, resumes,
         last_cut_page, deadline_ms, assets_total, assets_extracted, assets_not_extracted, assets_unlinked, assets_resumable,
@@ -538,7 +546,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
       on conflict (document_id) do update
       set ${resumeRunChangeSql(tx)}, run_id = excluded.run_id,
           -- A resume never claims the Markdown committed (M1): it keeps whatever the pass recorded.
-          markdown_complete = ${resuming ? tx`document_extraction_levels.markdown_complete` : tx`excluded.markdown_complete`},
+          markdown_complete = ${resuming ? tx`document_extraction_levels.markdown_complete` : markdownCompleteSql(tx)},
           images_status = excluded.images_status,
           images_exit_code = excluded.images_exit_code, manifest_version = excluded.manifest_version,
           doppler_build = excluded.doppler_build, manifest_key = excluded.manifest_key, manifest_sha256 = excluded.manifest_sha256,
@@ -551,12 +559,12 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
           folder_bytes = ${folderBytes === null ? tx`document_extraction_levels.folder_bytes` : tx`excluded.folder_bytes`},
           asset_bytes = excluded.asset_bytes, gaps = excluded.gaps, shards = excluded.shards, assets_current = true, updated_at = now()
       where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
-      returning 1`;
+      returning markdown_complete`;
     if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
     // Billed bytes: stored figure files of this run plus the folder's own files.
     await tx`update document_extraction_levels set asset_bytes = ${totals!.bytes}::bigint + folder_bytes
       where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
-    if (!resuming && write.level.markdownComplete) await queueOldFigureFolders(tx, write.scope, oldFolders);
+    if (!resuming && leveled[0]!.markdown_complete) await queueOldFigureFolders(tx, write.scope, oldFolders);
     await queueFigureResume(tx, write.scope, resuming);
     return { upserted, removed, resumes };
   });
@@ -586,6 +594,21 @@ export interface PendingAssetLedgerWrite {
   resume?: boolean | { first: number; last: number };
   /** The level only, never a row (DocumentAssetLedgerWrite.levelOnly). */
   levelOnly?: boolean;
+  /** Only that the Markdown committed (DocumentAssetLedgerWrite.markdownOnly). */
+  markdownOnly?: boolean;
+}
+
+/**
+ * For a document whose figure step another stage owns (the first pass): once this stage's checkpoint commits the
+ * Markdown, mark the level of this run `markdown_complete` (markFigureLevelMarkdownComplete). Never a row.
+ */
+export function ledgerWriteForMarkdownCommitted(): PendingAssetLedgerWrite {
+  return {
+    level: { imagesStatus: "failed", imagesExitCode: null, manifestVersion: null, dopplerBuild: null, run: null, manifest: null, gaps: null },
+    assets: [],
+    levelOnly: true,
+    markdownOnly: true,
+  };
 }
 
 /** The ledger write for a stored figure set: every image, streamed back from the reader's spill. */
@@ -847,14 +870,20 @@ async function flushOne(
     console.warn(`[asset-ledger] document=${documentId} status=no-scope (run without organization or project; nothing written)`);
     return "no-scope";
   }
+  const markdownComplete = !!state.artifactLedger.readDocument(documentId, "markdown");
+  if (entry.markdownOnly && !markdownComplete) {
+    console.warn(`[asset-ledger] document=${documentId} status=refused rule=no-markdown`);
+    return "refused";
+  }
   try {
     await write({
       scope: { orgId: state.run.orgId, projectId: state.run.projectId, documentId, runId: state.run.id },
-      level: { ...entry.level, markdownComplete: !!state.artifactLedger.readDocument(documentId, "markdown") },
+      level: { ...entry.level, markdownComplete },
       assets: entry.assets,
       ...(entry.shards ? { shards: entry.shards } : {}),
       ...(entry.resume ? { resume: entry.resume } : {}),
       ...(entry.levelOnly ? { levelOnly: true } : {}),
+      ...(entry.markdownOnly ? { markdownOnly: true } : {}),
     });
     return "written";
   } catch (error) {
@@ -969,47 +998,98 @@ export async function writeFigureLevel(
       (build !== null && !DOPPLER_BUILD.test(build)) || (args.gaps != null && (!Array.isArray(args.gaps) || args.gaps.length > DOPPLER_FIGURE_GAPS_MAX))) {
     throw new DocumentAssetLedgerError("invalid-level");
   }
-  const gaps = args.gaps && args.gaps.length > 0 ? args.gaps.map((gap) => ({ first: gap.first, last: gap.last, reason: (DOPPLER_FIGURE_GAP_REASONS as readonly string[]).includes(gap.reason) ? gap.reason : "other" })) : null;
-  const { orgId, projectId, documentId, runId } = args.scope;
   await sql.begin(async (tx) => {
     await lockAndCheck(tx, args.scope);
-    if (args.imagesStatus === "none" || args.imagesStatus === "disabled") {
-      // The figure step did not run: off the resume queue (no gaps, no counts), and no row is current (none deleted). A
-      // document that never stored a figure has nothing to hide: its level stays current, so only real figure documents
-      // are non-current (the audit's retention set, R2-M1).
-      const [held] = await tx<{ any: boolean }[]>`
-        select exists (select 1 from document_assets where document_id = ${documentId} and org_id = ${orgId} and storage_key is not null) as any`;
-      const current = !held?.any;
-      const leveled = await tx`
-        insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, images_exit_code,
-          doppler_build, assets_current)
-        values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, ${args.imagesStatus}, ${exitCode}, ${build}, ${current})
-        on conflict (document_id) do update
-        set ${resumeRunChangeSql(tx)}, run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_status = excluded.images_status,
-            images_exit_code = excluded.images_exit_code, doppler_build = excluded.doppler_build, assets_current = excluded.assets_current, gaps = null,
-            assets_total = 0, assets_extracted = 0, assets_not_extracted = 0, assets_unlinked = 0, assets_resumable = 0, assets_pending = 0,
-            source_copy = 0, source_decode = 0, source_render = 0, asset_bytes = 0, folder_bytes = 0, updated_at = now()
-        where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
-        returning 1`;
-      if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
-      // Off the resume queue: the figure step did not run.
-      await tx`update document_extraction_levels set resume_after = null where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
-      return;
-    }
+    await figureLevelInTx(tx, args);
+  });
+}
+
+/** writeFigureLevel's body, inside a transaction that already holds the document's lock and checked the scope. */
+async function figureLevelInTx(
+  tx: Tx,
+  args: { scope: DocumentAssetLedgerScope; markdownComplete: boolean; imagesStatus: DocumentImagesStatus; exitCode?: number | null; build?: string | null; gaps?: readonly DopplerFigureGap[] | null },
+): Promise<void> {
+  const exitCode = args.exitCode ?? null;
+  const build = args.build ?? null;
+  const gaps = args.gaps && args.gaps.length > 0 ? args.gaps.map((gap) => ({ first: gap.first, last: gap.last, reason: (DOPPLER_FIGURE_GAP_REASONS as readonly string[]).includes(gap.reason) ? gap.reason : "other" })) : null;
+  const { orgId, projectId, documentId, runId } = args.scope;
+  if (args.imagesStatus === "none" || args.imagesStatus === "disabled") {
+    // The figure step did not run: off the resume queue (no gaps, no counts), and no row is current (none deleted). A
+    // document that never stored a figure has nothing to hide: its level stays current, so only real figure documents
+    // are non-current (the audit's retention set, R2-M1).
+    const [held] = await tx<{ any: boolean }[]>`
+      select exists (select 1 from document_assets where document_id = ${documentId} and org_id = ${orgId} and storage_key is not null) as any`;
+    const current = !held?.any;
     const leveled = await tx`
-      insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, images_exit_code, doppler_build, gaps)
-      values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, 'none', ${exitCode}, ${build},
-        ${gaps ? tx.json(gaps as unknown as JSONValue) : null})
+      insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, images_exit_code,
+        doppler_build, assets_current)
+      values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, ${args.imagesStatus}, ${exitCode}, ${build}, ${current})
       on conflict (document_id) do update
-      set ${resumeRunChangeSql(tx)}, run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_exit_code = excluded.images_exit_code,
-          doppler_build = excluded.doppler_build, gaps = excluded.gaps,
-          -- Another run's folder files are not this run's.
-          folder_bytes = case when document_extraction_levels.run_id is distinct from excluded.run_id then 0 else document_extraction_levels.folder_bytes end,
-          updated_at = now()
+      set ${resumeRunChangeSql(tx)}, run_id = excluded.run_id, markdown_complete = ${markdownCompleteSql(tx)}, images_status = excluded.images_status,
+          images_exit_code = excluded.images_exit_code, doppler_build = excluded.doppler_build, assets_current = excluded.assets_current, gaps = null,
+          assets_total = 0, assets_extracted = 0, assets_not_extracted = 0, assets_unlinked = 0, assets_resumable = 0, assets_pending = 0,
+          source_copy = 0, source_decode = 0, source_render = 0, asset_bytes = 0, folder_bytes = 0, updated_at = now()
       where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
       returning 1`;
     if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
-    await recountLevel(tx, args.scope, args.imagesStatus === "resumable" ? "partial" : args.imagesStatus);
+    // Off the resume queue: the figure step did not run.
+    await tx`update document_extraction_levels set resume_after = null where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+    return;
+  }
+  const leveled = await tx`
+    insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, images_exit_code, doppler_build, gaps)
+    values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, 'none', ${exitCode}, ${build},
+      ${gaps ? tx.json(gaps as unknown as JSONValue) : null})
+    on conflict (document_id) do update
+    set ${resumeRunChangeSql(tx)}, run_id = excluded.run_id, markdown_complete = ${markdownCompleteSql(tx)}, images_exit_code = excluded.images_exit_code,
+        doppler_build = excluded.doppler_build, gaps = excluded.gaps,
+        -- Another run's folder files are not this run's.
+        folder_bytes = case when document_extraction_levels.run_id is distinct from excluded.run_id then 0 else document_extraction_levels.folder_bytes end,
+        updated_at = now()
+    where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
+    returning 1`;
+  if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
+  await recountLevel(tx, args.scope, args.imagesStatus === "resumable" ? "partial" : args.imagesStatus);
+}
+
+/** SQL: markdown_complete for an upsert: within one run it only goes from false to true (a Markdown commit is durable). */
+function markdownCompleteSql(tx: Tx) {
+  return tx`case when document_extraction_levels.run_id is not distinct from excluded.run_id
+    then document_extraction_levels.markdown_complete or excluded.markdown_complete else excluded.markdown_complete end`;
+}
+
+/**
+ * The checkpoint that committed a document's Markdown, for a document whose figure step another stage owns (the first
+ * pass stores a served document's figures in its own stage, whose checkpoint may commit before or after the Markdown):
+ * the level of this run says `markdown_complete`, so the resume runner can claim it and earlier runs' folders are queued
+ * for purge. When this run has no level yet (the figure write has not landed, or never will), a level-only `failed` level
+ * is written for it (figures were requested, none are recorded); the figure write, when it lands, replaces the status
+ * and keeps `markdown_complete` (markdownCompleteSql).
+ */
+export async function markFigureLevelMarkdownComplete(
+  sql: Sql<Record<string, unknown>>,
+  scope: DocumentAssetLedgerScope,
+): Promise<"marked" | "unchanged" | "leveled"> {
+  assertScope(scope);
+  if (scope.lease !== undefined) throw new DocumentAssetLedgerError("invalid-scope");
+  const { orgId, projectId, documentId, runId } = scope;
+  return await sql.begin(async (tx) => {
+    const { root } = await lockAndCheck(tx, scope);
+    const [level] = await tx<{ run_id: string | null; markdown_complete: boolean; images_status: string }[]>`
+      select run_id, markdown_complete, images_status from document_extraction_levels
+      where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+    if (level && level.run_id === runId) {
+      if (level.markdown_complete) return "unchanged" as const;
+      await tx`update document_extraction_levels set markdown_complete = true, updated_at = now()
+        where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId} and run_id = ${runId}`;
+      // As a full write with committed Markdown does: this run's figures supersede the earlier runs' folders.
+      if (level.images_status === "complete" || level.images_status === "partial" || level.images_status === "resumable") {
+        await queueOldFigureFolders(tx, scope, await oldFigureFolders(tx, scope, root));
+      }
+      return "marked" as const;
+    }
+    await figureLevelInTx(tx, { scope, markdownComplete: true, imagesStatus: "failed" });
+    return "leveled" as const;
   });
 }
 
@@ -1239,31 +1319,58 @@ export async function markAssetsLost(
 }
 
 /**
- * The ledger beside a figure upload: pending rows before each upload step and stored after it, through the run's store
- * under the run's organization and project, so figures are kept whatever later fails (the Markdown, a later stage, the run,
- * the worker). The checkpoint's write then completes the level. None without a store that has them, or for a run without
- * a scope (the checkpoint's write is then the only record).
+ * The document asset ledger port stages write figures through (pipeline CheckpointStore.assets): pending rows before each
+ * upload step and stored after it, the repair of an unvouched object, and the pages whose image the host renders. Every
+ * call is scoped to one organization's document.
+ */
+export interface DocumentAssets {
+  markAssetsPending(args: Parameters<typeof markAssetsPending>[1]): Promise<{ pending: number }>;
+  markAssetsStored(args: Parameters<typeof markAssetsStored>[1]): Promise<{ stored: number }>;
+  replaceUnvouchedObject(args: Parameters<typeof replaceUnvouchedObject>[1]): Promise<void>;
+  listHostPageImagePages(scope: { orgId: string; documentId: string }): Promise<number[]>;
+}
+
+/** The asset ledger over one database. */
+export function postgresDocumentAssets(sql: Sql<Record<string, unknown>>): DocumentAssets {
+  return {
+    markAssetsPending: (args) => markAssetsPending(sql, args),
+    markAssetsStored: (args) => markAssetsStored(sql, args),
+    replaceUnvouchedObject: (args) => replaceUnvouchedObject(sql, args),
+    listHostPageImagePages: (scope) => listHostPageImagePages(sql, scope),
+  };
+}
+
+/**
+ * What a figure upload writes through: pending and stored rows, and the repair of an unvouched object where the caller
+ * offers one (null: a conflicting object fails the upload instead of being repaired).
+ */
+export type FigureAssetLedger = Pick<DocumentAssets, "markAssetsPending" | "markAssetsStored"> & {
+  replaceUnvouchedObject: DocumentAssets["replaceUnvouchedObject"] | null;
+};
+
+/**
+ * The ledger beside a figure upload: pending rows before each upload step and stored after it, through the run's asset
+ * ledger under the run's organization and project, so figures are kept whatever later fails (the Markdown, a later stage,
+ * the run, the worker). The checkpoint's write then completes the level. None for a state without a store (a unit test's)
+ * or a run without a scope (the checkpoint's write is then the only record).
  */
 export function figureLedgerHooks(
   state: {
-    store?: {
-      markAssetsPending?(args: Parameters<typeof markAssetsPending>[1]): Promise<unknown>;
-      markAssetsStored?(args: Parameters<typeof markAssetsStored>[1]): Promise<unknown>;
-      replaceUnvouchedObject?(args: Parameters<typeof replaceUnvouchedObject>[1]): Promise<void>;
-    };
+    store?: { readonly assets: FigureAssetLedger };
     run: { id: string; orgId: string | null; projectId?: string | null };
   },
   documentId: string,
   /** The resume runner's lease token: every hook write is fenced by it. */
   lease?: string,
 ): DopplerFigureLedgerHooks | undefined {
-  const store = state.store;
-  if (!store?.markAssetsPending || !store.markAssetsStored || !state.run.orgId || !state.run.projectId) return undefined;
+  const assets = state.store?.assets;
+  if (!assets || !state.run.orgId || !state.run.projectId) return undefined;
   const scope = { orgId: state.run.orgId, projectId: state.run.projectId, documentId, runId: state.run.id, ...(lease ? { lease } : {}) };
+  const replace = assets.replaceUnvouchedObject;
   return {
-    pending: async (rows) => { await store.markAssetsPending!({ scope, rows }); },
-    stored: async (files) => { await store.markAssetsStored!({ scope, files }); },
-    ...(store.replaceUnvouchedObject ? { replace: figureRepairHook(store.replaceUnvouchedObject.bind(store), scope) } : {}),
+    pending: async (rows) => { await assets.markAssetsPending({ scope, rows }); },
+    stored: async (files) => { await assets.markAssetsStored({ scope, files }); },
+    ...(replace ? { replace: figureRepairHook(replace, scope) } : {}),
   };
 }
 
@@ -1272,9 +1379,8 @@ export function figureLedgerHooks(
  * closed on malformed shapes too (`"off"`, `{ enabled: false }`), so discovery never lists more than figuresEnabled runs.
  */
 export function figuresOnSql(sql: Sql<Record<string, unknown>>, projectAlias: string /* a projects or project_runs row: both carry `pipeline` */) {
-  const p = sql(projectAlias);
-  return sql`(coalesce(${p}.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)
-    and coalesce(${p}.pipeline -> 'figures' ->> 'enabled', 'true') <> 'false')`;
+  // Both shapes (a new-shape `visuals: none` too): packages/shared/src/pipeline-sql.ts.
+  return sql`${sql.unsafe(figuresOnSqlText(projectAlias))}`;
 }
 
 /**

@@ -70,9 +70,36 @@ describe("planFirstPassBatches", () => {
 
 describe("firstPassBatchOptions", () => {
   const withMath = { documentExtraction: { options: { "vm-pdf": { math: true } } } } as never;
-  it("reads math only when the project asks and the deploy flag allows it (default off)", () => {
+  const withoutMath = { documentExtraction: { options: { "vm-pdf": { math: false } } } } as never;
+  const silent = { documentExtraction: {} } as never;
+  it("reads math by default unless the project opts out, only where the deploy flag allows it (default off)", () => {
+    // The deploy gate (DOCSLURP_FIRST_PASS_MATH, default off) holds whatever the project says. It stays off until `--math`
+    // keeps an invoice's header row in the table and leaves `$` in cells as written (the invoice case in
+    // doppler-encoding-facts.integration.test.ts): a missing or unknown value never reads math.
     expect(firstPassBatchOptions(withMath, {}).math).toBe(false);
+    expect(firstPassBatchOptions(silent, {}).math).toBe(false);
+    for (const value of ["", "1", "true", "yes", "ON "]) {
+      expect(firstPassBatchOptions(withMath, { DOCSLURP_FIRST_PASS_MATH: value }).math, value).toBe(value.trim().toLowerCase() === "on");
+    }
     expect(firstPassBatchOptions(withMath, { DOCSLURP_FIRST_PASS_MATH: "on" }).math).toBe(true);
-    expect(firstPassBatchOptions({ documentExtraction: {} } as never, { DOCSLURP_FIRST_PASS_MATH: "on" }).math).toBe(false);
+    // DOCSLURP_DOPPLER_MATH_DEFAULT (default on): a project that says nothing reads math; `math: false` opts out.
+    expect(firstPassBatchOptions(silent, { DOCSLURP_FIRST_PASS_MATH: "on" }).math).toBe(true);
+    expect(firstPassBatchOptions(withoutMath, { DOCSLURP_FIRST_PASS_MATH: "on" }).math).toBe(false);
+  });
+
+  it("restores opt-in math with DOCSLURP_DOPPLER_MATH_DEFAULT=off", () => {
+    for (const value of ["off", "0", "FALSE"]) {
+      const env = { DOCSLURP_FIRST_PASS_MATH: "on", DOCSLURP_DOPPLER_MATH_DEFAULT: value };
+      expect(firstPassBatchOptions(silent, env).math).toBe(false);
+      expect(firstPassBatchOptions(withMath, env).math).toBe(true);
+    }
+    // An unknown value keeps the default (on).
+    expect(firstPassBatchOptions(silent, { DOCSLURP_FIRST_PASS_MATH: "on", DOCSLURP_DOPPLER_MATH_DEFAULT: "maybe" }).math).toBe(true);
+  });
+
+  it("asks for the mathtables page facts unless page facts are off", () => {
+    expect(firstPassBatchOptions(silent, {}).pageFacts).toEqual({ include: ["mathtables"] });
+    expect(firstPassBatchOptions(silent, { DOCSLURP_DOPPLER_PAGE_FACTS: "use" }).pageFacts).toEqual({ include: ["mathtables"] });
+    expect(firstPassBatchOptions(silent, { DOCSLURP_DOPPLER_PAGE_FACTS: "off" }).pageFacts).toBeUndefined();
   });
 });

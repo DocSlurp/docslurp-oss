@@ -3,7 +3,8 @@ import type { Sql } from "postgres";
 import {
   calculateAiUsageCostCents,
   graphConfigSchema,
-  normalizeStoredPipelineFeatures,
+  applyPrivateModelMode,
+  parseStoredPipelineFeatures,
   resolveAllowedPipelineTextModel,
   type GraphConfig,
   type PipelineFeatures,
@@ -127,7 +128,8 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
     select name, pipeline from projects where id = ${job.project_id}
   `;
   if (!project) throw new Error("Project no longer exists");
-  const pipeline = normalizeStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${job.project_id}`);
+  // The operator's private models where hosted ones are not allowed (private-model-pipeline.ts), as ingest uses.
+  const pipeline = applyPrivateModelMode(parseStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${job.project_id}`));
   const graphConfig: GraphConfig = graphConfigSchema.parse(job.config);
   const scope = graphConfig.domain ?? `Project "${project.name}"`;
   const concurrency = Math.max(1, options.concurrency ?? 4);

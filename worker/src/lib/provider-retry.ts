@@ -230,7 +230,7 @@ export interface ProviderRetryOptions {
 export interface ProviderRequestGate {
   admit(): Promise<void>;
   failed(): void;
-  unbilled(kind: "throttle" | "cancelled", detail?: { provider: string; status: number }): Promise<boolean>;
+  unbilled(kind: "throttle" | "cancelled" | "routing", detail?: { provider: string; status: number }): Promise<boolean>;
 }
 
 /**
@@ -256,6 +256,25 @@ export function isUnbilledThrottleStatus(status: number): boolean {
 export function isRoutingExclusion(status: number, body: string): boolean {
   if (status !== 503 && status !== 404) return false;
   return /routing requirements|no endpoints found|max[_ ]price/i.test(body);
+}
+
+/**
+ * A request no provider could serve under its routing constraints (`isRoutingExclusion`: a `max_price` ceiling or a host
+ * allowlist excluded every host). Nothing was billed; retrying the same request cannot help.
+ */
+export class ProviderRoutingExclusionError extends Error {
+  constructor(readonly status: number, detail: string) {
+    super(`no provider meets the request's routing constraints (${status}): ${detail.replace(/\s+/g, " ").slice(0, 200)}`);
+    this.name = "ProviderRoutingExclusionError";
+  }
+}
+
+/** Find a ProviderRoutingExclusionError in an error or its causes. */
+export function findProviderRoutingExclusion(error: unknown): ProviderRoutingExclusionError | null {
+  for (let current = error, depth = 0; current && depth < 8; current = (current as { cause?: unknown }).cause, depth += 1) {
+    if (current instanceof ProviderRoutingExclusionError) return current;
+  }
+  return null;
 }
 
 /**
@@ -313,7 +332,8 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
           `[provider-routing-exclusion] provider=${options.provider} label="${options.label}" status=${status} ` +
             `detail=${JSON.stringify(body.slice(0, 200))}`,
         );
-        options.gate?.failed();
+        // Nothing was billed: the request leaves the page bound, the breaker and the org count (never a failure).
+        if (options.gate) await options.gate.unbilled("routing", { provider: options.provider, status });
         if (lease) options.rateLimit?.onLease?.(lease);
         return new Response(body, { status, headers: response.headers });
       }

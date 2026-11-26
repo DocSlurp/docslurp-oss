@@ -1,5 +1,6 @@
-import { pageCostRoute, PAGE_COST_ROUTES, type PageCostRoute } from "@docslurp/shared";
+import { PAGE_COST_ROUTES, type PageCostRoute } from "@docslurp/shared";
 import { parsePageCostEvidence } from "./page-cost-evidence.js";
+import { pageCostRouteOf, pageEvidenceFromLayout } from "./page-evidence.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
 
 /** Settings-independent structural observations. Null means this evidence source cannot measure the quantity. */
@@ -44,9 +45,9 @@ export function documentCostStats(facts: ReadonlyMap<number, PageLayoutFacts> | 
       if (region.repeated === null) candidates.repeatsUnknown += 1;
       else if (region.repeated) candidates.repeats += 1;
     }
-    // This evidence has no path count. A wordless page without images may still contain a vector drawing.
-    routes[page?.gridsUnknown === true && observed.lexicalText === true ? "table" : pageCostRoute({ words: observed.lexicalText === null ? page?.words ?? null : observed.lexicalText ? Math.max(1, page?.words ?? 1) : 0, images: page?.images?.length ?? null,
-      vectorPaths: observed.vectorPaths, grids: page?.grids ?? null, gridCoverage: page?.tableCoverage ?? null })] += 1;
+    // The page's cost path from its evidence (page-evidence.ts pageCostRouteOf). This evidence has no path count: a wordless
+    // page without images may still contain a vector drawing.
+    routes[pageCostRouteOf(page ? pageEvidenceFromLayout(number, page) : undefined, observed)] += 1;
     if (page?.textLayer) textLayers[page.textLayer] += 1; else textLayers.unknownPages += 1;
     if (page?.grids) tables.grids += page.grids.length; else tables.unknownPages += 1;
     if (!page?.images) { images.unknownPages += 1; continue; }
