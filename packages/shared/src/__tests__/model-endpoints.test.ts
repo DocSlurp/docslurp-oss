@@ -7,9 +7,14 @@ import {
   modelEndpointOrigin,
   modelEndpointUrl,
   platformKeyForDestination,
+  canonicalModelBaseUrl,
+  storedModelEndpointRefusal,
+  tenantLocalModelPorts,
   tenantModelEndpointProblem,
   tenantPipelineEndpointProblems,
+  tenantSuppliedEndpointProblem,
 } from "../model-endpoints.js";
+import { visionProfileCatalog } from "../embedding.js";
 
 /**
  * DocSlurp/app issue 101: a tenant-set model endpoint never receives a platform key, and tenant-set endpoints are
@@ -245,5 +250,97 @@ describe("tenant loopback base URL shape, port and request URL (flag on)", () =>
     // A list with no valid port allows none (fail closed).
     vi.stubEnv("DOCSLURP_TENANT_LOCAL_MODEL_PORTS", "all");
     expect(tenantModelEndpointProblem(uri("vllm", "http://127.0.0.1:8000/v1"))).toBe("tenant-base-url-port-not-allowed");
+  });
+});
+
+describe("the run-creation rule judges only a tenant-supplied endpoint", () => {
+  it.each(Object.keys(visionProfileCatalog))("admits the %s vision profile's model with the flag off", (profile) => {
+    vi.stubEnv(FLAG, "false");
+    const config = visionProfileCatalog[profile as keyof typeof visionProfileCatalog].config;
+    expect(tenantSuppliedEndpointProblem(config.modelUri)).toBeNull();
+    expect(tenantPipelineEndpointProblems({ vision: { ...config } }, process.env, { rule: "run" })).toEqual([]);
+  });
+
+  it("still refuses a tenant baseUrl at run creation, and the profile's local route at call time", () => {
+    vi.stubEnv(FLAG, "false");
+    expect(tenantSuppliedEndpointProblem(uri("vllm", "http://127.0.0.1:8000/v1"))).toBe("tenant-local-endpoints-disabled");
+    expect(tenantSuppliedEndpointProblem(uri("openai", "https://gateway.example/v1"))).toBe("tenant-base-url-not-allowed");
+    expect(tenantSuppliedEndpointProblem("not a uri")).toBe("tenant-model-uri-invalid");
+    // The call-time rule keeps refusing the profile's local server route while the flag is off.
+    expect(tenantModelEndpointProblem(visionProfileCatalog["fastest-local"].config.modelUri)).toBe("tenant-local-endpoints-disabled");
+    expect(() => assertTenantModelBaseUrlAllowed("vllm", null)).toThrow(TenantModelEndpointRefusedError);
+    // The save rule is the call-time rule.
+    expect(tenantPipelineEndpointProblems({ vision: { modelUri: visionProfileCatalog["fastest-local"].config.modelUri } }))
+      .toEqual([{ path: "vision.modelUri", code: "tenant-local-endpoints-disabled" }]);
+  });
+});
+
+describe("a local route with no baseUrl is judged at its default base URL", () => {
+  it("refuses the default port when the operator's list leaves it out", () => {
+    vi.stubEnv(FLAG, "true");
+    expect(tenantModelEndpointProblem(uri("vllm"))).toBeNull();
+    vi.stubEnv("DOCSLURP_TENANT_LOCAL_MODEL_PORTS", "11434");
+    expect(tenantModelEndpointProblem(uri("vllm"))).toBe("tenant-base-url-port-not-allowed");
+    expect(tenantModelEndpointProblem(uri("ollama"))).toBeNull();
+    expect(() => assertTenantModelBaseUrlAllowed("vllm", null)).toThrow(TenantModelEndpointRefusedError);
+    expect(() => assertTenantModelBaseUrlAllowed("lmstudio", "")).toThrow(TenantModelEndpointRefusedError);
+    expect(() => assertTenantModelBaseUrlAllowed("ollama", undefined)).not.toThrow();
+  });
+});
+
+describe("the port list", () => {
+  it("unset means the standard ports; set but empty means none", () => {
+    expect([...tenantLocalModelPorts({})].sort((a, b) => a - b)).toEqual([1234, 8000, 11434]);
+    expect(tenantLocalModelPorts({ DOCSLURP_TENANT_LOCAL_MODEL_PORTS: "" }).size).toBe(0);
+    expect(tenantLocalModelPorts({ DOCSLURP_TENANT_LOCAL_MODEL_PORTS: "  " }).size).toBe(0);
+  });
+
+  it("drops invalid entries and logs them once", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const env = { DOCSLURP_TENANT_LOCAL_MODEL_PORTS: "8000, 0, 70000, 8000-8100, abc, 1234" };
+    expect([...tenantLocalModelPorts(env)].sort((a, b) => a - b)).toEqual([1234, 8000]);
+    tenantLocalModelPorts(env);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain("8000-8100");
+    warn.mockRestore();
+  });
+});
+
+describe("the stored-row rule", () => {
+  it("refuses only what no deployment setting could allow, in the spelling the resolver reads", () => {
+    vi.stubEnv(FLAG, "true");
+    vi.stubEnv("DOCSLURP_TENANT_LOCAL_MODEL_PORTS", "11434");
+    // Shape refusals.
+    expect(storedModelEndpointRefusal(uri("openai", "https://gateway.example/v1"))).toBe("tenant-base-url-not-allowed");
+    expect(storedModelEndpointRefusal(uri("vllm", "http://10.0.0.5:8000/v1"))).toBe("tenant-base-url-not-loopback");
+    expect(storedModelEndpointRefusal(uri("vllm", "http://127.0.0.1:8000/v1?x=1"))).toBe("tenant-base-url-invalid");
+    // Operator decisions (port list, flag) are not: the row stays and is refused at call time.
+    expect(storedModelEndpointRefusal(uri("vllm", "http://127.0.0.1:9999/v1"))).toBeNull();
+    expect(storedModelEndpointRefusal(uri("vllm"))).toBeNull();
+    vi.stubEnv(FLAG, "false");
+    expect(storedModelEndpointRefusal(uri("vllm", "http://127.0.0.1:8000/v1"))).toBeNull();
+    // A key the resolver never reads sends nothing anywhere, so it does not drop the setting.
+    expect(storedModelEndpointRefusal("llm://openai/text-embedding-3-small?BASEURL=https%3A%2F%2Fgateway.example")).toBeNull();
+    // Padded text is judged as the schema trims it.
+    expect(storedModelEndpointRefusal(` ${uri("openai", "https://gateway.example/v1")}\u00a0`)).toBe("tenant-base-url-not-allowed");
+  });
+});
+
+describe("tenant request base URL", () => {
+  it("pins the name localhost to 127.0.0.1", () => {
+    expect(canonicalModelBaseUrl("http://localhost:11434/v1/")).toBe("http://127.0.0.1:11434/v1");
+    expect(canonicalModelBaseUrl("http://LOCALHOST:8000/v1")).toBe("http://127.0.0.1:8000/v1");
+    expect(canonicalModelBaseUrl("http://[::1]:8000/v1")).toBe("http://[::1]:8000/v1");
+  });
+});
+
+describe("refusal messages", () => {
+  it("names the problem for a loopback URL with a query", async () => {
+    const { embeddingConfigSchema } = await import("../embedding.js");
+    const result = embeddingConfigSchema.safeParse({ modelUri: uri("vllm", "http://127.0.0.1:8000/v1?x=1") });
+    expect(result.success).toBe(false);
+    const message = result.success ? "" : result.error.issues.map((issue) => issue.message).join("\n");
+    expect(message).toContain("no user info, query or fragment");
+    expect(message).not.toContain("must use a loopback host");
   });
 });

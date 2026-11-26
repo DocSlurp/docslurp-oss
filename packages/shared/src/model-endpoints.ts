@@ -23,7 +23,8 @@ export const TENANT_LOCAL_MODEL_ENDPOINTS_ENV = "DOCSLURP_ALLOW_TENANT_LOCAL_MOD
 
 /**
  * Operator list of loopback ports tenant model servers may use (comma-separated). Unset: the standard ports of the
- * three local servers. Set but with no valid port: none (fail closed).
+ * three local servers. Set (even to an empty value) and with no valid port: none (fail closed). Invalid entries
+ * (ranges, 0, out-of-range numbers, text) are dropped and logged once.
  */
 export const TENANT_LOCAL_MODEL_PORTS_ENV = "DOCSLURP_TENANT_LOCAL_MODEL_PORTS";
 
@@ -32,6 +33,20 @@ export const DEFAULT_TENANT_LOCAL_MODEL_PORTS: readonly number[] = [11434, 8000,
 
 /** Local providers reached over HTTP at a model server's address (the only ones a tenant `baseUrl` may set). */
 export const LOCAL_SERVER_MODEL_PROVIDERS = ["ollama", "vllm", "lmstudio"] as const;
+export type LocalServerModelProvider = typeof LOCAL_SERVER_MODEL_PROVIDERS[number];
+
+/** Where a local server route without a `baseUrl` is sent: the server's standard loopback address. */
+export const DEFAULT_LOCAL_MODEL_BASE_URLS: Readonly<Record<LocalServerModelProvider, string>> = {
+  ollama: "http://127.0.0.1:11434/v1",
+  vllm: "http://127.0.0.1:8000/v1",
+  lmstudio: "http://127.0.0.1:1234/v1",
+};
+
+/** The default base URL of a local server provider, or null for any other provider. */
+export function defaultLocalModelBaseUrl(provider: string): string | null {
+  const normalized = provider.trim().toLowerCase();
+  return isLocalServerProvider(normalized) ? DEFAULT_LOCAL_MODEL_BASE_URLS[normalized as LocalServerModelProvider] : null;
+}
 
 export type TenantModelEndpointRefusal =
   | "tenant-local-endpoints-disabled"
@@ -66,12 +81,24 @@ export function tenantLocalModelEndpointsAllowed(env: Env = process.env): boolea
 }
 
 /** The ports `DOCSLURP_TENANT_LOCAL_MODEL_PORTS` allows (see `TENANT_LOCAL_MODEL_PORTS_ENV`). */
+const loggedPortListProblems = new Set<string>();
+
 export function tenantLocalModelPorts(env: Env = process.env): ReadonlySet<number> {
-  const raw = env[TENANT_LOCAL_MODEL_PORTS_ENV]?.trim();
-  if (!raw) return new Set(DEFAULT_TENANT_LOCAL_MODEL_PORTS);
-  const ports = raw.split(",").map((part) => part.trim()).filter((part) => /^\d{1,5}$/.test(part)).map(Number)
-    .filter((port) => port >= 1 && port <= 65535);
-  return new Set(ports);
+  const raw = env[TENANT_LOCAL_MODEL_PORTS_ENV];
+  if (raw === undefined) return new Set(DEFAULT_TENANT_LOCAL_MODEL_PORTS);
+  const ports = new Set<number>();
+  const invalid: string[] = [];
+  for (const part of raw.split(",").map((entry) => entry.trim()).filter(Boolean)) {
+    const port = /^\d{1,5}$/.test(part) ? Number(part) : Number.NaN;
+    if (port >= 1 && port <= 65535) ports.add(port);
+    else invalid.push(part);
+  }
+  if (invalid.length > 0 && !loggedPortListProblems.has(raw)) {
+    if (loggedPortListProblems.size > 100) loggedPortListProblems.clear();
+    loggedPortListProblems.add(raw);
+    console.warn(`[model-endpoint] ${TENANT_LOCAL_MODEL_PORTS_ENV} ignored invalid entries=${JSON.stringify(invalid.map((entry) => entry.slice(0, 20)).slice(0, 10))} allowed=${JSON.stringify([...ports])}`);
+  }
+  return ports;
 }
 
 function isLocalServerProvider(provider: string): boolean {
@@ -103,6 +130,16 @@ function loopbackBaseUrlShapeProblem(value: string): "tenant-base-url-invalid" |
   if (url.search || url.hash) return "tenant-base-url-invalid";
   const host = url.hostname.toLowerCase();
   return host === "localhost" || host === "127.0.0.1" || host === "[::1]" ? null : "tenant-base-url-not-loopback";
+}
+
+/** The tenant-facing message for a refusal code (fixed text, never the refused value). */
+export function tenantModelEndpointRefusalMessage(code: TenantModelEndpointRefusal): string {
+  return REFUSAL_MESSAGES[code];
+}
+
+/** Why `value` cannot be a tenant base URL by shape alone (`tenant-base-url-invalid` or `-not-loopback`), or null. */
+export function loopbackModelBaseUrlProblem(value: string): "tenant-base-url-invalid" | "tenant-base-url-not-loopback" | null {
+  return loopbackBaseUrlShapeProblem(value);
 }
 
 /**
@@ -168,7 +205,8 @@ export function platformKeyForDestination(
 
 function parseModelUri(modelUri: string): { provider: string; params: URLSearchParams } | null {
   try {
-    const url = new URL(modelUri);
+    // Trimmed the way the settings schema (`llmModelUriSchema`) trims, so every reader judges the same text.
+    const url = new URL(modelUri.trim());
     if (url.protocol !== "llm:") return null;
     return { provider: url.hostname.toLowerCase(), params: url.searchParams };
   } catch {
@@ -176,25 +214,51 @@ function parseModelUri(modelUri: string): { provider: string; params: URLSearchP
   }
 }
 
-/** Every `baseUrl` value in the URI's query, matched case-insensitively (a destination can hide in any spelling). */
+/**
+ * Every `baseUrl` value in the URI's query, matched case-insensitively (a destination can hide in any spelling). Used
+ * where refusing more is safe (save and call time); the stored-row reader matches only `resolverBaseUrlValues`.
+ */
 function baseUrlValues(params: URLSearchParams): string[] {
   const values: string[] = [];
   for (const [key, value] of params) if (key.trim().toLowerCase() === "baseurl") values.push(value);
   return values;
 }
 
-/** Why a tenant-supplied `llm://` model URI names a destination this deployment refuses, or null. */
+/** The `baseUrl` values under the exact key the route resolvers read (`params.get("baseUrl")`). */
+function resolverBaseUrlValues(params: URLSearchParams): string[] {
+  return params.getAll("baseUrl");
+}
+
+/**
+ * Why a tenant `llm://` model URI names a destination this deployment refuses, or null: the call-time rule. A local
+ * server route is refused while the flag is off; with it on, each `baseUrl` (or, with none, the provider's default
+ * base URL, `DEFAULT_LOCAL_MODEL_BASE_URLS`) must be loopback, plain and on an allowed port.
+ */
 export function tenantModelEndpointProblem(modelUri: string, env: Env = process.env): TenantModelEndpointRefusal | null {
   const parsed = parseModelUri(modelUri);
   if (!parsed) return "tenant-model-uri-invalid";
   const baseUrls = baseUrlValues(parsed.params);
   if (!isLocalServerProvider(parsed.provider)) return baseUrls.length > 0 ? "tenant-base-url-not-allowed" : null;
   if (!tenantLocalModelEndpointsAllowed(env)) return "tenant-local-endpoints-disabled";
-  for (const baseUrl of baseUrls) {
+  for (const baseUrl of baseUrls.length > 0 ? baseUrls : [defaultLocalModelBaseUrl(parsed.provider)!]) {
     const problem = tenantLoopbackBaseUrlProblem(baseUrl, env);
     if (problem) return problem;
   }
   return null;
+}
+
+/**
+ * The run-creation rule: only a destination the tenant supplied (a `baseUrl` parameter the route resolvers read) is
+ * judged, with the full `tenantModelEndpointProblem` rule. A URI with no `baseUrl` (for example one a vision profile
+ * fills in) names a model category, not an endpoint, and is admitted here, as is a key spelling no resolver reads
+ * (it sends nothing anywhere). The worker still judges every route at call time (`tenantModelEndpointProblem`, which
+ * matches any spelling, and `assertTenantModelBaseUrlAllowed` on the resolved base URL) before anything is sent.
+ */
+export function tenantSuppliedEndpointProblem(modelUri: string, env: Env = process.env): TenantModelEndpointRefusal | null {
+  const parsed = parseModelUri(modelUri);
+  if (!parsed) return "tenant-model-uri-invalid";
+  if (resolverBaseUrlValues(parsed.params).length === 0) return null;
+  return tenantModelEndpointProblem(modelUri, env);
 }
 
 /**
@@ -206,31 +270,37 @@ export function noRedirectFetch(inner?: typeof fetch): typeof fetch {
 }
 
 /**
- * `baseUrl` re-serialised from its parsed form, for an SDK that appends `/<endpoint>` itself: dot segments resolved,
- * no trailing slash, no fragment. Tenant base URLs never carry a query (`tenantLoopbackBaseUrlProblem`), so the
- * suffix the SDK appends always lands in the path.
+ * A tenant local server's `baseUrl` re-serialised from its parsed form, for an SDK that appends `/<endpoint>` itself:
+ * dot segments resolved, no trailing slash, no fragment, and the name `localhost` pinned to `127.0.0.1` so the request
+ * never depends on what the system resolver returns for it. Tenant base URLs never carry a query
+ * (`tenantLoopbackBaseUrlProblem`), so the suffix the SDK appends always lands in the path.
  */
 export function canonicalModelBaseUrl(baseUrl: string): string {
   const url = new URL(baseUrl.trim());
+  if (url.hostname.toLowerCase() === "localhost") url.hostname = "127.0.0.1";
   url.hash = "";
   url.pathname = url.pathname.replace(/\/+$/, "");
   return url.search ? url.href : url.href.replace(/\/+$/, "");
 }
 
 /**
- * Why a stored tenant model URI names an endpoint the rule refuses for its own shape (a hosted provider with a
- * `baseUrl`, or a local server's base URL that is not loopback, has user info, a query or a fragment, or uses a port
- * the operator does not allow), or null. The deployment flag being off is not such a refusal: that row stays and is
- * refused before each request (`tenant-local-endpoints-disabled`). Stored-row readers drop a URI this refuses.
+ * Why a stored tenant model URI names an endpoint the rule refuses for its own shape, so no deployment setting could
+ * make it usable (a hosted provider with a `baseUrl`, or a local server's base URL that is not loopback or has user
+ * info, a query or a fragment), or null. Only the `baseUrl` spelling the route resolvers read counts here. What an
+ * operator setting decides is not such a refusal: with the flag off, or a port the operator does not allow, the row
+ * stays as written and the worker refuses it before each request with its code (`tenant-local-endpoints-disabled`,
+ * `tenant-base-url-port-not-allowed`), so a self-hoster sees that error rather than a different model. Stored-row
+ * readers drop a URI this refuses (never its profile).
  */
-export function storedModelEndpointRefusal(modelUri: unknown, env: Env = process.env): TenantModelEndpointRefusal | null {
-  if (typeof modelUri !== "string" || modelUri === "") return null;
+export function storedModelEndpointRefusal(modelUri: unknown): TenantModelEndpointRefusal | null {
+  if (typeof modelUri !== "string" || modelUri.trim() === "") return null;
   const parsed = parseModelUri(modelUri);
   if (!parsed) return null;
-  const baseUrls = baseUrlValues(parsed.params);
+  const baseUrls = resolverBaseUrlValues(parsed.params);
   if (!isLocalServerProvider(parsed.provider)) return baseUrls.length > 0 ? "tenant-base-url-not-allowed" : null;
-  for (const baseUrl of baseUrls) {
-    const problem = tenantLoopbackBaseUrlProblem(baseUrl, env);
+  // With no baseUrl the provider's default base URL is used, which is always loopback and plain.
+  for (const baseUrl of baseUrls.length > 0 ? baseUrls : [defaultLocalModelBaseUrl(parsed.provider)!]) {
+    const problem = loopbackBaseUrlShapeProblem(baseUrl);
     if (problem) return problem;
   }
   return null;
@@ -250,13 +320,23 @@ export function assertTenantModelBaseUrlAllowed(provider: string, baseUrl: strin
   const normalized = provider.trim().toLowerCase();
   if (!isLocalServerProvider(normalized)) return;
   if (!tenantLocalModelEndpointsAllowed(env)) throw new TenantModelEndpointRefusedError("tenant-local-endpoints-disabled");
-  // No base URL: the caller has no local destination to send to and fails on its own.
-  const problem = baseUrl ? tenantLoopbackBaseUrlProblem(baseUrl, env) : null;
+  // No base URL: the provider's default one is where the request would go, so that is judged (its port included).
+  const problem = tenantLoopbackBaseUrlProblem(baseUrl?.trim() || defaultLocalModelBaseUrl(normalized)!, env);
   if (problem) throw new TenantModelEndpointRefusedError(problem);
 }
 
-/** The tenant model URIs a pipeline names, each refusal with its setting path. Unknown shapes are skipped. */
-export function tenantPipelineEndpointProblems(pipeline: unknown, env: Env = process.env): Array<{ path: string; code: TenantModelEndpointRefusal }> {
+/**
+ * The tenant model URIs a pipeline names, each refusal with its setting path. Unknown shapes are skipped.
+ * `rule: "save"` (project create and update) applies the full `tenantModelEndpointProblem`; `rule: "run"` (run
+ * creation, retries, reprocess, reindex, clones, materialise) applies `tenantSuppliedEndpointProblem`, which judges
+ * only a tenant-supplied `baseUrl`, so a profile's model category never refuses a run.
+ */
+export function tenantPipelineEndpointProblems(
+  pipeline: unknown,
+  env: Env = process.env,
+  options: { rule?: "save" | "run" } = {},
+): Array<{ path: string; code: TenantModelEndpointRefusal }> {
+  const judge = options.rule === "run" ? tenantSuppliedEndpointProblem : tenantModelEndpointProblem;
   const problems: Array<{ path: string; code: TenantModelEndpointRefusal }> = [];
   if (!pipeline || typeof pipeline !== "object") return problems;
   const record = pipeline as Record<string, unknown>;
@@ -267,7 +347,7 @@ export function tenantPipelineEndpointProblems(pipeline: unknown, env: Env = pro
   fields.push(["vision.remoteFallbackModelUri", section("vision")?.remoteFallbackModelUri]);
   for (const [path, value] of fields) {
     if (typeof value !== "string" || value === "") continue;
-    const code = tenantModelEndpointProblem(value, env);
+    const code = judge(value, env);
     if (code) problems.push({ path, code });
   }
   return problems;
