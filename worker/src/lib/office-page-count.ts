@@ -5,6 +5,7 @@ import {
   pageCredits,
   speedBoostMultiplier,
   textPageCount,
+  WORKER_COUNTED_MAX_PAGES,
   type PageMode,
   type PipelineFeatures,
 } from "@docslurp/shared";
@@ -31,8 +32,8 @@ import type { PageBasis } from "../pipeline/page-basis.js";
 export type PageCountMethod = "slides" | "sheet-rows" | "text-rule" | "empty";
 export interface PageCountResult { pages: number; method: PageCountMethod }
 
-/** Hard ceiling for a measured count: more than this is a parser fault, not a document. */
-export const MAX_COUNTED_PAGES = 100_000;
+/** Hard ceiling for a measured count: more than this is a parser fault, not a document. Upload quotes cap their high end at it. */
+export const MAX_COUNTED_PAGES = WORKER_COUNTED_MAX_PAGES;
 /** Counting reads at most this many characters of the extractor's Markdown (a page is 3,500). */
 const MAX_COUNTED_TEXT_CHARS = MAX_COUNTED_PAGES * 3_500;
 
