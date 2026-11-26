@@ -2658,7 +2658,7 @@ export class VisionExtractStage implements Stage {
     // Summary evidence was cut from the pre-reconciliation markdown; rebuild it from this one.
     await refreshSummaryEvidence({
       storage: this.storage, ledger: state.artifactLedger, document,
-      text: reconciled.markdown, sourceUri: this.storage.uri(reconciledMarkdownKey),
+      text: reconciled.markdown, sourceUri: this.storage.uri(reconciledMarkdownKey), textIsStored: true,
     });
 
     state.artifactLedger.recordDocument(
