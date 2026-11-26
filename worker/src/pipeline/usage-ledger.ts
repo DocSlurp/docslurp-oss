@@ -397,22 +397,6 @@ export class PipelineUsageEventLedger {
       && includePage(Number(event.metadata?.pageNumber)));
   }
 
-  /**
-   * Pages of one document this ledger charged a read for (OCR or Rich) that are not persisted yet. A document completed before
-   * the next checkpoint counts them as read (db/page-base-fee.ts chargeDocumentsFastStatement): their charges commit with that
-   * checkpoint, so they are never billed Fast as well.
-   */
-  pendingReadPages(documentId: string): number[] {
-    const pages = new Set<number>();
-    for (const event of this.pending) {
-      if (!(PAGE_READ_METRICS as readonly string[]).includes(event.metric ?? "") || !isUnitChargeEvent(event)) continue;
-      if (event.metadata?.documentId !== documentId) continue;
-      const page = Number(event.metadata?.pageNumber);
-      if (Number.isSafeInteger(page) && page >= 1) pages.add(page);
-    }
-    return [...pages].sort((a, b) => a - b);
-  }
-
   private take(include: (event: UsageEvent) => boolean): PipelineUsageBatch {
     const events = this.pending.filter(include);
     let committed = false;

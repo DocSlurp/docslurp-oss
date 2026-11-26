@@ -101,10 +101,10 @@ describe.skipIf(!enabled)("per-document Fast charge on a real Postgres", () => {
     const stateA = await loadRunState(a, runId);
     const stateB = await loadRunState(b, runId);
     const documentId = `${runId}-d1`;
-    const first = held(sqlOf(a), async (tx) => await chargeDocumentsFastStatement(tx, stateA, { documentId, pendingReadPages: [] }, { accrue: true })!);
+    const first = held(sqlOf(a), async (tx) => await chargeDocumentsFastStatement(tx, stateA, { documentId }, { accrue: true })!);
     await first.started;
     // The second insert waits on the first's uncommitted primary key, then inserts nothing.
-    const second = chargeDocumentsFastStatement(sqlOf(b), stateB, { documentId, pendingReadPages: [] }, { accrue: true })!.then((rows) => rows);
+    const second = chargeDocumentsFastStatement(sqlOf(b), stateB, { documentId }, { accrue: true })!.then((rows) => rows);
     await untilBlocked();
     first.release();
     const [rowsA, rowsB] = await Promise.all([first.done, second]);
@@ -122,7 +122,7 @@ describe.skipIf(!enabled)("per-document Fast charge on a real Postgres", () => {
     const stateB = await loadRunState(b, runId);
     const sweep = held(sqlOf(a), async (tx) => await chargeDocumentsFastStatement(tx, stateA, "run", { accrue: false })!);
     await sweep.started;
-    const single = chargeDocumentsFastStatement(sqlOf(b), stateB, { documentId: `${runId}-d2`, pendingReadPages: [] }, { accrue: true })!.then((rows) => rows);
+    const single = chargeDocumentsFastStatement(sqlOf(b), stateB, { documentId: `${runId}-d2` }, { accrue: true })!.then((rows) => rows);
     await untilBlocked();
     sweep.release();
     await Promise.all([sweep.done, single]);
@@ -135,7 +135,7 @@ describe.skipIf(!enabled)("per-document Fast charge on a real Postgres", () => {
     const [a, b] = [newStore(), newStore()];
     const stateA = await loadRunState(a, runId);
     const stateB = await loadRunState(b, runId);
-    const perDocument = held(sqlOf(a), async (tx) => await chargeDocumentsFastStatement(tx, stateA, { documentId: `${runId}-d1`, pendingReadPages: [] }, { accrue: true })!);
+    const perDocument = held(sqlOf(a), async (tx) => await chargeDocumentsFastStatement(tx, stateA, { documentId: `${runId}-d1` }, { accrue: true })!);
     await perDocument.started;
     const older = persistRunUsageEvents({ client: sqlOf(b), state: stateB, usageEvents: [{
       id: `fast:${runId}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage, amount: 6, unit: "page", costCents: 6,
@@ -171,7 +171,7 @@ describe.skipIf(!enabled)("per-document Fast charge on a real Postgres", () => {
       // One document's statement, as it rides each index completion (1,000 documents, one at a time).
       const started = performance.now();
       for (let n = 1; n <= 1_000; n++) {
-        await chargeDocumentsFastStatement(sql, afterState, { documentId: `${after}-d${n}`, pendingReadPages: [] }, { accrue: true })!;
+        await chargeDocumentsFastStatement(sql, afterState, { documentId: `${after}-d${n}` }, { accrue: true })!;
       }
       report[`after: one document's charge at completion, mean of 1,000 (${tag})`] = `${((performance.now() - started) / 1_000).toFixed(2)} ms`;
       await time(`after: completion sweep, 9,000 documents uncharged (${tag})`, async () => chargeDocumentsFastStatement(sql, afterState, "run", { accrue: false })!);

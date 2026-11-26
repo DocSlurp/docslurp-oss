@@ -25,7 +25,7 @@ let db: PGlite;
 let server: PGLiteSocketServer;
 let url: string;
 const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-vi.spyOn(console, "error").mockImplementation(() => undefined);
+const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
 type Doc = { id: string; pages: number; status?: string; source?: string; failedStage?: boolean; intake?: number };
 
@@ -72,7 +72,7 @@ const sqlOf = (store: Store) => (store as unknown as { sql: Parameters<typeof pe
 const owner = (runId: string, generation: string, org = "o1") => ({ runId, orgId: org, projectId: org === "o1" ? "w" : "w2", executionGeneration: generation });
 
 /** The index stage completing one document (the transaction that makes it searchable). `reads`: page reads its ledger holds. */
-async function indexDocument(runId: string, documentId: string, options: { reads?: number[]; persistReads?: number[]; firstPassShard?: { differs: boolean } } = {}) {
+async function indexDocument(runId: string, documentId: string, options: { reads?: number[]; persistReads?: number[]; firstPassShard?: { differs: boolean }; crashBeforeCheckpoint?: boolean } = {}) {
   return withStore(async (store) => {
     const state = await loadRunState(store, runId);
     if (options.firstPassShard) {
@@ -88,6 +88,8 @@ async function indexDocument(runId: string, documentId: string, options: { reads
     for (const page of options.reads ?? []) state.usageLedger.chargeRichPage({ documentId, pageNumber: page, readBy: "page-analysis" });
     await store.startDocumentStage(state, documentId, "index");
     await store.completeDocumentStage(state, documentId, "index", "", {});
+    // The worker dies right after the completing transaction: no checkpoint follows.
+    if (options.crashBeforeCheckpoint) return state;
     // The ledger's reads reach the database with the next checkpoint, as in a run.
     const batch = state.usageLedger.checkpoint();
     await persistRunUsageEvents({ client: sqlOf(store), state, usageEvents: batch.events });
@@ -168,7 +170,7 @@ describe("a document's Fast pages are charged when it completes", () => {
   });
 
   it("documents that never became searchable bill nothing; an unmeasured one is logged and counted", { timeout: 60_000 }, async () => {
-    warn.mockClear();
+    error.mockClear();
     await seedRun("unserved", [
       { id: "unserved-ok", pages: 2 },
       { id: "unserved-pii", pages: 5, status: "pii_blocked" },
@@ -180,25 +182,53 @@ describe("a document's Fast pages are charged when it completes", () => {
     expect(await fastCharges("unserved")).toEqual([{ id: "fast:unserved:unserved-ok", pages: 2, org: "o1" }]);
     const [reported] = (await db.query<{ p: Record<string, number> }>(`select stats -> 'pageCharges' as p from project_runs where id = 'unserved'`)).rows;
     expect(reported!.p).toMatchObject({ fastPages: 2, unmeasuredDocuments: 1 });
-    expect(warn.mock.calls.map((call) => String(call[0]))).toContainEqual(expect.stringMatching(/run=unserved unmeasured-documents=1 billed-pages=0 documents=unserved-estimate/));
+    expect(error.mock.calls.map((call) => String(call[0]))).toContainEqual(expect.stringMatching(/run=unserved unmeasured-documents=1 billed-pages=0 documents=unserved-estimate/));
   });
 
-  it("a first-pass shard charges only when the ordinary loop will not extract the document again", { timeout: 60_000 }, async () => {
+  it("a first-pass shard charges the document when it completes it; the ordinary loop indexing it again charges nothing", { timeout: 60_000 }, async () => {
     await seedRun("fp", [{ id: "fp-same", pages: 3 }, { id: "fp-vision", pages: 3 }, { id: "fp-skipped", pages: 2 }]);
     await indexDocument("fp", "fp-same", { firstPassShard: { differs: false } });
     await indexDocument("fp", "fp-vision", { firstPassShard: { differs: true } });
     await indexDocument("fp", "fp-skipped", { firstPassShard: { differs: true } });
-    expect(await fastCharges("fp")).toEqual([{ id: "fast:fp:fp-same", pages: 3, org: "o1" }]);
-    // The ordinary loop reads page 2 of fp-vision with a vision model and indexes it again: charged then, without that page.
+    const firstPass = [
+      { id: "fast:fp:fp-same", pages: 3, org: "o1" }, { id: "fast:fp:fp-skipped", pages: 2, org: "o1" }, { id: "fast:fp:fp-vision", pages: 3, org: "o1" },
+    ];
+    expect(await fastCharges("fp")).toEqual(firstPass);
+    // The ordinary loop reads page 2 of fp-vision with a vision model and indexes it again: the read bills, the Fast charge stands.
     await indexDocument("fp", "fp-vision", { reads: [2] });
-    // fp-skipped is not indexed again (its content did not change): the end of the index stage charges it.
     await withStore(async (store) => {
       const state = await loadRunState(store, "fp");
       await store.completeRunStage(state, "index", "", {});
     });
-    expect(await fastCharges("fp")).toEqual([
-      { id: "fast:fp:fp-same", pages: 3, org: "o1" }, { id: "fast:fp:fp-skipped", pages: 2, org: "o1" }, { id: "fast:fp:fp-vision", pages: 2, org: "o1" },
-    ]);
+    expect(await fastCharges("fp")).toEqual(firstPass);
+  });
+
+  it("a run cancelled right after a first-pass completion keeps that document's charge (council round 2, H1)", { timeout: 60_000 }, async () => {
+    await seedRun("fpcancel", [{ id: "fpcancel-a", pages: 4 }, { id: "fpcancel-b", pages: 3, status: "queued" }]);
+    await indexDocument("fpcancel", "fpcancel-a", { firstPassShard: { differs: true } });
+    await db.query(`update project_runs set control_state = 'cancel_requested' where id = 'fpcancel'`);
+    await fail("fpcancel");
+    expect(await fastCharges("fpcancel")).toEqual([{ id: "fast:fpcancel:fpcancel-a", pages: 4, org: "o1" }]);
+  });
+
+  it("a crash after completion and before the checkpoint leaves every page charged once (council round 2, H2)", { timeout: 60_000 }, async () => {
+    await seedRun("crash", [{ id: "crash-a", pages: 5 }]);
+    await indexDocument("crash", "crash-a", { reads: [2, 3], crashBeforeCheckpoint: true });
+    // The read charges were persisted in the completing transaction, so the page reads and the Fast pages cover all 5 pages.
+    const { rows } = await db.query<{ id: string }>(`select id from usage_events where run_id = 'crash' and metric = $1 order by id`, [BILLABLE_UNIT_METRICS.richPage]);
+    expect(rows.map((row) => row.id)).toEqual(["rich:crash:crash-a:2", "rich:crash:crash-a:3"]);
+    expect(await fastCharges("crash")).toEqual([{ id: "fast:crash:crash-a", pages: 3, org: "o1" }]);
+    // A restarted worker that indexes it again (no ledger) and completes the run charges nothing more.
+    await indexDocument("crash", "crash-a");
+    await complete("crash");
+    expect(await fastCharges("crash")).toEqual([{ id: "fast:crash:crash-a", pages: 3, org: "o1" }]);
+  });
+
+  it("a run an older worker already charged run-wide is never charged per document as well (round 2, Low a)", { timeout: 60_000 }, async () => {
+    await seedRun("stale", [{ id: "stale-a", pages: 4 }]);
+    await olderWorkerCharge("stale", "fast:stale", 4);
+    await indexDocument("stale", "stale-a");
+    expect(await fastCharges("stale")).toEqual([{ id: "fast:stale", pages: 4, org: "o1" }]);
   });
 });
 
