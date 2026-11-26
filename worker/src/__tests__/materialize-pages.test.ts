@@ -6,7 +6,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import { connect } from "@lancedb/lancedb";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type { Sql } from "postgres";
-import { defaultPipelineFeatures, pageCredits, speedBoostMultiplier } from "@docslurp/shared";
+import { defaultPipelineFeatures, isPageWithheld, pageCredits, piiWithholding, speedBoostMultiplier } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
@@ -114,7 +114,7 @@ function harness(pageTexts: Record<number, string>, overrides: Partial<PageMater
   };
   h.deps = {
     sql, store, usage,
-    storage: {} as never, runner: {} as never,
+    storage: { bucket: "b", uri: (key: string) => `s3://b/${key}` } as never, runner: {} as never,
     config: { lancedb: { root: "/tmp/none", storageOptions: undefined, params: new URLSearchParams() }, defaultInferenceLane: "balanced", vectorBackends: ["lancedb"] } as unknown as Config,
     ops,
   };
@@ -219,6 +219,54 @@ describe("materializePageRange", () => {
       expect(state.rows[0]!.state).toBe("blocked-pii");
     } finally {
       await db.exec(`update documents set metadata = '{}'::jsonb where id = 'd1'`);
+    }
+  });
+
+  it("a deferred match records the page-scoped outcome every serve-side reader uses (H2)", async () => {
+    await db.exec(`update project_runs set artifacts = '{"d1:page-1": "s3://b/p1.png", "d1:page-2": "s3://b/p2.png", "d1:native-pdf-json": "s3://b/parse.json"}'::jsonb where id = 'run-1'`);
+    try {
+      const h = harness({ 1: LONG, 2: `${LONG} SSN 123-45-6789 is on file for this customer.` });
+      const pipeline = {
+        ...smartest,
+        piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn" as const], action: "block_indexing" as const, allowlistPatterns: [] },
+      };
+      await claimAndMaterialize(h.deps, input(h, [1, 2], pipeline));
+      const [doc] = (await db.query<{ status: string; metadata: { pii: Record<string, unknown> } }>(`select status, metadata from documents where id = 'd1'`)).rows;
+      expect(doc!.status).toBe("processing");
+      expect(doc!.metadata.pii).toMatchObject({ scope: "pages", withheldPages: [2], withheldPageTypes: { "2": ["ssn"] }, patternTypes: ["ssn"], blocked: false });
+      expect(doc!.metadata.pii.matchCount).toBeUndefined();
+      // The source and every non-page artifact are withheld; clean page 1's image is not.
+      expect(doc!.metadata.pii.withheldArtifactUris).toEqual(expect.arrayContaining(["s3://b/k1", "s3://b/parse.json", "s3://b/p2.png"]));
+      expect(doc!.metadata.pii.withheldArtifactUris).not.toContain("s3://b/p1.png");
+      const withholding = piiWithholding(doc!);
+      expect(isPageWithheld(withholding, 2)).toBe(true);
+      expect(isPageWithheld(withholding, 1)).toBe(false);
+      const findings = await db.query<{ page_number: number; pattern_type: string; org_id: string }>(`select page_number, pattern_type, org_id from pii_page_findings where document_id = 'd1'`);
+      expect(findings.rows).toEqual([{ page_number: 2, pattern_type: "ssn", org_id: "o1" }]);
+      // A second deferred match merges (the first page stays withheld) instead of overwriting.
+      const again = harness({ 3: `${LONG} card 4111 1111 1111 1111 on file.` });
+      await claimAndMaterialize(again.deps, input(again, [3], { ...pipeline, piiPolicy: { ...pipeline.piiPolicy, patterns: ["ssn", "credit-card"] } }));
+      const [merged] = (await db.query<{ metadata: { pii: Record<string, unknown> } }>(`select metadata from documents where id = 'd1'`)).rows;
+      expect(merged!.metadata.pii).toMatchObject({ scope: "pages", withheldPages: [2, 3], withheldPageTypes: { "2": ["ssn"], "3": ["credit-card"] } });
+    } finally {
+      await db.exec(`update documents set metadata = '{}'::jsonb, status = 'processing' where id = 'd1'; update project_runs set artifacts = '{}'::jsonb where id = 'run-1'; delete from pii_page_findings;`);
+    }
+  });
+
+  it("a deferred match on every page blocks the document (H2)", async () => {
+    try {
+      const pipeline = {
+        ...smartest,
+        piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn" as const], action: "block_document" as const, allowlistPatterns: [] },
+      };
+      const h = harness({ 1: LONG, 2: `${LONG} SSN 123-45-6789 on file.` });
+      const result = await claimAndMaterialize(h.deps, input(h, [1, 2], pipeline));
+      expect(result.indexed).toEqual([]);
+      const [doc] = (await db.query<{ status: string; metadata: unknown }>(`select status, metadata from documents where id = 'd1'`)).rows;
+      expect(doc!.status).toBe("pii_blocked");
+      expect(piiWithholding(doc!).scope).toBe("document");
+    } finally {
+      await db.exec(`update documents set metadata = '{}'::jsonb, status = 'processing' where id = 'd1'; delete from pii_page_findings;`);
     }
   });
 

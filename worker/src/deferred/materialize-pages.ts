@@ -22,7 +22,7 @@ import {
   type PipelineFeatures,
   switchDisabled,
   isPageWithheld,
-  PII_BLOCKED_DOCUMENT_STATUS,
+  type PiiPatternType,
 } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -44,6 +44,7 @@ import { projectVectorLocation } from "../stages/lancedb-location.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { resolvePolicy } from "../stages/pii-detect.js";
 import { loadDocumentPiiWithholding } from "../pipeline/pii-gate.js";
+import { recordDeferredPiiMatch } from "../lib/pii-deferred-outcome.js";
 import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type VectorBackendRecord } from "../stages/embedding-runtime.js";
 import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -579,11 +580,14 @@ export async function materializePageRange(
     prepared.delete(entry.page);
     blocked.push(entry.page);
   }
+  /** Pages this read matched (not already withheld), with the kinds of PII found: recorded before anything is indexed. */
+  const newMatches = new Map<number, PiiPatternType[]>();
   if (scan) {
     for (const entry of [...prepared.values()]) {
       const scanned = scan(entry.text, entry.page);
       if (scanned.matches.length === 0) continue;
       piiMatched.add(entry.page);
+      newMatches.set(entry.page, [...new Set(scanned.matches.map((match) => match.patternType))]);
       // Deferred pages are read one by one: block_indexing withholds the page that matched; block_document (below)
       // blocks the whole document.
       if (policy.action === "block_indexing" || policy.action === "block_document") {
@@ -595,18 +599,19 @@ export async function materializePageRange(
     }
   }
 
-  // The project chose whole-document blocking: a match on any page read here blocks the document, as pii-detect does
-  // at ingest (its status and outcome; every reader fails closed on both). Nothing of this batch is indexed.
-  if (policy.action === "block_document" && blocked.some((page) => !isPageWithheld(recorded, page))) {
-    for (const entry of [...prepared.values()]) { prepared.delete(entry.page); blocked.push(entry.page); }
-    const outcome = { scope: "document", blocked: true, action: "block_document", reason: "deferred-page-match", detectedAt: new Date().toISOString() };
-    await deps.sql`
-      update documents
-      set status = ${PII_BLOCKED_DOCUMENT_STATUS},
-          metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('pii', coalesce(metadata->'pii', '{}'::jsonb) || ${deps.sql.json(outcome)}::jsonb),
-          updated_at = now()
-      where id = ${documentId}
-    `;
+  // A match is recorded on the document before anything of this batch is indexed, exactly as the ingest scan records it
+  // (pii-deferred-outcome.ts): the page (types, findings, its image and the source withheld), merged with any earlier
+  // outcome under the row lock. `block_document` (or every page withheld) blocks the document, and nothing of this
+  // batch is indexed. Redaction records the redacted pages, whose images are then withheld.
+  if (newMatches.size > 0) {
+    const merged = await deps.sql.begin((tx) => recordDeferredPiiMatch(tx as never, documentId, {
+      pages: newMatches, action: policy.action, runId: input.runId, pageCount: document.pageCount,
+      sourceUri: deps.storage.uri(document.sourceKey),
+    }));
+    // Null: the document was withheld whole meanwhile (a concurrent read); fail closed for this batch too.
+    if (merged?.blocked || (merged === null && policy.action !== "flag_for_review")) {
+      for (const entry of [...prepared.values()]) { prepared.delete(entry.page); blocked.push(entry.page); }
+    }
   }
 
   // 3. Chunk, with map headings when a document map exists.

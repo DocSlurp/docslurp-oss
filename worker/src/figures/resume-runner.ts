@@ -46,7 +46,7 @@ import {
   projectFigureResumeMode, projectFiguresOff, FIGURE_RESUME_LIMITS, type FigureResumeBlockReason,
 } from "@docslurp/shared";
 import { recordFigureTelemetry } from "@docslurp/shared/observability";
-import { isPageWithheld, piiWithholding, type PiiWithholding } from "@docslurp/shared";
+import { isPageImageWithheld, isPageWithheld, piiWithholding, type PiiWithholding } from "@docslurp/shared";
 
 import {
   adoptPendingAssets, figureLedgerHooks, isMissingObject, ledgerWriteForStoredFigures, markAssetsLost,
@@ -723,7 +723,7 @@ async function resumeUnit(
       const withheld = await documentPiiWithholding(deps.sql, row);
       if (withheld.scope === "document") return { outcome: "blocked", blocked: "refused", vmMs, added: 0 };
       if (withheld.scope === "pages") {
-        const uris = set.files.filter((file) => isPageWithheld(withheld, parseDopplerFigureId(file.id)?.pageNumber ?? null))
+        const uris = set.files.filter((file) => isPageImageWithheld(withheld, parseDopplerFigureId(file.id)?.pageNumber ?? null))
           .map((file) => deps.storage.uri(dopplerFolderKey(document, row.run_id, { id: file.id, format: file.format })));
         await withholdUris(deps.sql, row, uris);
         if (uris.length > 0) recordFigureTelemetry("resume.pii_withheld_files", uris.length);

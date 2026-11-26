@@ -7,6 +7,7 @@ import {
   DOCUMENT_EXPORT_TTL_DAYS,
   documentExportFolderNames,
   isPageImageReferenceBlock,
+  isPageImageWithheld,
   isPageWithheld,
   piiWithheldPageText,
   piiWithholding,
@@ -215,7 +216,7 @@ export async function* documentExportEntries(
     for (const [slot, uri] of Object.entries(row.artifacts ?? {})) {
       if (!slot.startsWith(prefix)) continue;
       const page = withheldPageOfSlot(slot.slice(prefix.length));
-      if (piiState.scope === "document" || (page !== null && isPageWithheld(piiState, page))) withheld.add(uri);
+      if (piiState.scope === "document" || (page !== null && isPageImageWithheld(piiState, page))) withheld.add(uri);
     }
     const completed = row.status === "completed";
     const artifacts = completed

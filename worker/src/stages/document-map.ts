@@ -9,7 +9,7 @@ import {
   ladderAllowsOffPlanReads,
   qualityAllowsPageReading,
   resolveAllowedPipelineTextModel,
-  type MaterializationPolicy, switchDisabled } from "@docslurp/shared";
+  type MaterializationPolicy, type PiiPatternType, switchDisabled } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { calibrateSegments, intToRoman, parseLabel, readPrintedPageNumber, resolvePrintedPage, segmentsFromPageLabels, type LabelSegment } from "../deferred/page-labels.js";
@@ -24,6 +24,9 @@ import { textModelApiKey } from "../lib/text-model-route.js";
 import type { Document } from "../models.js";
 import { runDocumentStage, runDocuments, isCostCapExceeded } from "../pipeline/checkpoints.js";
 import { resolvePolicy } from "./pii-detect.js";
+import { recordDeferredPiiMatch } from "../lib/pii-deferred-outcome.js";
+import { mapSearchText, scrubDocumentMap } from "../lib/pii-document-map.js";
+import { loadDocumentPiiWithholding } from "../pipeline/pii-gate.js";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { embedPageImages, withinCostCap, type PageEmbedDeps } from "./page-embed.js";
@@ -503,18 +506,36 @@ export class DocumentMapStage implements Stage {
     // The coarse layer is searchable, so it obeys the project PII policy exactly like materialized pages.
     const policy = resolvePolicy(state.run.pipeline);
     const blockedPages: number[] = [];
+    /** Pages the rough text matched, with the kinds of PII found (recorded on the document like an ingest scan's). */
+    const matchedPages = new Map<number, PiiPatternType[]>();
+    let searchText = mapSearchText(built.nodes, built.terms);
     if (policy.enabled && policy.patterns.length > 0) {
       const scan = createPiiTextScanner(policy.patterns, policy.allowlistPatterns);
       coarseRows = coarseRows.flatMap(([pageNumber, text]): Array<[number, string]> => {
         const scanned = scan(text, pageNumber);
         if (scanned.matches.length === 0) return [[pageNumber, text]];
-        // Page-scoped withholding drops the page; `block_document` drops it too (pii-detect then blocks the document).
+        matchedPages.set(pageNumber, [...new Set(scanned.matches.map((match) => match.patternType))]);
+        // Page-scoped withholding drops the page; `block_document` drops it too (and blocks the document below).
         if (policy.action === "block_indexing" || policy.action === "block_document") { blockedPages.push(pageNumber); return []; }
         return [[pageNumber, policy.action === "redact_artifacts" ? scanned.redacted : text]];
       });
+      // The map's titles and terms are shown in lists and search and drive the deferred locator: anything that matches,
+      // or that came from a page withheld now or by an earlier outcome, is dropped (pii-document-map.ts).
+      if (policy.action !== "flag_for_review") {
+        const recorded = await loadDocumentPiiWithholding(sql as never, document.id);
+        const withheld = recorded.scope === "document" || (policy.action === "block_document" && blockedPages.length > 0)
+          ? "all" as const
+          : new Set([...(recorded.scope === "pages" ? recorded.pages : []), ...blockedPages]);
+        const scrubbed = scrubDocumentMap(built, withheld, (text) => scan(text).matches.length > 0);
+        if (scrubbed.changed) {
+          built.nodes = scrubbed.nodes;
+          built.terms = scrubbed.terms;
+          built.title = scrubbed.title;
+          searchText = scrubbed.searchText;
+        }
+      }
     }
 
-    const searchText = [...built.nodes.map((n) => n.title), ...built.terms.map((t) => t.term)].join(" \n");
     const decisions = built.siphon?.decisions ?? [];
     await sql.begin(async (tx) => {
       const q = tx as unknown as Sql;
@@ -571,6 +592,14 @@ export class DocumentMapStage implements Stage {
           update document_page_states set read_text = null
           where document_id = ${document.id} and page_number = any(${blockedPages}::int[]) and read_text is not null
         `;
+      }
+      // Deferred modes run no pii-detect: the match is the document's outcome (pages, types, findings, the source and
+      // non-page artifacts withheld), merged with any earlier one, so every serve-side reader sees it. A full-index run's
+      // pii-detect replaces it with the whole-text scan.
+      if (matchedPages.size > 0) {
+        await recordDeferredPiiMatch(q as never, document.id, {
+          pages: matchedPages, action: policy.action, runId: state.run.id, pageCount, sourceUri: this.storage.uri(document.sourceKey),
+        });
       }
 
       if (built.title) {

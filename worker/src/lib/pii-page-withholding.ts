@@ -179,18 +179,41 @@ export function carriedWithheldPages(findings: PiiScanFindings): Map<number, Pii
   return carried;
 }
 
+/**
+ * Sections of an unpaged document a previous scan already replaced (the section placeholder in its text, or a canonical
+ * block it marked withheld). A rescan over that rewritten text finds nothing, so without this it would record the
+ * document clean and serve the pre-scan artifacts (source file, parser output, page image) that still hold the PII.
+ */
+export function carriedWithheldSections(findings: PiiScanFindings): number {
+  if (findings.pageCount > 1) return 0;
+  let count = 0;
+  for (const entry of [findings.markdown, findings.fallback]) {
+    if (entry) count = Math.max(count, entry.text.split(PII_WITHHELD_SECTION_TEXT).length - 1);
+  }
+  if (findings.canonical) {
+    const marked = findings.canonical.blocks.filter((block) =>
+      (block.metadata as { piiWithheld?: unknown } | null | undefined)?.piiWithheld === true
+      || (typeof block.text === "string" && isPiiWithheldPlaceholder(block.text))).length;
+    count = Math.max(count, marked);
+  }
+  return count;
+}
+
 /** Decide what `block_indexing` withholds. Other actions withhold no pages except ones a previous scan replaced. */
 export function planPiiWithholding(action: PiiPolicy["action"], findings: PiiScanFindings, anyMatch: boolean): PiiWithholdingPlan {
   const carried = carriedWithheldPages(findings);
+  const carriedSections = carriedWithheldSections(findings);
   const blocking = action === "block_indexing" || action === "block_document";
   if (!anyMatch || !blocking) {
-    return carried.size > 0
-      ? withPages(findings, [...carried.keys()], [...carried.keys()], mergeTypes(carried, new Map()))
-      : { scope: "none" };
+    if (carried.size > 0) return withPages(findings, [...carried.keys()], [...carried.keys()], mergeTypes(carried, new Map()));
+    return carriedSections > 0 ? { scope: "sections", sectionCount: carriedSections } : { scope: "none" };
   }
   if (action === "block_document") return { scope: "document", reason: "policy-block-document" };
 
-  if (findings.pageCount <= 1) return planSections(findings);
+  if (findings.pageCount <= 1) {
+    const plan = planSections(findings);
+    return plan.scope === "sections" ? { scope: "sections", sectionCount: plan.sectionCount + carriedSections } : plan;
+  }
 
   const located = locateMatches(findings);
   if (located.unattributed.length > 0) return { scope: "document", reason: `unattributed:${located.unattributed.join(",")}` };

@@ -20,7 +20,11 @@ import { PII_BLOCKED_DOCUMENT_STATUS } from "./run.js";
  * document, and a hit with no page on a document with withheld pages is withheld.
  */
 export type PiiWithholding =
-  | { scope: "none" }
+  | {
+      scope: "none";
+      /** A redaction outcome that recorded the pages it redacted: only those pages' pixels show a value. */
+      redactedPages?: ReadonlySet<number>;
+    }
   | { scope: "sections"; sectionCount: number; types?: readonly PiiPatternType[] }
   | {
       scope: "pages";
@@ -28,6 +32,11 @@ export type PiiWithholding =
       /** Kinds of PII detected on each withheld page; a page missing here has unknown types (a generic reason). */
       pageTypes?: ReadonlyMap<number, readonly PiiPatternType[]>;
       types?: readonly PiiPatternType[];
+      /**
+       * The outcome also redacted values: the pages it redacted on (their images still show the value), or `"unknown"`
+       * when they were not recorded, in which case no page's pixels are known clean.
+       */
+      redactedPages?: ReadonlySet<number> | "unknown";
     }
   | { scope: "document"; reason: string; types?: readonly PiiPatternType[] };
 
@@ -147,7 +156,10 @@ export function piiWithholding(document: { status?: string | null; metadata?: un
   const pii = (metadata as { pii?: unknown }).pii;
   if (pii === null || pii === undefined) return { scope: "none" };
   if (typeof pii !== "object" || Array.isArray(pii)) return { scope: "document", reason: "malformed-metadata" };
-  const record = pii as { blocked?: unknown; scope?: unknown; withheldPages?: unknown; withheldSectionCount?: unknown; withheldPageTypes?: unknown; patternTypes?: unknown };
+  const record = pii as { blocked?: unknown; scope?: unknown; withheldPages?: unknown; withheldSectionCount?: unknown; withheldPageTypes?: unknown; patternTypes?: unknown; redacted?: unknown; redactedPages?: unknown };
+  const redactedPages = record.redacted === true
+    ? Array.isArray(record.redactedPages) && record.redactedPages.every(isPositiveInteger) ? new Set(record.redactedPages) : "unknown" as const
+    : undefined;
   // Kinds of PII are descriptive: missing or malformed type data never changes what is withheld, only the reason shown.
   const types = piiCategoryIds(record.patternTypes);
   const typed = types.length > 0 ? { types } : {};
@@ -159,7 +171,8 @@ export function piiWithholding(document: { status?: string | null; metadata?: un
       // Flag-for-review and redaction outcomes (and outcomes written before page scoping) withhold no pages;
       // their unscanned artifacts are still withheld by `withheldArtifactUris`.
       if (record.withheldPages !== undefined) return { scope: "document", reason: "malformed-metadata" };
-      return { scope: "none" };
+      // Outcomes written before redacted pages were recorded keep reading as before (their withheld list governs).
+      return redactedPages instanceof Set ? { scope: "none", redactedPages } : { scope: "none" };
     case "pages": {
       const pages = record.withheldPages;
       if (!Array.isArray(pages) || pages.length === 0 || !pages.every(isPositiveInteger)) {
@@ -167,7 +180,7 @@ export function piiWithholding(document: { status?: string | null; metadata?: un
       }
       const pageSet = new Set(pages);
       const pageTypes = withheldPageTypes(record.withheldPageTypes, pageSet);
-      return { scope: "pages", pages: pageSet, ...(pageTypes.size > 0 ? { pageTypes } : {}), ...typed };
+      return { scope: "pages", pages: pageSet, ...(pageTypes.size > 0 ? { pageTypes } : {}), ...typed, ...(redactedPages ? { redactedPages } : {}) };
     }
     case "sections":
       return { scope: "sections", sectionCount: isPositiveInteger(record.withheldSectionCount) ? record.withheldSectionCount : 1, ...typed };
@@ -205,6 +218,20 @@ export function isPageWithheld(
   const known = pages.filter(isPositiveInteger);
   if (known.length === 0 || known.length !== pages.length) return true;
   return known.some((value) => withholding.pages.has(value));
+}
+
+/**
+ * Whether a page's pixels (page image, render, figures) are withheld. A withheld page's are; so are those of a page the
+ * outcome redacted a value on (the image still shows it), and every page's when an outcome redacted without recording
+ * its pages. Text readers use {@link isPageWithheld}: redacted text is servable, its image is not.
+ */
+export function isPageImageWithheld(withholding: PiiWithholding, page: number | null | undefined): boolean {
+  if (isPageWithheld(withholding, page)) return true;
+  if (withholding.scope !== "pages" && withholding.scope !== "none") return false;
+  const redacted = withholding.redactedPages;
+  if (redacted === undefined) return false;
+  if (redacted === "unknown") return true;
+  return !isPositiveInteger(page) || redacted.has(page);
 }
 
 /** Withheld page numbers, sorted; `"all"` when the whole document is withheld. */

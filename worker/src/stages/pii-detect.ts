@@ -37,6 +37,8 @@ import {
   type PiiWithholdingPlan,
 } from "../lib/pii-page-withholding.js";
 import { measureOp, pushPerfMetric } from "../lib/perf-context.js";
+import { documentTitleWithheld, scrubDocumentMap, type WithheldPagesForMap } from "../lib/pii-document-map.js";
+import { findingsStatement } from "../lib/pii-deferred-outcome.js";
 import { extractTextForEmbedding } from "./embedding-runtime.js";
 import { refreshSummaryEvidence } from "./summary-evidence-refresh.js";
 import { withdrawSummaryTreeForPii } from "../summary-tree/state-store.js";
@@ -73,6 +75,11 @@ export type PiiTextSource = "canonical-document" | "markdown" | "html" | "extrac
 export interface PiiDetectionSink {
   recordDetections(documentId: string, runId: string, matches: PiiMatch[], redacted: boolean): Promise<void>;
   setDocumentOutcome(documentId: string, outcome: PiiDocumentOutcome): Promise<void>;
+  /**
+   * Titles and the document map were built before the scan: clear the titles and drop the map's nodes and terms that
+   * match or come from a withheld page, and rebuild its search text (pii-document-map.ts). Optional for test sinks.
+   */
+  scrubTitlesAndMap?(documentId: string, withheld: WithheldPagesForMap, matches: (text: string) => boolean): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -99,6 +106,11 @@ export type PiiDocumentOutcome = {
   blocked: boolean;
   reviewRequired: boolean;
   redacted: boolean;
+  /**
+   * Pages a redaction rewrote a value on (their images still show it); null when the pages are unknown, which keeps
+   * every page's pixels withheld. Only with `redacted`.
+   */
+  redactedPages?: number[] | null;
   reason: string | null;
   /**
    * Artifacts the API must refuse to serve for this document: everything
@@ -155,9 +167,21 @@ export function resolvePolicy(pipeline: WorkflowState["run"]["pipeline"]): PiiPo
     patterns: (raw.patterns ?? []).filter((p): p is PiiPatternType =>
       piiPatternTypeSchema.options.includes(p as PiiPatternType)
     ),
-    action: raw.action as PiiPolicy["action"],
+    action: knownAction(raw.enabled, raw.action),
     allowlistPatterns: raw.allowlistPatterns ?? [],
   };
+}
+
+const PII_ACTIONS: ReadonlySet<string> = new Set(["flag_for_review", "redact_artifacts", "block_indexing", "block_document"]);
+
+/**
+ * The policy action, failing closed: an action this worker does not know (a newer API configured it) blocks the
+ * document. Indexing it in full would ignore what the project asked for.
+ */
+function knownAction(enabled: boolean, action: unknown): PiiPolicy["action"] {
+  if (typeof action === "string" && PII_ACTIONS.has(action)) return action as PiiPolicy["action"];
+  if (enabled) console.warn(`[pii] unknown-policy-action action=${typeof action === "string" ? action.slice(0, 40) : typeof action} fallback=block_document`);
+  return enabled ? "block_document" : "flag_for_review";
 }
 
 export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectionSink {
@@ -212,6 +236,7 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
             blocked: outcome.blocked,
             reviewRequired: outcome.reviewRequired,
             redacted: outcome.redacted,
+            ...(outcome.redacted && outcome.redactedPages ? { redactedPages: outcome.redactedPages } : {}),
             reason: outcome.reason,
             withheldArtifactUris: outcome.withheldArtifactUris,
             detectedAt: new Date().toISOString(),
@@ -224,9 +249,9 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
       // and project through the row itself. Never written to documents.metadata.
       // One primary-key-prefix delete per scan (a clean rescan clears an earlier scan's rows); the insert only when there
       // are findings. A failure between the two leaves fewer operator rows, never tenant-visible data, and fails the stage.
-      await db`delete from pii_page_findings where document_id = ${documentId}`;
+      await findingsStatement(() => db`delete from pii_page_findings where document_id = ${documentId}`);
       if (outcome.findings.length > 0) {
-        await db`
+        await findingsStatement(() => db`
           insert into pii_page_findings (document_id, org_id, project_id, run_id, page_number, pattern_type, detector, validation, confidence)
           select d.id, d.org_id, d.project_id, ${outcome.runId}, f.page_number, f.pattern_type, f.detector, f.validation, f.confidence
           from documents d
@@ -238,7 +263,7 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
             ${outcome.findings.map((finding) => finding.confidence)}::real[]
           ) as f(page_number, pattern_type, detector, validation, confidence)
           where d.id = ${documentId} and d.org_id is not null and d.project_id is not null
-        `;
+        `);
       }
       if (outcome.scope === "pages" && outcome.withheldPages.length > 0) {
         // Rows written before this scan (the map's rough text, a kept model read) of a page it withholds are removed:
@@ -275,6 +300,33 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
             updated_at = now()
         where id = ${documentId}
       `;
+    },
+    async scrubTitlesAndMap(documentId, withheld, matches) {
+      // One read of the document's titles and map (primary keys); a write only when something changed.
+      const [row] = await db<Array<{ title: string | null; title_source: string | null; map_title: string | null; nodes: unknown; terms: unknown; has_map: boolean }>>`
+        select d.metadata->>'title' as title, d.metadata->>'titleSource' as title_source, d.metadata->>'mapTitle' as map_title,
+               m.nodes, m.terms, m.document_id is not null as has_map
+        from documents d left join document_maps m on m.document_id = d.id
+        where d.id = ${documentId}
+      `;
+      if (!row) return;
+      const clearTitle = documentTitleWithheld(row.title, row.title_source, withheld, matches);
+      const map = scrubDocumentMap({
+        nodes: Array.isArray(row.nodes) ? row.nodes as Array<{ title?: unknown; physicalStart?: unknown }> : [],
+        terms: Array.isArray(row.terms) ? row.terms as Array<{ term?: unknown; physicalPages?: unknown }> : [],
+        title: row.map_title,
+      }, withheld, matches);
+      if (clearTitle || map.title !== row.map_title) {
+        const drop = [...(clearTitle ? ["title", "titleSource"] : []), ...(map.title !== row.map_title ? ["mapTitle"] : [])];
+        await db`update documents set metadata = coalesce(metadata, '{}'::jsonb) - ${drop}::text[] where id = ${documentId}`;
+      }
+      if (row.has_map && map.changed) {
+        await db`
+          update document_maps set nodes = ${db.json(map.nodes as never)}, terms = ${db.json(map.terms as never)},
+            search_text = to_tsvector('simple', ${map.searchText}), version = version + 1, updated_at = now()
+          where document_id = ${documentId}
+        `;
+      }
     },
     async close() {
       await db.end();
@@ -315,7 +367,7 @@ export class PiiDetectStage implements Stage {
       // anything is read or redacted, and also when a completed checkpoint is replayed (one DeleteObject). Matches or
       // not: a retry after a failed delete sees already-redacted text and finds nothing, so the delete must not depend
       // on what an attempt finds. A failed delete fails the stage, which is retried; nothing is redacted before it.
-      if (policy.action === "redact_artifacts" || policy.action === "block_indexing") {
+      if (policy.action !== "flag_for_review") {
         await this.storage.deleteKeys([tableCellsArtifactKey(state.run, document)]);
       }
 
@@ -555,12 +607,15 @@ export class PiiDetectStage implements Stage {
     // withheld whenever anything is. Under block_document (or a page that cannot be placed) nothing is served.
     const withheldPageSet = new Set(plan.scope === "pages" ? plan.pages : []);
     const hitPages = located && located.unattributed.length === 0 ? located.pages : null;
+    // A redacted page's image still shows the value: under redaction a page's pixels are servable only when the scan
+    // placed every match and none is on it, whether or not other pages are withheld (carried) too.
     const cleanPage = (page: number): boolean => {
       if (page < 1 || page > document.pageCount) return false;
-      if (plan.scope === "pages") return !withheldPageSet.has(page);
+      if (withheldPageSet.has(page)) return false;
       if (redacted) return hitPages !== null && !hitPages.has(page);
-      return false;
+      return plan.scope === "pages";
     };
+    const redactedPages = redacted && hitPages ? [...hitPages].sort((a, b) => a - b) : null;
     const withheldArtifactUris = blocked || redacted || withholding
       ? this.withheldArtifactUris(state, document, blocked ? new Set() : servableUris, blocked ? () => false : cleanPage)
       : [];
@@ -605,10 +660,15 @@ export class PiiDetectStage implements Stage {
       blocked,
       reviewRequired,
       redacted,
+      redactedPages,
       reason,
       withheldArtifactUris,
     });
     if (blocked) document.status = PII_BLOCKED_DOCUMENT_STATUS;
+    if (policy.action !== "flag_for_review" && (anyMatch || plan.scope !== "none")) {
+      const withheldForMap: WithheldPagesForMap = plan.scope === "pages" ? new Set(plan.pages) : plan.scope === "none" ? new Set() : "all";
+      await this.sink.scrubTitlesAndMap?.(document.id, withheldForMap, (text) => scan(text).matches.length > 0);
+    }
 
     const artifact: PiiDetectionArtifact = {
       documentId: document.id,

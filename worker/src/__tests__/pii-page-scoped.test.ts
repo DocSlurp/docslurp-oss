@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isPageImageWithheld,
+  isPageWithheld,
   normalizePipelineFeatures,
+  piiWithholding,
   PII_BLOCKED_DOCUMENT_STATUS,
   PII_WITHHELD_SECTION_TEXT,
   piiWithheldPageText,
@@ -11,6 +14,8 @@ import {
 } from "@docslurp/shared";
 
 import { fromEnv } from "../config.js";
+import { isDocumentLevelFailure } from "../lib/document-failure.js";
+import { findingsStatement, PiiFindingsUnavailableError } from "../lib/pii-deferred-outcome.js";
 import type { Document, ProjectRun } from "../models.js";
 import { locateMatches, planPiiWithholding, withholdPagesThenRedact } from "../lib/pii-page-withholding.js";
 import { documentPiiWithholding, indexableDocuments, isPageWithheldInRun } from "../pipeline/pii-gate.js";
@@ -426,5 +431,79 @@ describe("headings from a withheld page leave later pages' heading paths", () =>
     const out = f.storage.json<CanonicalDocument>(f.canonicalKey);
     expect(JSON.stringify(out)).not.toContain("Jane Roe");
     expect(out.blocks.at(-1)!.headingPath).toEqual([]);
+  });
+});
+
+describe("redaction over carried pages serves only known-clean pages' pixels (M1)", () => {
+  it("a page redacted on a rescan has its image withheld and is recorded as redacted", async () => {
+    const CARD = "4111 1111 1111 1111";
+    const first = setup("block_indexing", ["p1", `p2 ${SSN}`, "p3", "p4", "p5"]);
+    await first.stage.run(first.state);
+    const markdown = first.storage.objects.get(first.markdownKey)!.split("\f");
+    markdown[4] = `p5 card ${CARD}`;
+    first.storage.objects.set(first.markdownKey, markdown.join("\f"));
+    const doc = first.storage.json<CanonicalDocument>(first.canonicalKey);
+    doc.blocks[4] = { ...doc.blocks[4]!, text: `p5 card ${CARD}` };
+    first.storage.objects.set(first.canonicalKey, JSON.stringify(doc));
+    const again = setup("redact_artifacts", ["p1", "x", "p3", "p4", "x"], { storage: first.storage, patterns: ["ssn", "credit-card"] });
+    await again.stage.run(again.state);
+    expect(outcome(again)).toMatchObject({ scope: "pages", withheldPages: [2], redacted: true, redactedPages: [5] });
+    const withheld = new Set(outcome(again).withheldArtifactUris);
+    expect(withheld.has(uri(again, "page-5"))).toBe(true);
+    expect(withheld.has(uri(again, "doppler-figure:p5.0"))).toBe(true);
+    expect(withheld.has(uri(again, "page-1"))).toBe(false);
+    // Readers: a render of page 5 is refused, page 1 is allowed.
+    const recorded = piiWithholding({ status: "completed", metadata: { pii: { scope: "pages", withheldPages: [2], redacted: true, redactedPages: [5] } } });
+    expect(isPageImageWithheld(recorded, 5)).toBe(true);
+    expect(isPageImageWithheld(recorded, 1)).toBe(false);
+    expect(isPageWithheld(recorded, 5)).toBe(false);
+    // A redaction outcome that did not record its pages keeps every page's pixels withheld.
+    expect(isPageImageWithheld(piiWithholding({ metadata: { pii: { scope: "pages", withheldPages: [2], redacted: true } } }), 1)).toBe(true);
+  });
+});
+
+describe("a rescan of section-rewritten text keeps the sections withheld (M4)", () => {
+  it("a one-page document rescanned over its rewritten text stays withheld, with its pre-scan artifacts", async () => {
+    const markdown = `# Intro\nWelcome.\n\n# Payroll\nSSN ${SSN}.\n`;
+    const first = setup("block_indexing", [markdown], { canonicalBlocks: false });
+    await first.stage.run(first.state);
+    expect(outcome(first)).toMatchObject({ scope: "sections" });
+    // A partial reprocess copies the rewritten Markdown forward and rescans it (any policy).
+    for (const action of ["block_indexing", "flag_for_review", "redact_artifacts"] as const) {
+      const again = setup(action, [markdown], { storage: first.storage, canonicalBlocks: false });
+      await again.stage.run(again.state);
+      expect(outcome(again), action).toMatchObject({ scope: "sections", blocked: false });
+      const withheld = new Set(outcome(again).withheldArtifactUris);
+      expect(withheld.has(uri(again, "page-1")), action).toBe(true);
+      expect(withheld.has(`s3://${BUCKET}/${again.document.sourceKey}`), action).toBe(true);
+    }
+  });
+
+  it("a canonical block marked withheld is carried too", async () => {
+    const f = setup("flag_for_review", ["Clean text."]);
+    const doc = canonical("doc-1", ["Clean text."]);
+    doc.blocks.push({ ...doc.blocks[0]!, id: "w", order: 2, text: PII_WITHHELD_SECTION_TEXT, metadata: { piiWithheld: true } });
+    f.storage.objects.set(f.canonicalKey, JSON.stringify(doc));
+    await f.stage.run(f.state);
+    expect(outcome(f)).toMatchObject({ scope: "sections", withheldSectionCount: 1 });
+  });
+});
+
+describe("rollout safety (M6)", () => {
+  it("an action this worker does not know blocks the document", async () => {
+    const f = setup("block_indexing", ["clean", `bad ${SSN}`, "clean"]);
+    (f.state.run.pipeline.piiPolicy as { action: string }).action = "quarantine_everything";
+    await f.stage.run(f.state);
+    expect(outcome(f)).toMatchObject({ scope: "document", blocked: true, action: "block_document" });
+  });
+
+  it("a missing findings table fails the stage as retryable infrastructure, never the document", async () => {
+    const missing = Object.assign(new Error('relation "pii_page_findings" does not exist'), { code: "42P01", name: "PostgresError" });
+    const error = await findingsStatement(() => Promise.reject(missing)).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(PiiFindingsUnavailableError);
+    expect(isDocumentLevelFailure(error)).toBe(false);
+    // Any other statement error is passed through unchanged.
+    const other = new Error("boom");
+    expect(await findingsStatement(() => Promise.reject(other)).catch((caught: unknown) => caught)).toBe(other);
   });
 });

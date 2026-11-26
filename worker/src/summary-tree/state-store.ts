@@ -129,10 +129,15 @@ export async function withSummaryTreeDocumentLock<T>(sql: Client, scope: Summary
         and purged_at is null and superseded_at is null and archived_at is null
         and not coalesce((metadata->'pii'->>'blocked')::boolean, false)
         and not coalesce((metadata->'pii'->>'redacted')::boolean, false)
-        and coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
-          then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) = 0
+        -- Page- and section-scoped withholding: the tree is built from the rewritten text (withheld pages are already the
+        -- placeholder), so the pre-scan artifacts it withholds and the earlier tree it withdrew do not refuse a new one.
+        -- Whole-document, redaction and other withheld outcomes still do.
+        and (coalesce(metadata->'pii'->>'scope', '') in ('pages', 'sections')
+          or coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
+            then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) = 0)
         and not exists (select 1 from pii_detections pd where pd.document_id = documents.id and pd.redacted)
-        and not exists (select 1 from document_summary_trees t where t.document_id = documents.id and t.error = 'pii-withheld')
+        and (coalesce(metadata->'pii'->>'scope', '') in ('pages', 'sections')
+          or not exists (select 1 from document_summary_trees t where t.document_id = documents.id and t.error = 'pii-withheld'))
         for no key update
     `;
     if (!document) throw new SummaryTreeStateRefused("The document is not live in this project");

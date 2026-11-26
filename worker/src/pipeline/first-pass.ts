@@ -17,7 +17,7 @@ import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { dopplerImageLimits, figuresEnabled, isPageWithheld, type PipelineFeatures } from "@docslurp/shared";
+import { dopplerImageLimits, figuresEnabled, isPageImageWithheld, type PipelineFeatures } from "@docslurp/shared";
 import { pageScopedTextVerified, perPageArtifactServable } from "../lib/pii-page-withholding.js";
 import {
   acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
@@ -737,7 +737,7 @@ export async function storeFirstPassFigures(args: {
     // Withheld before any byte is uploaded or any row is marked stored (the ledger serves stored rows): every object this
     // store can make reachable joins the list first. A failed append stores nothing (fail closed) and deletes nothing.
     // Page-scoped: only the clean pages' figures (and the verified `document.md`) stay off the list.
-    const cleanPage = (page: number) => pageScoped !== null && page <= document.pageCount && !isPageWithheld(pageScoped, page);
+    const cleanPage = (page: number) => pageScoped !== null && page <= document.pageCount && !isPageImageWithheld(pageScoped, page);
     const servable = ({ slot }: { slot: string | null }) =>
       slot !== null && (perPageArtifactServable(slot, cleanPage) || (pageScoped !== null && markdownKept && slot === DOPPLER_MARKDOWN_SLOT));
     if (withhold) {
