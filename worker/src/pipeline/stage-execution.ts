@@ -44,7 +44,7 @@ import { recordShardTiming } from "./shard-calibration.js";
 import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
-import { pinRunPageBillingRules } from "../db/page-base-fee.js";
+import { pinRunFastPerDocument, pinRunPageBillingRules } from "../db/page-base-fee.js";
 import { pinRunOcrPageClass } from "./ocr-page-class.js";
 import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
@@ -273,6 +273,11 @@ export function createStageExecution(deps: {
     const visionRoutingVersion = pinRunRoutingVersion(state);
     // Page billing rules, pinned the same way. A run without the pin (started by an earlier release) bills by the same per-read
     // rule; the pin's absence only keeps page-facts rows off it until the earlier release is gone (db/page-base-fee.ts).
+    // The per-document Fast rule: decided before any other billing pin is written (it is on only for a run's first start), and
+    // only when every live worker advertises it (db/page-base-fee.ts pinRunFastPerDocument).
+    const completedDocuments = documents.some((document) => document.status === "completed"
+      && ![...(state.documentStages.get(document.id)?.values() ?? [])].some((checkpoint) => (checkpoint.stats as { deduplicated?: unknown } | undefined)?.deduplicated === true));
+    const fastPerDocument = await pinRunFastPerDocument(state, async () => (await store.fleetAdvertises("billing.fast-per-document")) === true, { completedDocuments });
     const pageBillingRules = pinRunPageBillingRules(state);
     // The OCR page class, pinned the same way: on only when every live worker advertises it (pipeline/ocr-page-class.ts).
     const ocrPageClass = await pinRunOcrPageClass(state, async () => (await store.fleetAdvertises("billing.ocr-page-class")) === true);
@@ -306,7 +311,7 @@ export function createStageExecution(deps: {
       `[temporal] run=${run.id} status=init docs=${documents.length} ` +
         `minCents=${forecast.minCents} maxCents=${forecast.maxCents} ` +
         `completedRunStages=${completedRunStages.length} completedDocStages=${completedDocStages.length} ` +
-        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion} pageBilling=${pageBillingRules} ocrPageClass=${ocrPageClass}`,
+        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion} pageBilling=${pageBillingRules} ocrPageClass=${ocrPageClass} fastPerDocument=${fastPerDocument}`,
     );
     if (completedRunStages.length > 0) {
       console.log(
@@ -376,6 +381,9 @@ export function createStageExecution(deps: {
       if (!shard) throw new Error("a pipeline override is only for document shards");
       // Only the first pass overrides the pipeline: its checkpoints are provisional (pipeline/checkpoints.ts).
       state.firstPassShard = true;
+      // Whether the ordinary loop extracts this run's documents again (and may read their pages): a per-document Fast charge
+      // waits for it (db/run-ledger.ts completeDocumentStage). Taken from the run's own pipeline, before the override.
+      state.firstPassExtractionDiffers = firstPassExtractionDiffers(state.run.pipeline);
       state.run.pipeline = runtime.pipelineOverride(state.run.pipeline);
     } else if (runtime.firstPassRun) {
       state.firstPassExtractionDiffers = firstPassExtractionDiffers(state.run.pipeline);
@@ -780,7 +788,7 @@ export function createStageExecution(deps: {
       const noun = failed.length === 1 ? "document" : "documents";
       const message = `All ${failed.length} ${noun} failed${detail}`;
       console.error(`[temporal] run=${input.runId} status=failed message=${message}`);
-      await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration }, { state });
+      await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
       await noteRunOutcome(store, state.run, "failed", first?.[0] ?? state.stage);
       await notifyTerminal(input.runId, "run.failed");
       return;
@@ -812,8 +820,7 @@ export function createStageExecution(deps: {
     const state = await loadRunState(store, input.runId);
     await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration },
       // The stage's infrastructure retries ran out: its unfinished documents say so publicly (real-Modal P3).
-      // With the state, documents the run already completed (searchable) are charged their Fast pages (db/page-base-fee.ts).
-      { infrastructureRetriesExhausted: input.failureType === WORKER_INTERRUPTED, state });
+      { infrastructureRetriesExhausted: input.failureType === WORKER_INTERRUPTED });
     await noteRunOutcome(store, state.run, "failed", stage);
 
     await notifyTerminal(input.runId, "run.failed");

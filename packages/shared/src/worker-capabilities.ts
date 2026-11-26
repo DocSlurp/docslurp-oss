@@ -54,6 +54,11 @@ export const WORKER_CAPABILITIES = [
    */
   "billing.ocr-page-class",
   /**
+   * Charges a document's Fast pages when it completes, per document (`fast:<run>:<document>`, schema 20261126T0327). A worker pins
+   * a new run to that rule only when every live worker advertises this (worker db/page-base-fee.ts pinRunFastPerDocument).
+   */
+  "billing.fast-per-document",
+  /**
    * Understands extraction config v1 (design extraction-config-simplification.md, release R0): DOCSLURP_PROFILE, the
    * full DOCSLURP_DISABLE vocabulary enforced at execution, and the posture digest in its registry row (`config`).
    */
