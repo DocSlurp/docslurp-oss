@@ -702,8 +702,10 @@ export function estimatePipelineWork(args: {
   const covered = Math.min(readable, planReads + mapReads + embedPages);
   const unreadPages = pages - covered;
   const completion = Math.max(share, fullShare);
+  // The provider's own price for the all-scan mix bounds it too: a provider may fold reads into its total rather than the
+  // OCR and Rich lines, and a read is charged in full whatever the stage share.
   const highPaged = readsPages
-    ? Math.max(readCredits + pageCredits("fast", unreadPages) * completion, pageCredits("fast", pages) * completion)
+    ? Math.max(readCredits + pageCredits("fast", unreadPages) * completion, pageCredits("fast", pages) * completion, paged(high))
     : Math.max(paged(high) * share, pageCredits("fast", pages) * completion);
   // Features: each document is priced on its own pages, so the high end allows one more block per document.
   const highFeatures = Math.max(
