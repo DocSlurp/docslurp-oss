@@ -1,4 +1,5 @@
 import { instrumentFetch } from "@docslurp/shared/observability";
+import { logProviderErrorDetail, providerErrorCodeForStatus, providerErrorSummary } from "../lib/provider-retry.js";
 import {
   authorizePrivateModelCall,
   getPrivateModelEndpointRegistry,
@@ -59,8 +60,10 @@ export function createGeminiPageEmbedder(args: { apiKey: string; dims?: 3072; fe
   const url = `${GEMINI_ENDPOINT}/models/${GEMINI_PAGE_EMBED_MODEL}:batchEmbedContents?key=${encodeURIComponent(args.apiKey)}`;
 
   async function post(parts: Array<Record<string, unknown>>, signal?: AbortSignal) {
+    // The key rides in the URL's query: a redirect is refused, never followed with it.
     const response = await doFetch(url, {
       method: "POST",
+      redirect: "error",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         requests: parts.map((part) => ({
@@ -72,8 +75,10 @@ export function createGeminiPageEmbedder(args: { apiKey: string; dims?: 3072; fe
       signal,
     });
     if (!response.ok) {
-      const detail = (await response.text().catch(() => "")).slice(0, 300);
-      throw new Error(`Gemini embedding request failed (${response.status}): ${detail}`);
+      // The response text goes to the worker log; the error (stored on the run) carries the code and status only.
+      const code = providerErrorCodeForStatus(response.status);
+      logProviderErrorDetail("gemini", "page image embedding", code, response.status, await response.text().catch(() => ""));
+      throw new Error(`Gemini embedding request failed: ${providerErrorSummary(code, response.status)}`);
     }
     const json = (await response.json()) as {
       embeddings?: Array<{ values?: number[] }>;
@@ -139,8 +144,9 @@ export function createPrivateEndpointPageEmbedder(args: { modelUri: string; priv
       signal,
     });
     if (!response.ok) {
-      const detail = (await response.text().catch(() => "")).slice(0, 300);
-      throw new Error(`Private page embedding request failed (${response.status}): ${detail}`);
+      const code = providerErrorCodeForStatus(response.status);
+      logProviderErrorDetail("private", "page image embedding", code, response.status, await response.text().catch(() => ""));
+      throw new Error(`Private page embedding request failed: ${providerErrorSummary(code, response.status)}`);
     }
     const json = (await response.json()) as {
       data?: Array<{ embedding?: number[]; index?: number }>;
