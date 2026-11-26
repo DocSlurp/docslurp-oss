@@ -225,7 +225,7 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
       });
     },
     async setDocumentOutcome(documentId, outcome) {
-      const pii = outcome.matchCount > 0 || outcome.scope !== "none"
+      const pii = outcome.matchCount > 0 || outcome.scope !== "none" || outcome.redacted
         ? {
             scope: outcome.scope,
             ...(outcome.scope === "pages" ? { withheldPages: outcome.withheldPages, withheldPageCount: outcome.withheldPages.length } : {}),
@@ -244,64 +244,70 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
             detectedAt: new Date().toISOString(),
           }
         : null;
-      // A summary tree the document already has was written from the text this outcome withholds: it stops being
-      // served now and its rows and artifact are queued for strict removal (summary-tree/state-store.ts).
-      if (outcome.blocked || outcome.redacted || outcome.scope === "pages" || outcome.scope === "sections") await withdrawSummaryTreeForPii(db as never, documentId);
-      // Operator-only findings (confidence and its basis): replaced per scan, scoped to the document's own organization
-      // and project through the row itself. Never written to documents.metadata.
-      // One primary-key-prefix delete per scan (a clean rescan clears an earlier scan's rows); the insert only when there
-      // are findings. A failure between the two leaves fewer operator rows, never tenant-visible data, and fails the stage.
-      await findingsStatement(() => db`delete from pii_page_findings where document_id = ${documentId}`);
-      if (outcome.findings.length > 0) {
-        await findingsStatement(() => db`
-          insert into pii_page_findings (document_id, org_id, project_id, run_id, page_number, pattern_type, detector, validation, confidence)
-          select d.id, d.org_id, d.project_id, ${outcome.runId}, f.page_number, f.pattern_type, f.detector, f.validation, f.confidence
-          from documents d
-          cross join unnest(
-            ${outcome.findings.map((finding) => finding.pageNumber)}::int[],
-            ${outcome.findings.map((finding) => finding.patternType)}::text[],
-            ${outcome.findings.map((finding) => finding.detector)}::text[],
-            ${outcome.findings.map((finding) => finding.validation)}::text[],
-            ${outcome.findings.map((finding) => finding.confidence)}::real[]
-          ) as f(page_number, pattern_type, detector, validation, confidence)
-          where d.id = ${documentId} and d.org_id is not null and d.project_id is not null
-        `);
-      }
-      if (outcome.scope === "pages" && outcome.withheldPages.length > 0) {
-        // Rows written before this scan (the map's rough text, a kept model read) of a page it withholds are removed:
-        // the map scanned only its own text, and this outcome may place a hit it never saw (OCR, a cross-page span).
-        const pages = [...outcome.withheldPages];
-        await db`
-          update document_page_states set state = 'blocked-pii', failure_reason = 'pii-policy', updated_at = now()
-          where document_id = ${documentId} and page_number = any(${pages}::int[]) and state in ('unseen', 'failed', 'parsed')
-        `;
-        await db`delete from document_pages where document_id = ${documentId} and page_number = any(${pages}::int[])`;
-        await db`
-          update document_page_states set read_text = null
-          where document_id = ${documentId} and page_number = any(${pages}::int[]) and read_text is not null
-        `;
-      }
-      if (outcome.blocked) {
-        await db`
+      // One transaction: the outcome, the summary-tree withdrawal, the findings and the page rows commit together. A
+      // failure (a worker deployed before its migration, a database blip) leaves none of them, and the retry's rescan
+      // carries what the rewritten artifacts already show (placeholders, redaction markers).
+      await db.begin(async (transaction) => {
+        const tx = transaction as unknown as typeof db;
+        // A summary tree the document already has was written from the text this outcome withholds: it stops being
+        // served now and its rows and artifact are queued for strict removal (summary-tree/state-store.ts).
+        if (outcome.blocked || outcome.redacted || outcome.scope === "pages" || outcome.scope === "sections") await withdrawSummaryTreeForPii(tx as never, documentId);
+        // Operator-only findings (confidence and its basis): replaced per scan, scoped to the document's own organization
+        // and project through the row itself. Never written to documents.metadata.
+        // One primary-key-prefix delete per scan (a clean rescan clears an earlier scan's rows); the insert only when there
+        // are findings.
+        await findingsStatement(() => tx`delete from pii_page_findings where document_id = ${documentId}`);
+        if (outcome.findings.length > 0) {
+          await findingsStatement(() => tx`
+            insert into pii_page_findings (document_id, org_id, project_id, run_id, page_number, pattern_type, detector, validation, confidence)
+            select d.id, d.org_id, d.project_id, ${outcome.runId}, f.page_number, f.pattern_type, f.detector, f.validation, f.confidence
+            from documents d
+            cross join unnest(
+              ${outcome.findings.map((finding) => finding.pageNumber)}::int[],
+              ${outcome.findings.map((finding) => finding.patternType)}::text[],
+              ${outcome.findings.map((finding) => finding.detector)}::text[],
+              ${outcome.findings.map((finding) => finding.validation)}::text[],
+              ${outcome.findings.map((finding) => finding.confidence)}::real[]
+            ) as f(page_number, pattern_type, detector, validation, confidence)
+            where d.id = ${documentId} and d.org_id is not null and d.project_id is not null
+          `);
+        }
+        if (outcome.scope === "pages" && outcome.withheldPages.length > 0) {
+          // Rows written before this scan (the map's rough text, a kept model read) of a page it withholds are removed:
+          // the map scanned only its own text, and this outcome may place a hit it never saw (OCR, a cross-page span).
+          const pages = [...outcome.withheldPages];
+          await tx`
+            update document_page_states set state = 'blocked-pii', failure_reason = 'pii-policy', updated_at = now()
+            where document_id = ${documentId} and page_number = any(${pages}::int[]) and state in ('unseen', 'failed', 'parsed')
+          `;
+          await tx`delete from document_pages where document_id = ${documentId} and page_number = any(${pages}::int[])`;
+          await tx`
+            update document_page_states set read_text = null
+            where document_id = ${documentId} and page_number = any(${pages}::int[]) and read_text is not null
+          `;
+        }
+        if (outcome.blocked) {
+          await tx`
+            update documents
+            set status = ${PII_BLOCKED_DOCUMENT_STATUS},
+                metadata = (coalesce(metadata, '{}'::jsonb) - 'piiBlocked') || jsonb_build_object('pii', ${tx.json(pii)}::jsonb),
+                updated_at = now()
+            where id = ${documentId}
+          `;
+          return;
+        }
+        // Not blocked (or a rescan lifted an earlier block): record the outcome, keep the stage status.
+        const metadata = pii
+          ? tx`(coalesce(metadata, '{}'::jsonb) - 'piiBlocked') || jsonb_build_object('pii', ${tx.json(pii)}::jsonb)`
+          : tx`coalesce(metadata, '{}'::jsonb) - 'pii' - 'piiBlocked'`;
+        await tx`
           update documents
-          set status = ${PII_BLOCKED_DOCUMENT_STATUS},
-              metadata = (coalesce(metadata, '{}'::jsonb) - 'piiBlocked') || jsonb_build_object('pii', ${db.json(pii)}::jsonb),
+          set status = case when status = ${PII_BLOCKED_DOCUMENT_STATUS} then 'processing' else status end,
+              metadata = ${metadata},
               updated_at = now()
           where id = ${documentId}
         `;
-        return;
-      }
-      // Not blocked (or a rescan lifted an earlier block): record the outcome, keep the stage status.
-      const metadata = pii
-        ? db`(coalesce(metadata, '{}'::jsonb) - 'piiBlocked') || jsonb_build_object('pii', ${db.json(pii)}::jsonb)`
-        : db`coalesce(metadata, '{}'::jsonb) - 'pii' - 'piiBlocked'`;
-      await db`
-        update documents
-        set status = case when status = ${PII_BLOCKED_DOCUMENT_STATUS} then 'processing' else status end,
-            metadata = ${metadata},
-            updated_at = now()
-        where id = ${documentId}
-      `;
+      });
     },
     async previousPageTypes(documentId) {
       const [row] = await db<Array<{ status: string | null; metadata: unknown }>>`select status, metadata from documents where id = ${documentId}`;
@@ -345,6 +351,8 @@ type TextArtifact = { slot: string; key: string; text: string; contentType: stri
 type JsonArtifact = { slot: string; key: string; value: unknown };
 
 const PII_PLACEHOLDER_MARKER = "withheld by the project's privacy policy";
+/** What `redactPii` writes in place of a value (`[REDACTED:ssn]`). */
+const REDACTION_MARKER = /\[REDACTED:[a-z0-9-]{1,40}\]/;
 
 export class PiiDetectStage implements Stage {
   readonly name = "pii-detect";
@@ -533,7 +541,12 @@ export class PiiDetectStage implements Stage {
     const blocked = plan.scope === "document";
     const planReason = plan.scope === "document" ? plan.reason : "";
     const withholding = plan.scope === "pages" || plan.scope === "sections";
-    const redacted = policy.action === "redact_artifacts" && anyMatch && !blocked;
+    // A rescan of text this policy already redacted in place (a retry after the outcome write failed) finds only the
+    // markers. That is a carried redaction, never a clean document: the pages it was on are not known, so no page's
+    // pixels and nothing the scan did not rewrite is served (as for an older outcome that did not record its pages).
+    const carriedRedaction = policy.action === "redact_artifacts" && !anyMatch
+      && [markdown?.text, fallbackText, canonical && !markdown ? JSON.stringify(canonical.value) : ""].some((text) => typeof text === "string" && REDACTION_MARKER.test(text));
+    const redacted = policy.action === "redact_artifacts" && (anyMatch || carriedRedaction) && !blocked;
     const reviewRequired = policy.action === "flag_for_review" && anyMatch;
     if (blocked && planReason.startsWith("unattributed")) {
       // Fail closed: a hit that cannot be placed on a page withholds the document.
@@ -656,7 +669,7 @@ export class PiiDetectStage implements Stage {
         ? `PII policy withheld ${withheldPageList.length} page${withheldPageList.length === 1 ? "" : "s"}`
         : plan.scope === "sections"
           ? `PII policy withheld ${plan.sectionCount} section${plan.sectionCount === 1 ? "" : "s"}`
-          : null;
+          : carriedRedaction ? "PII policy redacted matches (carried from an earlier scan)" : null;
 
     await this.sink.recordDetections(document.id, state.run.id, primary, redacted);
     await this.sink.setDocumentOutcome(document.id, {

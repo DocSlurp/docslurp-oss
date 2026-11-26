@@ -336,6 +336,31 @@ describe("redact_artifacts is page-scoped for images", () => {
   });
 });
 
+describe("a redaction retry after the outcome write failed (M1)", () => {
+  it("rescanning text already redacted in place keeps the redaction: the source and every page image stay withheld", async () => {
+    const first = setup("redact_artifacts", ["Intro.", `SSN ${SSN}.`, "End."]);
+    // The findings write fails once (a worker before its migration, a database blip): the outcome is not recorded.
+    first.sink.setDocumentOutcome = async () => { throw new Error("pii_page_findings is not available"); };
+    await first.stage.run(first.state).catch(() => undefined);
+    expect(first.sink.outcomes).toHaveLength(0);
+    expect(first.storage.objects.get(first.markdownKey)).toContain("[REDACTED:ssn]");
+    // The retry reads the rewritten artifacts: no match, only markers.
+    const retry = setup("redact_artifacts", ["Intro.", `SSN ${SSN}.`, "End."], { storage: first.storage });
+    await retry.stage.run(retry.state);
+    expect(outcome(retry)).toMatchObject({ redacted: true, blocked: false, redactedPages: null });
+    const withheld = new Set(outcome(retry).withheldArtifactUris);
+    expect(withheld.has(retry.storage.uri(retry.document.sourceKey))).toBe(true);
+    for (const page of [1, 2, 3]) expect(withheld.has(uri(retry, `page-${page}`)), `page-${page}`).toBe(true);
+  });
+
+  it("a clean document with no markers is still recorded clean", async () => {
+    const f = setup("redact_artifacts", ["Intro.", "Nothing here.", "End."]);
+    await f.stage.run(f.state);
+    expect(outcome(f)).toMatchObject({ redacted: false, matchCount: 0 });
+    expect(outcome(f).withheldArtifactUris).toEqual([]);
+  });
+});
+
 describe("a label and its value in two canonical blocks (the Markdown matches across the blank line)", () => {
   const PASSPORT = "X1234567";
   const labelled = (documentId: string, pages: Array<Array<{ type: "heading" | "paragraph"; text: string }>>): CanonicalDocument => {
