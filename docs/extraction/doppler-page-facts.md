@@ -96,9 +96,8 @@ less, in any mode but `use`, or when another extractor won, nothing is built and
 stage records `dopplerFactsEvidence: { status: "skipped", reason }`.
 
 No page count, size or charge comes from the facts: the page count stays the host's, page-equivalent sizes stay the
-walker's, extract-markdown's Rich reads stay the provider's `ocrPages`, and the per-page rows are not written for a run
-without a page billing pin, which still bills pages with no text bytes and an image as scans at completion
-(`runBillsScansAtCompletion`). The evidence is routing evidence, though: like the probe's, it can make classify-route send a
+walker's, extract-markdown's Rich reads stay the provider's `ocrPages`, and no page charge reads the per-page rows
+(pages bill from the reads recorded for them, `db/page-base-fee.ts`). The evidence is routing evidence, though: like the probe's, it can make classify-route send a
 sparse scan page to a vision read, and that read bills Rich when it happens, for a project with vision fallback on. To keep a
 counting gap or hostile facts from turning text pages into reads, the facts must agree with the extraction: a page the facts
 call sparse while the winning extraction read `sparsePageWords` or more words from it without a model (the provider's OCR,

@@ -588,7 +588,7 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     } finally { await h.cleanup(); }
   });
 
-  it("billing is unchanged by facts: the same Rich reads, no page-equivalent sizes from facts, no rows for a legacy-billed run", async () => {
+  it("billing is unchanged by facts: the same Rich reads, no page-equivalent sizes from facts, with or without a billing pin", async () => {
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
     vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
     // Facts that would, if read for billing, size every page at the maximum and mark page 2 a scan with no text.
@@ -610,15 +610,17 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     expect(outcomes[0]!.rich).toEqual(["ocr:run-1:doc-1:2"]);
     expect(outcomes[0]!.equivalents).toEqual([]);
 
-    // A run started before the page billing pin bills pages with no text bytes and an image as scans at completion
-    // (page-base-fee.ts): facts rows would raise its charge, so none are written. The evidence (routing) still is.
+    // A run without a page billing pin bills from its reads like any other (page-base-fee.ts): no page charge reads the
+    // facts rows, so they are written and the reads are the same.
     const h = await harness({ markdown: "Born digital text\f\fA figure", ocrPages: [2], pageFacts: facts });
     h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
     try {
       await h.stage.run(h.state);
-      expect(sourceRows(h)).toEqual([]);
+      expect(sourceRows(h).length).toBeGreaterThan(0);
       expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2"]);
-      expect(h.state.documentStage("doc-1", "extract-markdown")?.stats).toMatchObject({ dopplerFactsEvidence: { status: "built", rows: 0, rowsSkipped: "legacy-billing" } });
+      const stats = h.state.documentStage("doc-1", "extract-markdown")?.stats as { dopplerFactsEvidence?: Record<string, unknown> } | undefined;
+      expect(stats?.dopplerFactsEvidence).toMatchObject({ status: "built" });
+      expect(stats?.dopplerFactsEvidence).not.toHaveProperty("rowsSkipped");
     } finally { await h.cleanup(); }
   });
 });

@@ -12,8 +12,7 @@
  * - Same rules as the probes. Sparse pages, significant images and repeated page furniture follow page-image-evidence.ts and
  *   PAGE_RASTER_ROUTING; text-layer quality is assessed on the extracted page text, as the host does when it has no layer.
  * - Never billing. Page counts stay the host's (pdfpagecount); the facts' own `pageCount` is never read. The per-page rows carry
- *   no size and no read, and a caller must not write them for a run that bills scanned pages from page facts at completion
- *   (page-base-fee.ts runBillsScansAtCompletion).
+ *   no size and no read, and no page charge reads page facts (page-base-fee.ts bills recorded reads only).
  */
 import { MIN_SIGNIFICANT_IMAGE_COVERAGE, MIN_SIGNIFICANT_IMAGE_PIXELS, SPARSE_PAGE_WORDS, pageEvidenceWordCount, type PageImageEvidence } from "./page-image-evidence.js";
 import { dopplerPageFactsLowConfidence, type DopplerPageFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";

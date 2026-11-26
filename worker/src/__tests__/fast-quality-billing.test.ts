@@ -235,7 +235,7 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
     expect(await chargedPages("auto-ocr-other", BILLABLE_UNIT_METRICS.ocrPage)).toBe(1);
   });
 
-  it("keeps the earlier release's completion rule for a run it started (no pin): unread images and scans bill Rich", { timeout: 60_000 }, async () => {
+  it("bills a run without a page billing pin from its reads too: unread images and scans bill Fast", { timeout: 60_000 }, async () => {
     await db.exec(`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('auto-legacy', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 3, 5);
@@ -246,19 +246,20 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
       insert into document_page_facts (document_id, page_number, run_id, text_bytes, image_count) values
         ('l-pdf', 1, 'auto-legacy', 0, 1), ('l-pdf', 2, 'auto-legacy', 0, 1), ('l-pdf', 3, 'auto-legacy', 400, 0);
     `);
-    // The new code read l-read during the run (a per-read charge): the completion charge leaves it out.
+    // l-read was read during the run (a per-read charge): the completion charge leaves it out.
     const reading = WorkflowState.create(await store.loadRun("auto-legacy"), []);
     reading.usageLedger.chargeRichPage({ documentId: "l-read", pageNumber: 1, readBy: "page-ocr" });
     const batch = reading.usageLedger.checkpoint();
     await persistRunUsageEvents({ client: sql(), state: reading, usageEvents: batch.events });
     batch.commit();
     const charges = await recordPageBaseFee(sql(), WorkflowState.create(await store.loadRun("auto-legacy"), []));
-    // l-pdf: 2 scan pages Rich, 1 Fast; l-png: 1 Rich; l-read: already charged. 3 scan/image pages at 0.25 + 1 Fast at 0.005.
-    expect(charges).toMatchObject({ fastPages: 1, richPages: 4 });
-    expect(charges.credits).toBeCloseTo(0.755);
-    expect(await chargedPages("auto-legacy", BILLABLE_UNIT_METRICS.richPage)).toBe(4);
+    // l-pdf: 3 Fast (the facts call two pages scans; nothing read them); l-png: 1 Fast; l-read: its read, Rich.
+    expect(charges).toMatchObject({ fastPages: 4, richPages: 1 });
+    expect(charges.credits).toBeCloseTo(4 * TEST_PAGE_CREDITS.fast);
+    expect(await chargedPages("auto-legacy", BILLABLE_UNIT_METRICS.richPage)).toBe(1);
     // A retry charges nothing twice.
     await recordPageBaseFee(sql(), WorkflowState.create(await store.loadRun("auto-legacy"), []));
-    expect(await chargedPages("auto-legacy", BILLABLE_UNIT_METRICS.richPage)).toBe(4);
+    expect(await chargedPages("auto-legacy", BILLABLE_UNIT_METRICS.richPage)).toBe(1);
+    expect(await chargedPages("auto-legacy", BILLABLE_UNIT_METRICS.fastPage)).toBe(4);
   });
 });
