@@ -1,4 +1,4 @@
-import { TenantModelEndpointRefusedError, tenantModelEndpointProblem } from "@docslurp/shared";
+import { modelEndpointUrl, TenantModelEndpointRefusedError, tenantModelEndpointProblem } from "@docslurp/shared";
 import { platformModelKey } from "../lib/platform-model-keys.js";
 import { assertLocalCliReaderAllowed } from "../lib/vm-only-parsing.js";
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
@@ -218,7 +218,8 @@ export interface VisionExecutionResult {
   costMetadata?: Record<string, unknown>;
   baseUrl: string | null;
   fallbackUsed: boolean;
-  fallbackReason: string | null;
+  /** Why the fallback served this result, as a stable code (never the primary's error text); null without one. */
+  fallbackReason: VisionFallbackReason | null;
   /**
    * The vision capability pool member that served the page (capability-pools.ts poolMemberId), when the served model is
    * a pool member: the fallback's when `fallbackUsed`. For per-page records.
@@ -782,8 +783,9 @@ function readBoolean(value: string | undefined, fallback: boolean): boolean {
 
 /**
  * The key a vision request carries (`platformModelKey`, the worker's one key resolver): the OpenRouter key only to
- * OpenRouter's origin, the DeepInfra key only to DeepInfra's, the OpenAI key only to the configured OpenAI base URL's
- * origin, and no key anywhere else (loopback servers, local runtimes, private routes, any other host).
+ * OpenRouter's base URL, the DeepInfra key only to DeepInfra's, the OpenAI key only to the configured OpenAI base URL
+ * (each matched on origin plus path: scheme, host, port and path, with no user info, query or fragment), and no key
+ * anywhere else (loopback servers, local runtimes, private routes, any other host).
  */
 export function resolveVisionApiKey(billing: VisionRouteBilling, baseUrl: string | null, cfg: Pick<Config, "openRouterApiKey" | "openAiApiKey" | "deepInfraApiKey" | "openAiBaseUrl">): string {
   if (billing === "openrouter" || billing === "deepinfra") return platformModelKey(billing, baseUrl, cfg);
@@ -806,8 +808,12 @@ function normalizeVisionConfig(
   if (problem) throw new UnpricedVisionRouteError(vision.modelUri, `is refused: ${problem}`);
   if (endpointProblem) throw new TenantModelEndpointRefusedError(endpointProblem);
   if (vision.remoteFallbackModelUri) {
+    // The fallback is admitted here too, before the primary's request is sent, not only at failover.
+    const fallbackEndpointProblem = tenantModelEndpointProblem(vision.remoteFallbackModelUri);
+    if (fallbackEndpointProblem === "tenant-local-endpoints-disabled") throw new TenantModelEndpointRefusedError(fallbackEndpointProblem);
     const fallbackProblem = visionModelUriProblem(vision.remoteFallbackModelUri);
     if (fallbackProblem) throw new UnpricedVisionRouteError(vision.remoteFallbackModelUri, `is refused: ${fallbackProblem}`);
+    if (fallbackEndpointProblem) throw new TenantModelEndpointRefusedError(fallbackEndpointProblem);
   }
   const selected = resolveVisionRoute(vision);
   return {
@@ -1209,10 +1215,7 @@ export function openRouterMaxPrice(price: VisionMaxPrice): { prompt: number; com
 }
 
 function resolveChatCompletionsUrl(baseUrl: string | null): string {
-  // Routes reach here with their effective base URL (`routeBaseUrl`); a direct caller without one gets OpenAI's.
-  const root = (baseUrl ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, "");
-  if (root.endsWith("/chat/completions")) {
-    return root;
-  }
-  return `${root}/chat/completions`;
+  // Routes reach here with their effective base URL (`routeBaseUrl`); a direct caller without one gets OpenAI's. Built
+  // from the parsed URL (shared modelEndpointUrl), never by appending to the raw text.
+  return modelEndpointUrl(baseUrl ?? DEFAULT_OPENAI_BASE_URL, "chat/completions");
 }

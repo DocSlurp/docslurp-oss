@@ -450,7 +450,15 @@ async function consumeStream(response: Response, abort: () => void): Promise<Vis
 
 async function consumeJson(response: Response): Promise<VisionAttempt> {
   const attempt = blankAttempt(false);
-  const payload = (await response.json()) as Record<string, any>;
+  // A body that is not JSON fails with a fixed message: the parser's own message quotes the start of the body.
+  const body = await response.text();
+  let payload: Record<string, any>;
+  try {
+    payload = JSON.parse(body) as Record<string, any>;
+  } catch {
+    console.warn(`[provider-error] label="vision response" code=invalid-json status=${response.status} detail=${JSON.stringify(body.replace(/\s+/g, " ").slice(0, 500))}`);
+    throw new Error("vision response was not valid JSON");
+  }
   attempt.id = readStringField(payload.id);
   attempt.model = readStringField(payload.model);
   attempt.provider = readProviderName(payload.provider);

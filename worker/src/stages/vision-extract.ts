@@ -133,6 +133,10 @@ export interface VisionPageOutput {
   outputTokens: number;
   usageSource: string;
   fallbackUsed: boolean;
+  /**
+   * Why a fallback produced this page: a vision runtime's `VisionFallbackReason` code, or a page-route executor's own
+   * fallback label (for example `canonical-page-slice`). Never error text.
+   */
   fallbackReason: string | null;
   text: string;
   costCents: number;

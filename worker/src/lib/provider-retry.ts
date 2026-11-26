@@ -20,17 +20,87 @@
 import { noteWorkProgress, withRequestTimeout } from "./work-progress.js";
 import { providerRateLimiter, type ProviderRateLease, type ProviderRateLimiter } from "./provider-rate-limit.js";
 
+/**
+ * Stable codes for a failed provider request. Error messages built here carry the code and the HTTP status only: a
+ * provider's (or a tenant-run model server's) response text can quote anything, so it goes to the worker log
+ * (`[provider-error]`) and never into an error message, which may be stored on runs, stages, manifests and usage rows.
+ */
+export type ProviderErrorCode =
+  | "rate-limited"
+  | "overloaded"
+  | "server-error"
+  | "timeout"
+  | "network-error"
+  | "routing-excluded"
+  | "quota-exhausted"
+  | "auth-refused"
+  | "not-found"
+  | "bad-request"
+  | "http-error";
+
+/** The `ProviderErrorCode` for an HTTP status (no body is read). */
+export function providerErrorCodeForStatus(status: number): ProviderErrorCode {
+  if (status === 429) return "rate-limited";
+  if (status === 503 || status === 529) return "overloaded";
+  if (status === 408 || status === 504) return "timeout";
+  if (status === 401 || status === 402 || status === 403) return "auth-refused";
+  if (status === 404) return "not-found";
+  if (status === 400 || status === 422) return "bad-request";
+  if (status >= 500) return "server-error";
+  return "http-error";
+}
+
+/** `<code> (<status>)`, or the code alone: the only failure detail an error message built from a response carries. */
+export function providerErrorSummary(code: ProviderErrorCode, status: number | null): string {
+  return status === null ? code : `${code} (${status})`;
+}
+
+/** The code for a request that got no response: `timeout` for a timeout, else `network-error`. */
+export function providerNetworkErrorCode(error: unknown): ProviderErrorCode {
+  const name = error && typeof error === "object" ? (error as { name?: unknown }).name : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  return name === "TimeoutError" || /time(d)? ?out/i.test(message) ? "timeout" : "network-error";
+}
+
+/** Logs a provider's response text for operators (worker log and traces only), bounded and JSON-quoted. */
+export function logProviderErrorDetail(provider: string, label: string, code: ProviderErrorCode, status: number | null, detail: string): void {
+  console.warn(
+    `[provider-error] provider=${provider} label="${label}" code=${code} status=${status ?? "none"} ` +
+      `detail=${JSON.stringify(detail.replace(/\s+/g, " ").slice(0, 500))}`,
+  );
+}
+
 export class ProviderRetryableError extends Error {
   readonly retryable = true;
+  readonly code: ProviderErrorCode;
   constructor(
     message: string,
     readonly provider: string,
     readonly status: number | null,
     readonly retryAfterMs: number | null,
     readonly attempts: number,
+    code?: ProviderErrorCode,
   ) {
     super(message);
     this.name = "ProviderRetryableError";
+    this.code = code ?? (status === null ? "network-error" : providerErrorCodeForStatus(status));
+  }
+}
+
+/**
+ * A provider answered with an error status that retrying cannot fix (400/401/403/404, quota). The message carries
+ * `code` and `status` only; the response text was logged where the error was built. `statusCode` mirrors `status`
+ * for callers that classify AI SDK errors by it.
+ */
+export class ProviderRequestError extends Error {
+  readonly code: ProviderErrorCode;
+  readonly statusCode: number;
+  constructor(label: string, readonly provider: string, readonly status: number, code?: ProviderErrorCode) {
+    const resolved = code ?? providerErrorCodeForStatus(status);
+    super(`${label} failed: ${providerErrorSummary(resolved, status)}`);
+    this.name = "ProviderRequestError";
+    this.code = resolved;
+    this.statusCode = status;
   }
 }
 
@@ -263,8 +333,10 @@ export function isRoutingExclusion(status: number, body: string): boolean {
  * allowlist excluded every host). Nothing was billed; retrying the same request cannot help.
  */
 export class ProviderRoutingExclusionError extends Error {
-  constructor(readonly status: number, detail: string) {
-    super(`no provider meets the request's routing constraints (${status}): ${detail.replace(/\s+/g, " ").slice(0, 200)}`);
+  readonly code: ProviderErrorCode = "routing-excluded";
+  /** `_detail` (the response body) is not kept: the caller logs it (`[provider-routing-exclusion]`). */
+  constructor(readonly status: number, _detail?: string) {
+    super(`no provider meets the request's routing constraints: ${providerErrorSummary("routing-excluded", status)}`);
     this.name = "ProviderRoutingExclusionError";
   }
 }
@@ -293,7 +365,7 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
   for (let attempt = 0; ; attempt++) {
     let status: number | null = null;
     let retryAfterMs: number | null = null;
-    let detail: string;
+    let code: ProviderErrorCode;
     const rateLimiter = options.rateLimit ? options.rateLimit.limiter ?? providerRateLimiter() : null;
     // Set once the gate admitted this request and it is handed to fetch: anything before is free.
     let sent = false;
@@ -314,7 +386,9 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
           throw abortReason(options.signal);
         }
         sent = true;
-        return await doFetch(url, { ...init, signal: withRequestTimeout(options.signal) });
+        // Never follows a redirect: these requests carry a provider key or go to a tenant-set endpoint, and a redirect
+        // would resend the key and body to a host nobody checked.
+        return await doFetch(url, { ...init, redirect: "error", signal: withRequestTimeout(options.signal) });
       }, options.signal);
       noteWorkProgress(`provider:${options.provider}`);
       const billedError = !response.ok && options.onHttpError ? await options.onHttpError(response.clone()) : false;
@@ -349,7 +423,8 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
         // Quota exhaustion is a configuration problem; let the caller's fail-open policy decide.
         return new Response(body, { status, headers: response.headers });
       }
-      detail = `${status} ${body.slice(0, 300)}`;
+      code = providerErrorCodeForStatus(status);
+      logProviderErrorDetail(options.provider, options.label, code, status, body);
     } catch (error) {
       if (!sent) {
         // Never sent (limiter wait or abort, fleet limiter refusal, guard refusal): nothing to count.
@@ -360,18 +435,20 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
       if (options.signal?.aborted) throw error;
       // The fleet limiter already waited its budget; hand the wait to Temporal.
       if (isProviderRetryableError(error)) throw error;
-      detail = `network error: ${error instanceof Error ? error.message : String(error)}`;
+      code = providerNetworkErrorCode(error);
+      logProviderErrorDetail(options.provider, options.label, code, null, error instanceof Error ? error.message : String(error));
     }
 
     const exhausted = attempt >= maxRetries || allowanceSpent;
     const tooLong = retryAfterMs !== null && retryAfterMs > maxInlineWaitMs;
     if (exhausted || tooLong) {
       throw new ProviderRetryableError(
-        `${options.label} failed after ${attempt + 1} attempt(s): ${detail}`,
+        `${options.label} failed after ${attempt + 1} attempt(s): ${providerErrorSummary(code, status)}`,
         options.provider,
         status,
         retryAfterMs,
         attempt + 1,
+        code,
       );
     }
     const delayMs = Math.min(maxInlineWaitMs, Math.max(retryAfterMs ?? 0, backoffDelayMs(attempt, random)));
@@ -391,8 +468,29 @@ export function toProviderRetryableError(error: unknown, provider: string, label
     const body = String((candidate as { responseBody?: unknown }).responseBody ?? "");
     if (status === 429 && isQuotaExhaustedBody(body)) return null;
     const headers = (candidate as { responseHeaders?: Record<string, string> }).responseHeaders;
-    const message = error instanceof Error ? error.message : String(error);
-    return new ProviderRetryableError(`${label} failed: ${status} ${message}`.slice(0, 500), provider, status, parseRetryAfterMs(headers), 1);
+    const code = providerErrorCodeForStatus(status);
+    logProviderErrorDetail(provider, label, code, status, `${error instanceof Error ? error.message : String(error)} ${body}`);
+    return new ProviderRetryableError(`${label} failed: ${providerErrorSummary(code, status)}`, provider, status, parseRetryAfterMs(headers), 1, code);
   }
   return null;
+}
+
+/**
+ * An AI SDK error (APICallError, or a RetryError wrapping one) that carries an HTTP status, as a coded
+ * `ProviderRequestError` whose message holds no response text (that is logged here). Errors without a status (a
+ * dropped connection, our own checks) are returned unchanged: their text is local, not the remote's.
+ */
+export function toProviderRequestError(error: unknown, provider: string, label: string): unknown {
+  if (error instanceof ProviderRequestError || isProviderRetryableError(error)) return error;
+  const candidates: unknown[] = [error, (error as { lastError?: unknown } | null)?.lastError, (error as { cause?: unknown } | null)?.cause];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const status = (candidate as { statusCode?: unknown }).statusCode;
+    if (typeof status !== "number") continue;
+    const body = String((candidate as { responseBody?: unknown }).responseBody ?? "");
+    const code = status === 429 && isQuotaExhaustedBody(body) ? "quota-exhausted" : providerErrorCodeForStatus(status);
+    logProviderErrorDetail(provider, label, code, status, `${error instanceof Error ? error.message : String(error)} ${body}`);
+    return new ProviderRequestError(label, provider, status, code);
+  }
+  return error;
 }

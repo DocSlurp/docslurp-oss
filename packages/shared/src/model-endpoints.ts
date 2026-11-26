@@ -198,6 +198,26 @@ export function tenantModelEndpointProblem(modelUri: string, env: Env = process.
 }
 
 /**
+ * `inner` (default the global fetch) with redirects refused: for model requests that carry a provider key or go to a
+ * tenant-set endpoint, where following a redirect would resend the key or the request body to an unchecked host.
+ */
+export function noRedirectFetch(inner?: typeof fetch): typeof fetch {
+  return ((input: Parameters<typeof fetch>[0], init?: RequestInit) => (inner ?? globalThis.fetch)(input, { ...init, redirect: "error" })) as typeof fetch;
+}
+
+/**
+ * `baseUrl` re-serialised from its parsed form, for an SDK that appends `/<endpoint>` itself: dot segments resolved,
+ * no trailing slash, no fragment. Tenant base URLs never carry a query (`tenantLoopbackBaseUrlProblem`), so the
+ * suffix the SDK appends always lands in the path.
+ */
+export function canonicalModelBaseUrl(baseUrl: string): string {
+  const url = new URL(baseUrl.trim());
+  url.hash = "";
+  url.pathname = url.pathname.replace(/\/+$/, "");
+  return url.search ? url.href : url.href.replace(/\/+$/, "");
+}
+
+/**
  * Why a stored tenant model URI names an endpoint the rule refuses for its own shape (a hosted provider with a
  * `baseUrl`, or a local server's base URL that is not loopback, has user info, a query or a fragment, or uses a port
  * the operator does not allow), or null. The deployment flag being off is not such a refusal: that row stays and is
