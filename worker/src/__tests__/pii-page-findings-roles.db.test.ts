@@ -49,5 +49,24 @@ describe("pii_page_findings is operator-only in the database", () => {
     expect(piiFindingsGrantProblems([{ role: "docslurp_app", privileges: [] }, { role: "docslurp_worker", privileges: ["select", "insert", "delete"] }])).toEqual([]);
     expect(piiFindingsGrantProblems([{ role: "docslurp_app", privileges: ["select"] }, { role: "docslurp_worker", privileges: ["update"] }]))
       .toEqual(["docslurp_app: select", "docslurp_worker: update"]);
+    expect(piiFindingsGrantProblems([{ role: "PUBLIC", privileges: ["select"] }])).toEqual(["PUBLIC: select"]);
+  });
+
+  it("PUBLIC holds nothing, and the check's ACL read of PUBLIC runs", async () => {
+    const [row] = await sql`select has_table_privilege('public', 'public.pii_page_findings', 'SELECT') as public_select`;
+    expect(row!.public_select).toBe(false);
+    const rows = await sql.unsafe(`select 'PUBLIC' as role, coalesce(array_agg(distinct lower(a.privilege_type)) filter (where a.privilege_type is not null), '{}') as privileges
+       from pg_class c cross join lateral aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+       where c.oid = 'public.pii_page_findings'::regclass and a.grantee = 0`);
+    expect(rows[0]).toEqual({ role: "PUBLIC", privileges: [] });
+    await sql.unsafe("grant select on public.pii_page_findings to public");
+    try {
+      const granted = await sql.unsafe(`select coalesce(array_agg(distinct lower(a.privilege_type)) filter (where a.privilege_type is not null), '{}') as privileges
+         from pg_class c cross join lateral aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+         where c.oid = 'public.pii_page_findings'::regclass and a.grantee = 0`);
+      expect(granted[0]!.privileges).toEqual(["select"]);
+    } finally {
+      await sql.unsafe("revoke all on public.pii_page_findings from public");
+    }
   });
 });

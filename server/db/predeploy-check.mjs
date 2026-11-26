@@ -552,8 +552,8 @@ export async function collectReport(client, { migrationFiles, acceptedPiiPattern
     ));
   }
 
-  // 8. PII page findings (detector confidence) are operator-only: the API role holds no privilege on the table, the worker
-  // only SELECT, INSERT and DELETE. Any other grant is a BLOCKER.
+  // 8. PII page findings (detector confidence) are operator-only: the API role and PUBLIC hold no privilege on the table,
+  // the worker only SELECT, INSERT and DELETE. Any other grant is a BLOCKER.
   const [{ has_findings: hasFindings }] = await q("select to_regclass('public.pii_page_findings') is not null as has_findings");
   if (hasFindings) {
     const grants = await q(
@@ -563,7 +563,12 @@ export async function collectReport(client, { migrationFiles, acceptedPiiPattern
          case when has_table_privilege(r.oid, 'public.pii_page_findings', 'UPDATE') then 'update' end,
          case when has_table_privilege(r.oid, 'public.pii_page_findings', 'DELETE') then 'delete' end,
          case when has_table_privilege(r.oid, 'public.pii_page_findings', 'TRUNCATE') then 'truncate' end], null) as privileges
-       from pg_roles r where r.rolname = any($1::text[])`,
+       from pg_roles r where r.rolname = any($1::text[])
+       union all
+       -- PUBLIC (grantee 0) is not a role in pg_roles: read its entries from the table's ACL.
+       select 'PUBLIC', coalesce(array_agg(distinct lower(a.privilege_type)) filter (where a.privilege_type is not null), '{}')
+       from pg_class c cross join lateral aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+       where c.oid = 'public.pii_page_findings'::regclass and a.grantee = 0`,
       [["docslurp_app", "docslurp_worker"]],
     );
     const problems = piiFindingsGrantProblems(grants);

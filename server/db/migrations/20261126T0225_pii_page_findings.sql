@@ -42,8 +42,14 @@ CREATE TABLE IF NOT EXISTS pii_page_findings (
 );
 --> statement-breakpoint
 -- Live roles work at commit (server/db/roles.mjs WORKER_TABLES; reconciliation re-grants the same after migrate).
+-- Operator-only: no default privilege reaches the API role or PUBLIC before role reconciliation runs.
+REVOKE ALL ON public.pii_page_findings FROM PUBLIC;
+--> statement-breakpoint
 DO $$
 BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'docslurp_app') THEN
+    REVOKE ALL ON public.pii_page_findings FROM docslurp_app;
+  END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'docslurp_worker') THEN
     GRANT SELECT, INSERT, DELETE ON public.pii_page_findings TO docslurp_worker;
   END IF;
