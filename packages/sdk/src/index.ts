@@ -1168,6 +1168,11 @@ export type ReprocessRunInput = {
   visuals?: Visuals;
   /** @deprecated Use `visuals`. */
   chartExport?: ChartExportOverride;
+  /**
+   * Sent as the Idempotency-Key header, not in the body: a repeat with the same key and input returns the run the first
+   * request made and charges nothing again (see reprocess idempotency in the API docs). Send one whenever you may retry.
+   */
+  idempotencyKey?: string;
 };
 /** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
 export type ReprocessRunResult = { run: ProjectRun; job?: JobStatus; warnings: string[] };
@@ -1177,6 +1182,11 @@ export type BulkDocumentsInput = {
   action: "reprocess" | "apply-tags" | "remove-tags" | "delete" | "export-artifacts";
   documentIds: string[];
   tags?: string[];
+  /**
+   * `reprocess` only. Sent as the Idempotency-Key header, not in the body: a retry with the same key and input creates only
+   * the runs the first request did not make and returns the others.
+   */
+  idempotencyKey?: string;
 };
 /** Per action: `{ runs, failed, warnings, job? }` (reprocess), `{ updated, documentIds }` (tags), `{ deleted, documentIds }` or `{ artifacts }`. */
 export type BulkDocumentsResult = JsonObject;
@@ -3135,8 +3145,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * the earlier extraction). Spends credits; price it with {@link reprocessEstimate}.
      */
     async reprocessRun(runId: string, input: ReprocessRunInput = {}, requestOptions?: RequestOptions): Promise<ReprocessRunResult> {
+      const { idempotencyKey, ...options } = input;
       const body = await request<ProjectRun & { run?: ProjectRun; job?: JobStatus; warnings?: string[] }>(
-        `/v1/runs/${encodeURIComponent(runId)}/reprocess`, jsonRequest("POST", input), requestOptions,
+        `/v1/runs/${encodeURIComponent(runId)}/reprocess`, withIdempotencyKey(jsonRequest("POST", options), idempotencyKey), requestOptions,
       );
       // A deferred start answers { run, warnings, job }; a started one answers the run itself plus job.
       if (body.run) return { run: body.run, job: body.job, warnings: body.warnings ?? [] };
@@ -3405,7 +3416,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * `export-artifacts` over the limit throw RangeError before sending.
      */
     async bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
-      const send = (documentIds: string[]) => request<BulkDocumentsResult>(`/v1/documents/bulk`, jsonRequest("POST", { ...input, documentIds }), requestOptions);
+      const { idempotencyKey, ...fields } = input;
+      if (idempotencyKey !== undefined && input.action !== "reprocess") throw new TypeError("idempotencyKey applies to the reprocess action only");
+      const send = (documentIds: string[]) => request<BulkDocumentsResult>(`/v1/documents/bulk`,
+        withIdempotencyKey(jsonRequest("POST", { ...fields, documentIds }), idempotencyKey), requestOptions);
       if (input.documentIds.length <= BULK_DOCUMENTS_MAX) return send(input.documentIds);
       if (input.action === "reprocess" || input.action === "export-artifacts") {
         throw new RangeError(`${input.action} takes at most ${BULK_DOCUMENTS_MAX} documents per request; split the batch`);
@@ -3623,6 +3637,12 @@ function newIdempotencyKey(): string {
   if (typeof crypto?.randomUUID === "function") return crypto.randomUUID();
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Adds an Idempotency-Key header to a request when a key is given. */
+function withIdempotencyKey(init: RequestInit, key: string | undefined): RequestInit {
+  if (key === undefined) return init;
+  return { ...init, headers: { ...(init.headers as Record<string, string>), "Idempotency-Key": key } };
 }
 
 function jsonRequest(method: string, body: unknown): RequestInit {

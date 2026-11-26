@@ -271,3 +271,21 @@ test("a server-side partial delete in a later request counts its deleted ids, an
   assert.equal(retried.deleted, 400);
   assert.equal(gone.size, 1_100);
 });
+
+test("reprocessRun and bulk reprocess send idempotencyKey as the Idempotency-Key header, never in the body", async () => {
+  const seen = [];
+  const fetch = async (url, init = {}) => {
+    seen.push({ url: String(url).replace("https://x.test", ""), key: new Headers(init.headers).get("Idempotency-Key"), body: JSON.parse(init.body) });
+    return String(url).endsWith("/reprocess") ? json({ id: "run-2", status: "queued", job }, 201) : json({ runs: [], failed: [], warnings: [] }, 201);
+  };
+  const client = createDocSlurpClient({ apiUrl: "https://x.test", apiKey: "k", project: "ws1", fetch });
+  await client.reprocessRun("run-1", { stages: ["embed"], idempotencyKey: "retry-1" });
+  await client.bulkDocuments({ action: "reprocess", documentIds: ["d1"], idempotencyKey: "bulk-1" });
+  await client.reprocessRun("run-1");
+  assert.deepEqual(seen, [
+    { url: "/v1/runs/run-1/reprocess", key: "retry-1", body: { stages: ["embed"] } },
+    { url: "/v1/documents/bulk", key: "bulk-1", body: { action: "reprocess", documentIds: ["d1"] } },
+    { url: "/v1/runs/run-1/reprocess", key: null, body: {} },
+  ]);
+  await assert.rejects(client.bulkDocuments({ action: "delete", documentIds: ["d1"], idempotencyKey: "x" }), TypeError);
+});
