@@ -81,7 +81,7 @@ export function mergeDeferredPiiOutcome(
   if (match.pages.size === 0) {
     // Scan progress only: nothing matched, so nothing new is withheld.
     if (scanFields === "unchanged") return null;
-    const { scanPending: _pending, scannedPages: _scanned, ...rest } = stored;
+    const { scanPending: _pending, scannedPages: _scanned, scanComplete: _complete, ...rest } = stored;
     const pii: StoredPii = Object.keys(stored).length > 0
       ? { ...rest, ...scanFields }
       : { scope: "none", action: match.action, runId: match.runId, pageCount: match.pageCount, blocked: false, redacted: false, reviewRequired: false, withheldArtifactUris: [], ...scanFields };
@@ -102,7 +102,7 @@ export function mergeDeferredPiiOutcome(
   ])].sort();
   const withheldPages = [...pageTypes.keys()].sort((a, b) => a - b);
   const blocked = match.action === "block_document" || (withheldPages.length > 0 && withheldPages.length >= match.pageCount);
-  const { scanPending: _pending, scannedPages: _scanned, ...storedWithoutScan } = stored;
+  const { scanPending: _pending, scannedPages: _scanned, scanComplete: _complete, ...storedWithoutScan } = stored;
   const scanState = scanFields === "unchanged" ? scanOf(stored) : scanFields;
   const base: StoredPii = {
     ...storedWithoutScan,
@@ -152,7 +152,8 @@ export function mergeDeferredPiiOutcome(
 }
 
 function scanOf(stored: StoredPii): StoredPii {
-  return stored.scanPending === true ? { scanPending: true, scannedPages: stored.scannedPages } : {};
+  if (stored.scanPending === true) return { scanPending: true, scannedPages: stored.scannedPages };
+  return stored.scanComplete === true ? { scanComplete: true } : {};
 }
 
 /**
@@ -161,18 +162,17 @@ function scanOf(stored: StoredPii): StoredPii {
  */
 function mergeScan(stored: StoredPii, rawPii: unknown, match: DeferredPiiMatch): StoredPii | "unchanged" {
   if (!match.scan) return "unchanged";
-  const hasOutcome = rawPii !== null && rawPii !== undefined;
+  // A finished scan (marked) gains nothing from a later read unless a new scan starts. An unmarked outcome (a deferred
+  // match recorded before the marker existed) is a scan that has scanned nothing yet: it starts one with this read.
+  if (stored.scanComplete === true && stored.scanPending !== true && !match.scan.reset) return "unchanged";
   const pending = stored.scanPending === true;
-  // An outcome with no scan in progress was a complete scan (an ingest scan, or a deferred one that finished): a later
-  // page read adds nothing unless a new scan starts.
-  if (hasOutcome && !pending && !match.scan.reset) return "unchanged";
   const before = pending && !match.scan.reset
     ? new Set((Array.isArray(stored.scannedPages) ? stored.scannedPages : []).filter((page): page is number => Number.isSafeInteger(page) && page >= 1))
     : new Set<number>();
   const size = before.size;
   for (const page of match.scan.pages) if (Number.isSafeInteger(page) && page >= 1 && page <= match.pageCount) before.add(page);
   if (pending && !match.scan.reset && before.size === size) return "unchanged";
-  if (before.size >= match.pageCount) return {};
+  if (before.size >= match.pageCount) return { scanComplete: true };
   return { scanPending: true, scannedPages: [...before].sort((a, b) => a - b) };
 }
 

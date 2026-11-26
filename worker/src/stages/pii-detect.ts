@@ -242,6 +242,8 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
             ...(outcome.redacted && outcome.redactedPages ? { redactedPages: outcome.redactedPages } : {}),
             reason: outcome.reason,
             withheldArtifactUris: outcome.withheldArtifactUris,
+            // pii-detect scans every page: the outcome is complete in any indexing mode.
+            scanComplete: true,
             detectedAt: new Date().toISOString(),
           }
         : null;
@@ -522,7 +524,11 @@ export class PiiDetectStage implements Stage {
     // markers. That is a carried redaction, never a clean document: the pages it was on are not known, so no page's
     // pixels and nothing the scan did not rewrite is served (as for an older outcome that did not record its pages).
     const carriedRedaction = policy.action === "redact_artifacts" && !anyMatch
-      && [markdown?.text, fallbackText, canonical && !markdown ? JSON.stringify(canonical.value) : ""].some((text) => typeof text === "string" && REDACTION_MARKER.test(text));
+      && [
+        markdown?.text, fallbackText, html?.text,
+        // Every artifact the stage rewrites: a value matched only in a canonical block or the contract shows only there.
+        canonical ? JSON.stringify(canonical.value) : "", contract ? JSON.stringify(contract.value) : "",
+      ].some((text) => typeof text === "string" && REDACTION_MARKER.test(text));
     const redacted = policy.action === "redact_artifacts" && (anyMatch || carriedRedaction) && !blocked;
     const reviewRequired = policy.action === "flag_for_review" && anyMatch;
     if (blocked && planReason.startsWith("unattributed")) {
@@ -670,7 +676,7 @@ export class PiiDetectStage implements Stage {
       withheldArtifactUris,
     });
     if (blocked) document.status = PII_BLOCKED_DOCUMENT_STATUS;
-    if (policy.action !== "flag_for_review" && (anyMatch || plan.scope !== "none")) {
+    if (policy.action !== "flag_for_review" && (anyMatch || plan.scope !== "none" || carriedRedaction)) {
       const withheldForMap: WithheldPagesForMap = plan.scope === "pages" ? new Set(plan.pages) : plan.scope === "none" ? new Set() : "all";
       await this.sink.scrubTitlesAndMap?.(document.id, withheldForMap, (text) => scan(text).matches.length > 0);
     }

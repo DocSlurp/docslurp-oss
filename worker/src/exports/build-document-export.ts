@@ -8,7 +8,7 @@ import {
   documentExportFolderNames,
   isPageImageReferenceBlock,
   isPageImageWithheld,
-  piiScanIncomplete,
+  piiWholeDocumentServable,
   isPageWithheld,
   piiWithheldPageText,
   piiWithholding,
@@ -85,6 +85,10 @@ export interface ExportDocumentRow {
   page_count: number;
   version_number: number | null;
   metadata: unknown;
+  /** documents.indexing_mode, the run's PII policy and whether pii-detect completed for it (the serving rule's inputs). */
+  indexing_mode?: string | null;
+  pii_policy?: unknown;
+  pii_detect_completed?: boolean;
   created_at: string;
   updated_at: string;
   tags: string[];
@@ -212,13 +216,18 @@ export async function* documentExportEntries(
     const modifiedAt = new Date(row.updated_at);
     const prefix = `${row.id}:`;
     // Page-scoped PII: per-page artifacts of withheld pages (renders written after the scan included) are withheld too.
-    const piiState = piiWithholding({ status: row.status, metadata: row.metadata });
+    const piiState = piiWithholding({ status: row.status, metadata: row.metadata, indexingMode: row.indexing_mode });
     const withheld = withheldUris(row.metadata);
+    // The source and every artifact without a page: one shared rule (scan done, not withheld whole, every page scanned).
+    const wholeServable = piiWholeDocumentServable({
+      status: row.status, pii: (row.metadata as { pii?: unknown } | null)?.pii, indexingMode: row.indexing_mode,
+      piiPolicy: row.pii_policy, piiDetectCompleted: row.pii_detect_completed === true,
+    });
     for (const [slot, uri] of Object.entries(row.artifacts ?? {})) {
       if (!slot.startsWith(prefix)) continue;
       const page = withheldPageOfSlot(slot.slice(prefix.length));
       // A scan in progress withholds every artifact without a page, and the unscanned pages' own.
-      if (piiState.scope === "document" || (page !== null && isPageImageWithheld(piiState, page)) || (page === null && piiScanIncomplete(piiState))) withheld.add(uri);
+      if (piiState.scope === "document" || (page !== null && isPageImageWithheld(piiState, page)) || (page === null && !wholeServable)) withheld.add(uri);
     }
     const completed = row.status === "completed";
     const artifacts = completed
@@ -318,7 +327,7 @@ export async function* documentExportEntries(
 
     if (args.content === "all") {
       const originalPath = `${folder}/original/${safeExportName(row.filename, "original", { keepExtension: true })}`;
-      if (withheld.has(`s3://${source.bucket}/${row.source_key}`)) {
+      if (!wholeServable || withheld.has(`s3://${source.bucket}/${row.source_key}`)) {
         skipped.push({ path: originalPath, reason: "withheld by the project's privacy (PII) policy" });
       } else {
         yield {
@@ -466,7 +475,10 @@ function cell(value: string): string {
 
 const documentColumns = (sql: Sql) => sql`
   d.id, d.project_id, d.run_id, d.filename, d.mime_type, d.source_key, d.status, d.extraction_mode,
-  d.page_count, d.version_number, d.metadata, d.created_at::text, d.updated_at::text,
+  d.page_count, d.version_number, d.metadata, d.created_at::text, d.updated_at::text, d.indexing_mode,
+  (select r.pipeline->'piiPolicy' from project_runs r where r.id = d.run_id) as pii_policy,
+  exists (select 1 from document_run_stage_states s where s.run_id = d.run_id and s.document_id = d.id
+    and s.stage_name = 'pii-detect' and s.status = 'completed') as pii_detect_completed,
   coalesce((select array_agg(dt.tag order by dt.tag) from document_tags dt where dt.document_id = d.id), '{}') as tags,
   null::jsonb as artifacts
 `;

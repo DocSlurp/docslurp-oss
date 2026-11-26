@@ -27,12 +27,12 @@ type SqlTag = <T>(strings: TemplateStringsArray, ...values: unknown[]) => Promis
  * exports, deferred materialization). A missing document withholds everything.
  */
 export async function loadDocumentPiiWithholding(sql: SqlTag, documentId: string): Promise<PiiWithholding> {
-  const rows = await sql<Array<{ status: string | null; metadata: unknown }>>`
-    select status, metadata from documents where id = ${documentId}
+  const rows = await sql<Array<{ status: string | null; metadata: unknown; indexing_mode: string | null }>>`
+    select status, metadata, indexing_mode from documents where id = ${documentId}
   `;
   const row = rows[0];
   if (!row) return { scope: "document", reason: "missing-document" };
-  return piiWithholding(row);
+  return piiWithholding({ status: row.status, metadata: row.metadata, indexingMode: row.indexing_mode });
 }
 
 /**

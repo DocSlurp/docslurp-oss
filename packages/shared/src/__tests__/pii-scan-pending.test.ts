@@ -68,6 +68,12 @@ describe("context detectors in Markdown tables", () => {
     const types = (text: string) => scanForPii(text, ["passport", "bank-account"]).map((match) => match.patternType).sort();
     expect(types(row)).toEqual(["bank-account", "passport"]);
     expect(types(column)).toEqual(["bank-account", "passport"]);
+    // A deep row of a large table is labelled by its header, in linear time (no walk up per candidate).
+    const rows = Array.from({ length: 20_000 }, (_, i) => `| Row ${i} | X${String(1_000_000 + i)} |`).join("\n");
+    const big = `| Name | Passport number |\n|---|---|\n${rows}\n`;
+    const started = performance.now();
+    expect(scanForPii(big, ["passport"])).toHaveLength(20_000);
+    expect(performance.now() - started).toBeLessThan(5_000);
     // A value in an unlabelled column is still not a match.
     expect(types("| Name | Order |\n|---|---|\n| Jane | 12345678901 |\n")).toEqual([]);
   });

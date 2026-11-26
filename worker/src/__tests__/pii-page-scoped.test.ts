@@ -48,6 +48,7 @@ class MemoryStore {
 }
 
 class RecordingSink implements PiiDetectionSink {
+  scrubTitlesAndMap?: PiiDetectionSink["scrubTitlesAndMap"];
   detections: PiiMatch[][] = [];
   outcomes: PiiDocumentOutcome[] = [];
   async recordDetections(_documentId: string, _runId: string, matches: PiiMatch[]) { this.detections.push(matches); }
@@ -373,6 +374,21 @@ describe("a redaction retry after the outcome write failed (M1)", () => {
     for (const page of [1, 2, 3]) expect(withheld.has(uri(retry, `page-${page}`)), `page-${page}`).toBe(true);
   });
 
+  it("a value only in a canonical block, redacted there on attempt one, is a carried redaction on retry; titles are scrubbed", async () => {
+    const pages = ["Intro.", `SSN ${SSN}.`, "End."];
+    const first = setup("redact_artifacts", pages, { markdown: "Intro.\fNothing.\fEnd." });
+    first.sink.setDocumentOutcome = async () => { throw new Error("database blip"); };
+    await first.stage.run(first.state).catch(() => undefined);
+    expect(first.storage.objects.get(first.canonicalKey)).toContain("[REDACTED:ssn]");
+    const retry = setup("redact_artifacts", pages, { storage: first.storage, markdown: "Intro.\fNothing.\fEnd." });
+    const scrubbed: unknown[] = [];
+    retry.sink.scrubTitlesAndMap = async (_id, withheld) => { scrubbed.push(withheld); };
+    await retry.stage.run(retry.state);
+    expect(outcome(retry)).toMatchObject({ redacted: true, redactedPages: null });
+    expect(new Set(outcome(retry).withheldArtifactUris).has(retry.storage.uri(retry.document.sourceKey))).toBe(true);
+    expect(scrubbed).toHaveLength(1);
+  });
+
   it("a clean document with no markers is still recorded clean", async () => {
     const f = setup("redact_artifacts", ["Intro.", "Nothing here.", "End."]);
     await f.stage.run(f.state);
@@ -609,6 +625,17 @@ describe("the canonical locator (M9, structural keys)", () => {
     expect(mapped.unmapped).toHaveLength(1);
     // The unrelated hit is still replaced (more is withheld, never less).
     expect(mapped.blockIndexes.has(0)).toBe(true);
+  });
+
+  it("copies in heading paths do not count as the value's own occurrence, at any length", async () => {
+    const { mapTextMatchesToCanonical } = await import("../lib/pii-page-withholding.js");
+    for (const value of ["X1234567", "GB82WEST12345698765432"]) {
+      const text = `## Ref ${value}\n\nPassport number\n\n${value.slice(0, 4)}\n${value.slice(4)}`;
+      const heading = { ...block(`## Ref ${value}`), type: "heading", headingPath: [`Ref ${value}`] };
+      const blocks = [heading, { ...block("Passport number"), headingPath: [`Ref ${value}`] }, { ...block(value.slice(0, 4)), headingPath: [`Ref ${value}`] }, { ...block(value.slice(4)), headingPath: [`Ref ${value}`] }];
+      const mapped = mapTextMatchesToCanonical(blocks, text, [at(text, `${value.slice(0, 4)}\n${value.slice(4)}`)], 1);
+      expect(mapped.unmapped, value).toHaveLength(1);
+    }
   });
 
   it("exact and re-spaced hits are both found", async () => {

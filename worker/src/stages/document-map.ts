@@ -516,7 +516,9 @@ export class DocumentMapStage implements Stage {
     const scanText = policy.enabled && policy.patterns.length > 0 ? createPiiTextScanner(policy.patterns, policy.allowlistPatterns) : null;
     if (scanText) {
       const scan = scanText;
-      for (const [pageNumber] of coarseRows) scannedPages.add(pageNumber);
+      // A page counts as scanned only when its text layer has the born-digital minimum of text: a near-empty layer
+      // (a scanned page with a stray glyph) says nothing about what its image shows, so that page waits for a read.
+      for (const [pageNumber, text] of coarseRows) if (text.replace(/\s/g, "").length >= BORN_DIGITAL_MIN_CHARS) scannedPages.add(pageNumber);
       coarseRows = coarseRows.flatMap(([pageNumber, text]): Array<[number, string]> => {
         const scanned = scan(text, pageNumber);
         if (scanned.matches.length === 0) return [[pageNumber, text]];

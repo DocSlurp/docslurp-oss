@@ -612,6 +612,8 @@ export async function materializePageRange(
   // batch is indexed. Redaction records the redacted pages, whose images are then withheld.
   // Under a withholding or redaction policy in a deferred mode, the pages this read scanned are added to the
   // document's scan: their pixels and text become servable (unless withheld), and the source once every page is.
+  // A page that was read and came back empty was read too: it counts as scanned (it holds no text to match).
+  for (const [page, reason] of failed) if (reason === "empty-page") scannedNow.add(page);
   const scanProgress = scan && piiPolicyWithholds(policy) && isDeferredMode(pipeline)
     ? { scan: { pages: new Set([...scannedNow]), reset: false } }
     : {};

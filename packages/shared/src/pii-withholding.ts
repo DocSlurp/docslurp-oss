@@ -165,7 +165,7 @@ function isPositiveInteger(value: unknown): value is number {
  * The withholding recorded for a document. Fails closed: status `pii_blocked`, `pii.blocked`, an unknown scope or a
  * malformed page list all withhold the whole document.
  */
-export function piiWithholding(document: { status?: string | null; metadata?: unknown }): PiiWithholding {
+export function piiWithholding(document: { status?: string | null; metadata?: unknown; indexingMode?: string | null }): PiiWithholding {
   if (document.status === PII_BLOCKED_DOCUMENT_STATUS) {
     const types = piiCategoryIds((document.metadata as { pii?: { patternTypes?: unknown } } | null | undefined)?.pii?.patternTypes);
     return { scope: "document", reason: "pii-blocked", ...(types.length > 0 ? { types } : {}) };
@@ -176,7 +176,7 @@ export function piiWithholding(document: { status?: string | null; metadata?: un
   const pii = (metadata as { pii?: unknown }).pii;
   if (pii === null || pii === undefined) return { scope: "none" };
   if (typeof pii !== "object" || Array.isArray(pii)) return { scope: "document", reason: "malformed-metadata" };
-  const record = pii as { scanPending?: unknown; scannedPages?: unknown; blocked?: unknown; scope?: unknown; withheldPages?: unknown; withheldSectionCount?: unknown; withheldPageTypes?: unknown; patternTypes?: unknown; redacted?: unknown; redactedPages?: unknown };
+  const record = pii as { scanComplete?: unknown; scanPending?: unknown; scannedPages?: unknown; blocked?: unknown; scope?: unknown; withheldPages?: unknown; withheldSectionCount?: unknown; withheldPageTypes?: unknown; patternTypes?: unknown; redacted?: unknown; redactedPages?: unknown };
   const redactedPages = record.redacted === true
     ? Array.isArray(record.redactedPages) && record.redactedPages.every(isPositiveInteger) ? new Set(record.redactedPages) : "unknown" as const
     : undefined;
@@ -185,8 +185,12 @@ export function piiWithholding(document: { status?: string | null; metadata?: un
   const typed = types.length > 0 ? { types } : {};
   // Deferred modes scan page by page: until every page has been, the scanned ones are listed and every other page
   // (and every whole-document artifact) is withheld. A malformed list scans nothing (fail closed).
-  const scanned = record.scanPending === true
-    ? { scannedPages: new Set(Array.isArray(record.scannedPages) ? record.scannedPages.filter(isPositiveInteger) : []) }
+  // A deferred-mode document's outcome is complete only with the explicit marker its scan writes when every page has
+  // been scanned (`scanComplete`). An outcome a deferred match wrote before the marker existed reads as a scan that has
+  // scanned nothing: its withheld pages stay withheld and every other page is pending until it is read.
+  const deferredUnmarked = isDeferredIndexingMode(document.indexingMode) && record.scanPending !== true && record.scanComplete !== true;
+  const scanned = record.scanPending === true || deferredUnmarked
+    ? { scannedPages: new Set(record.scanPending === true && Array.isArray(record.scannedPages) ? record.scannedPages.filter(isPositiveInteger) : []) }
     : {};
   if (record.blocked === true) return { scope: "document", reason: "pii-blocked", ...typed };
   switch (record.scope) {
@@ -526,4 +530,45 @@ export function withoutPendingScan(withholding: PiiWithholding): PiiWithholding 
   if (withholding.scope === "document" || withholding.scannedPages === undefined) return withholding;
   const { scannedPages: _scanned, ...rest } = withholding;
   return rest as PiiWithholding;
+}
+
+function isDeferredIndexingMode(mode: unknown): boolean {
+  return mode === "map" || mode === "visual";
+}
+
+/** What the serving rules need to know about one document: its row and its run's policy and scan. */
+export type PiiServingDocument = {
+  status: string | null;
+  /** `documents.metadata.pii` (null or absent: no outcome recorded). */
+  pii: unknown;
+  /** `documents.indexing_mode`. */
+  indexingMode?: string | null;
+  /** The document's run's `pipeline.piiPolicy`. */
+  piiPolicy: unknown;
+  /** Whether pii-detect completed for the document's run. */
+  piiDetectCompleted: boolean;
+};
+
+/**
+ * Whether a document's PII scan has not completed, so nothing written before it may be served. Only a policy that
+ * withholds or redacts ({@link piiPolicyWithholds}) waits: `flag_for_review` withholds nothing (and deferred modes record
+ * no outcome for it). Not pending once pii-detect completed for the run, once an outcome is recorded (deferred modes
+ * record their scan page by page there; see {@link piiScanIncomplete}), or when the document is withheld whole anyway.
+ * Every other state waits: failed or cancelled before the scan, or stuck processing.
+ */
+export function piiScanPending(document: PiiServingDocument): boolean {
+  if (document.status === PII_BLOCKED_DOCUMENT_STATUS) return false;
+  if (!piiPolicyWithholds(document.piiPolicy)) return false;
+  if (document.piiDetectCompleted) return false;
+  return !(document.pii !== null && document.pii !== undefined && typeof document.pii === "object");
+}
+
+/**
+ * The one rule for a document's source file and every artifact without a page (exports, the file proxy, document
+ * detail): served only when its scan is not pending, it is not withheld whole, and a deferred scan has covered every page.
+ */
+export function piiWholeDocumentServable(document: PiiServingDocument): boolean {
+  if (piiScanPending(document)) return false;
+  const withholding = piiWithholding({ status: document.status, metadata: document.pii === null || document.pii === undefined ? {} : { pii: document.pii }, indexingMode: document.indexingMode });
+  return withholding.scope !== "document" && !piiScanIncomplete(withholding);
 }

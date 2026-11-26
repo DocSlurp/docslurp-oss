@@ -558,7 +558,7 @@ export { isPageWithheld, piiWithholding, type PiiWithholding };
  * (inconsistent metadata fails closed), and every `document` outcome. Never inferred from `pii_detections`, which records
  * only the primary source's matches.
  */
-export function resumeWithholding(document: { status?: string | null; metadata?: unknown }): PiiWithholding {
+export function resumeWithholding(document: { status?: string | null; metadata?: unknown; indexingMode?: string | null }): PiiWithholding {
   const withholding = piiWithholding(document);
   if (withholding.scope === "document" || withholding.scope === "pages") return withholding;
   const pii = (document.metadata as { pii?: unknown } | null | undefined)?.pii as { redacted?: unknown; blocked?: unknown; withheldArtifactUris?: unknown } | undefined;
@@ -568,14 +568,15 @@ export function resumeWithholding(document: { status?: string | null; metadata?:
   if (pii && (pii.redacted === true || pii.blocked === true || (Array.isArray(listed) && listed.length > 0))) {
     return { scope: "document", reason: "legacy-withholding" };
   }
-  return { scope: "none" };
+  // The withholding itself, so a deferred scan in progress (scannedPages) still withholds unscanned pages' figures.
+  return withholding;
 }
 
 /** The claimed document's resume withholding (its status and metadata only). */
 async function documentPiiWithholding(sql: Client, row: ClaimedLevel): Promise<PiiWithholding> {
-  const [doc] = await sql<{ status: string; metadata: unknown }[]>`select status, metadata from documents where id = ${row.document_id} and org_id = ${row.org_id}`;
+  const [doc] = await sql<{ status: string; metadata: unknown; indexing_mode: string | null }[]>`select status, metadata, indexing_mode from documents where id = ${row.document_id} and org_id = ${row.org_id}`;
   if (!doc) return { scope: "document", reason: "missing" };
-  return resumeWithholding({ status: doc.status, metadata: doc.metadata });
+  return resumeWithholding({ status: doc.status, metadata: doc.metadata, indexingMode: doc.indexing_mode });
 }
 
 /** Add URIs to the document's withheld list (scoped by its organization); throws when the write did not land. */

@@ -246,31 +246,46 @@ const ROUTING_CONTEXT = /\b(?:routing|aba|rtn)(?:\s+(?:no|num|number|#))?\.?\s*[
  * The label a Markdown table gives a cell: its column's header, as "Header: ". A cell in a row (`| Passport number |
  * X1234567 |`) already has its label just before it (a `|` boundary is accepted by the context patterns); a value under
  * a header row (`| Name | Passport number |`, `|---|---|`, `| Jane | X1234567 |`) gets it from here. Empty when the
- * match is not in a table body. Cost: only for a candidate whose own context did not match, on a line starting `|`.
+ * match is not in a table body. Cost: one linear pass over the content, on the first candidate whose own context did not
+ * match, cached for the rest of the scan (every table body line maps to its header cells).
  */
+const tableHeaders = new Map<string, Map<number, string[]>>();
+let tableHeadersFor: string | null = null;
+
+function tableBodyHeaders(content: string): Map<number, string[]> {
+  if (tableHeadersFor === content) return tableHeaders.get(content)!;
+  const out = new Map<number, string[]>();
+  const separator = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+  const cells = (line: string) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+  let header: string[] | null = null;
+  let previous: string | null = null;
+  let start = 0;
+  while (start <= content.length) {
+    const endAt = content.indexOf("\n", start);
+    const end = endAt < 0 ? content.length : endAt;
+    const line = content.slice(start, end);
+    const inTable = line.trimStart().startsWith("|");
+    if (!inTable) header = null;
+    else if (separator.test(line) && previous !== null && previous.trimStart().startsWith("|")) header = cells(previous);
+    else if (header) out.set(start, header);
+    previous = line;
+    if (endAt < 0) break;
+    start = endAt + 1;
+  }
+  tableHeaders.clear();
+  tableHeaders.set(content, out);
+  tableHeadersFor = content;
+  return out;
+}
+
 function tableHeaderContext(content: string, index: number): string {
   const lineStart = content.lastIndexOf("\n", index - 1) + 1;
-  const lineEndAt = content.indexOf("\n", index);
-  const line = content.slice(lineStart, lineEndAt < 0 ? content.length : lineEndAt);
-  if (!line.trimStart().startsWith("|")) return "";
+  if (content[lineStart] !== "|" && !content.slice(lineStart, index).trimStart().startsWith("|")) return "";
+  const header = tableBodyHeaders(content).get(lineStart);
+  if (!header) return "";
   const column = (content.slice(lineStart, index).match(/\|/g) ?? []).length - 1;
-  if (column < 0) return "";
-  // Walk up the table's rows to the header row (the one above the `|---|` separator).
-  let end = lineStart - 1;
-  for (let rows = 0; end > 0 && rows < 2000; rows += 1) {
-    const start = content.lastIndexOf("\n", end - 1) + 1;
-    const row = content.slice(start, end);
-    if (!row.trimStart().startsWith("|")) return "";
-    if (/^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(row)) {
-      const headerStart = content.lastIndexOf("\n", start - 2) + 1;
-      const header = content.slice(headerStart, start - 1);
-      const cells = header.trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
-      const cell = cells[column]?.trim();
-      return cell ? `${cell}: ` : "";
-    }
-    end = start - 1;
-  }
-  return "";
+  const cell = column >= 0 ? header[column] : undefined;
+  return cell ? `${cell}: ` : "";
 }
 
 /** Whether the label before a candidate (or its table column header) matches `context`. */

@@ -291,9 +291,6 @@ function blockStrings(block: CanonicalBlockLike): string[] {
   return out;
 }
 
-/** Values shorter than this (letters and digits) must be found near their place in the text to count as located. */
-const SHORT_VALUE_CHARS = 12;
-
 function occurrences(haystack: string, needle: string): number {
   if (!needle) return 0;
   let count = 0;
@@ -369,13 +366,16 @@ export function mapTextMatchesToCanonical(
   const offsets = pageCount > 1 ? pageOffsets(text, pageCount) : null;
   const unmapped: Array<number[] | null> = [];
   let textLoose: string | null = null;
+  let looseBlockTexts: string[] | null = null;
+  /** Each block's own text, normalized (never its heading path or metadata). */
+  const blockTexts = () => (looseBlockTexts ??= blocks.map((block) => (typeof block.text === "string" ? alnum(block.text) : "")));
   const allLoose = () => (textLoose ??= alnum(text));
   const counted = new Map<string, number>();
   const blockOccurrences = (needle: string) => {
     let count = counted.get(needle);
     if (count === undefined) {
       count = 0;
-      for (const entry of byPage.values()) count += occurrences(entry.loose, needle);
+      for (const text of blockTexts()) count += occurrences(text, needle);
       counted.set(needle, count);
     }
     return count;
@@ -388,10 +388,11 @@ export function mapTextMatchesToCanonical(
     let found = candidates.flatMap((entry) => (entry ? findIn(entry, value, loose) : []));
     // Paged text whose page disagrees with the blocks' page: look everywhere rather than miss the value.
     if (found.length === 0 && pages) found = [...byPage.values()].flatMap((entry) => findIn(entry, value, loose));
-    // A short value can also sit inside an unrelated string (an order number), so a hit there does not show that the
-    // match's own occurrence was found. For short values every occurrence in the text (ignoring spacing and
-    // punctuation) needs one in the blocks; fewer, and the match is unmapped (the caller fails closed).
-    const located = loose.length >= SHORT_VALUE_CHARS || occurrences(allLoose(), loose) <= blockOccurrences(loose);
+    // A value can also sit inside an unrelated string (an order number), or repeat in heading paths and metadata of
+    // every block under a heading, so a hit there does not show that the match's own occurrence was found. Every
+    // occurrence in the text (ignoring spacing and punctuation) needs one in the blocks' own text; fewer, and the match
+    // is unmapped (the caller fails closed). Hits elsewhere are still replaced.
+    const located = occurrences(allLoose(), loose) <= blockOccurrences(loose);
     if (found.length === 0 || !located) {
       unmapped.push(pages ?? (pageCount <= 1 ? [1] : null));
       if (found.length === 0) continue;

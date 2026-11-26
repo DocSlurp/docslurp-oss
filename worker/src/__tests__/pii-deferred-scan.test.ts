@@ -40,7 +40,26 @@ describe("deferred scan progress (map mode)", () => {
   it("adds nothing (no write) when a read scans pages already scanned or the scan is complete", () => {
     const started = mergeDeferredPiiOutcome({ status: "processing", pii: null }, base({ pages: new Set([1]), reset: true }))!;
     expect(mergeDeferredPiiOutcome({ status: "completed", pii: started.pii }, base({ pages: new Set([1]), reset: false }))).toBeNull();
-    expect(mergeDeferredPiiOutcome({ status: "completed", pii: { scope: "none" } }, base({ pages: new Set([2]), reset: false }))).toBeNull();
+    expect(mergeDeferredPiiOutcome({ status: "completed", pii: { scope: "none", scanComplete: true } }, base({ pages: new Set([2]), reset: false }))).toBeNull();
+  });
+
+  it("an outcome without the completion marker (a deferred match before it existed) starts a scan with the next read", () => {
+    const legacy = { scope: "pages", withheldPages: [4], withheldPageCount: 1, pageCount: 10 };
+    // Read as incomplete in a deferred mode: page 4 stays withheld, page 7 is pending, the source waits.
+    const before = piiWithholding({ status: "completed", metadata: { pii: legacy }, indexingMode: "map" });
+    expect(isPageImageWithheld(before, 7)).toBe(true);
+    expect(isPageImageWithheld(before, 4)).toBe(true);
+    expect(piiScanIncomplete(before)).toBe(true);
+    // A full-index document with the same outcome reads as before.
+    expect(isPageImageWithheld(piiWithholding({ status: "completed", metadata: { pii: legacy }, indexingMode: "full" }), 7)).toBe(false);
+    const merged = mergeDeferredPiiOutcome({ status: "completed", pii: legacy }, base({ pages: new Set([7]), reset: false }))!;
+    expect(merged.pii).toMatchObject({ scope: "pages", withheldPages: [4], scanPending: true, scannedPages: [7] });
+  });
+
+  it("a finished deferred scan writes the completion marker", () => {
+    const merged = mergeDeferredPiiOutcome({ status: "completed", pii: null }, base({ pages: new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), reset: true }))!;
+    expect(merged.pii).toMatchObject({ scanComplete: true });
+    expect(piiScanIncomplete(piiWithholding({ status: "completed", metadata: { pii: merged.pii }, indexingMode: "map" }))).toBe(false);
   });
 
   it("a new run's document map restarts the scan of a completed one", () => {

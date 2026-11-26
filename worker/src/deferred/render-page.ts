@@ -18,8 +18,8 @@ import { assertParseSourceDecided } from "../lib/parse-source.js";
  * the withheld pages; any other withholding with withheld artifacts (redaction, unpaged sections, a malformed outcome)
  * refuses every page, since its page attribution is unknown.
  */
-export function pageRenderWithheld(row: { status: string | null; metadata: unknown; withheld: boolean }, pageNumber: number): boolean {
-  const withholding = piiWithholding(row);
+export function pageRenderWithheld(row: { status: string | null; metadata: unknown; withheld: boolean; indexing_mode?: string | null }, pageNumber: number): boolean {
+  const withholding = piiWithholding({ status: row.status, metadata: row.metadata, indexingMode: row.indexing_mode });
   // Page scope, or a redaction that recorded its pages: a page renders only when its pixels are known clean (a redacted
   // page's image still shows the value it redacted).
   // A scan in progress (deferred modes) never renders a page it has not scanned.
@@ -45,7 +45,7 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
     throw ApplicationFailure.nonRetryable("Document page needs a fresh scan: reprocess the document", "ParseSourceUnscanned", error instanceof Error ? error.name : "refused");
   }
   const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; status: string | null; metadata: unknown; page_images: boolean; low: string | null; high: string | null }[]>`
-    select d.org_id, d.project_id, d.status, d.metadata,
+    select d.org_id, d.project_id, d.status, d.metadata, d.indexing_mode,
       coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'), 0) > 0 as withheld,
       ${sql.unsafe(pageImagesOnSql("p"))} as page_images,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 120)} as low,
@@ -88,7 +88,7 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   signal?.throwIfAborted();
   await sql.begin(async tx => {
     const client = tx as unknown as typeof sql;
-    const live = await client<{ status: string | null; metadata: unknown; withheld: boolean }[]>`select d.status, d.metadata,
+    const live = await client<{ status: string | null; metadata: unknown; withheld: boolean; indexing_mode: string | null }[]>`select d.status, d.metadata, d.indexing_mode,
       coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'),0) > 0 as withheld
       from documents d
       where d.id=${document.id} and d.run_id=${input.runId} and d.status='completed' for update of d`;
