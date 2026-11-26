@@ -524,9 +524,9 @@ export function ladderReadPagesHigh(args: { features: PipelineFeatures; pages: n
 /**
  * The most an optional feature can charge over `documents` documents holding `pages` pages in all, however the pages are
  * spread: the provider prices each document on its own pages (worker pipeline/feature-charges.ts), so an even split can
- * undercount. For any price of the form `a + c x ceil(pages / block)` the sum over documents is at most the price of all
- * the pages as one document plus one one-page price per document. Priced on the page count: a feature that bills on text
- * read can bill more when a document's text is denser than its pages (see the estimate's basis).
+ * undercount. The price of all the pages as one document plus one one-page price per document bounds per-document block
+ * pricing. Priced on the page count: a feature that bills on text read can bill more when a document's text is denser
+ * than its pages (see the estimate's basis).
  */
 function featureCreditsHigh(feature: DocumentFeature, pages: number, documents: number): number {
   if (documents <= 0) return 0;
