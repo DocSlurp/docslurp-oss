@@ -1,3 +1,13 @@
+## PII withholding is page-scoped, with the reason per page (2026-11-25, behaviour change)
+
+- One PII page no longer blocks a whole document. Under `piiPolicy.action = "block_indexing"` a match withholds its page: that page's text becomes a fixed placeholder before summary, embedding and indexing, and its images, renders and figures are refused. The rest of the document completes and is served. Unpaged documents withhold the section holding the match. A match that cannot be placed on a page still blocks the whole document (fail closed). See `docs/pii-page-withholding.md`.
+- **Behaviour change:** existing projects using `block_indexing` start serving the clean pages of documents they block today, once those documents are rescanned or reprocessed. Stored policies are not migrated. The new action `block_document` keeps whole-document blocking for projects that want it.
+- Documents already `pii_blocked` are not rescanned automatically. `scripts/pii-page-scope-dry-run.sql` counts, read-only, how many would become partly available after a rescan.
+- Search, chat, the file proxy, page renders, exports and deferred materialization enforce withheld pages at serve time (the hosted API applies the shared helpers).
+- Each withheld page records the kinds of PII found on it (`metadata.pii.withheldPageTypes`, detector category ids with plain labels). The placeholder text, the ingest report, document detail, the viewer payload and the SDK types say why: "Page 3 withheld: contains a payment card number and an email address." Never the matched text, offsets or match counts. Documents processed earlier read with a generic reason; no backfill.
+- Detection confidence is operator-only: `pii_page_findings` (migration `20261126T0225`), one row per withheld page and category. Every detector is rule-based, so confidence is null and the rule's validation basis is recorded. No tenant response reads it.
+- The fetchable pii-detect stage artifact no longer stores match fingerprints or offsets.
+
 ## Runs report searchable pages, a final page total and worker pickup (2026-11-25)
 
 `pagesProcessed` counts page checkpoints of the extraction stages, so it reaches `pagesTotal` before routing, page reading and indexing run; clients that divided the two showed 100% long before a run could be searched.
@@ -194,13 +204,6 @@ Owner decision: isolation keeps everything that stops one organization reading a
 - Added operator-owned fleet limits and durable reservation slots before provider launch. The database rejects oversubscription, stale policy snapshots, identity changes and released-ID reuse. Runtime application roles cannot access the platform ledger; workers cannot edit fleet limits or erase reservations.
 - Added a content-free worker plugin admission interface and startup binding. Unbound storage fails closed. Provider lifecycle adapters must retain uncertain reservations and release only on definite non-creation or confirmed deletion; this seam does not authorize customer file access or change provider defaults.
 - Two independent security reviews found stale operator-policy reads and inherited custom application ACLs. Both were fixed with real PostgreSQL regression tests. See `docs/design/compute-fleet-admission.md`.
-
-## PII withholding is page-scoped (2026-11-13, behaviour change)
-
-- One PII page no longer blocks a whole document. Under `piiPolicy.action = "block_indexing"` a match withholds its page: that page's text becomes a fixed placeholder before summary, embedding and indexing, and its images, renders and figures are refused. The rest of the document completes and is served. Unpaged documents withhold the section holding the match. A match that cannot be placed on a page still blocks the whole document (fail closed). See `docs/pii-page-withholding.md`.
-- **Behaviour change:** existing projects using `block_indexing` start serving the clean pages of documents they block today, once those documents are rescanned or reprocessed. Stored policies are not migrated. The new action `block_document` keeps whole-document blocking for projects that want it.
-- Documents already `pii_blocked` are not rescanned automatically. `scripts/pii-page-scope-dry-run.sql` counts, read-only, how many would become partly available after a rescan.
-- Search, chat, the file proxy, page renders, exports and deferred materialization enforce withheld pages at serve time. The ingest report (`piiWithheld`) and document detail (`piiWithheld`) say "N pages withheld for privacy" with page numbers, never content.
 
 ## Compute price and calibration observation storage
 
