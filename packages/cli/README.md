@@ -282,7 +282,7 @@ docslurp exec --project contracts -- python agent.py
 | `Unexpected token` when parsing stdout | Add `--json` to search or chat. Progress output is text, not JSON. |
 | Some batch queries failed | Check each result's `ok`. Successful results are still in the JSON output. |
 
-Commands exit with **0** on success and **1** when a command fails or a watched run stops, fails or times out. A successful search with no hits still exits 0. Errors go to stderr, so scripts should check both the exit status and the returned data.
+Commands exit with **0** on success and **1** when a command fails or a watched run stops, fails or times out. A watched job that completes with some documents failed exits with **2** and says how many failed (the rest are searchable). A successful search with no hits still exits 0. Errors go to stderr, so scripts should check both the exit status and the returned data.
 
 HTTP failures print a reviewed message for known error codes, plus a support request ID when the server sent one; raw response text is never shown. With `--json`, a failed request writes `{ "error": { "status", "code", "message", "requestId", "retryAfterSeconds" } }` to stderr (optional fields may be absent) and exits nonzero.
 

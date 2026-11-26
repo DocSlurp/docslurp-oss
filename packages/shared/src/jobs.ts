@@ -42,5 +42,10 @@ export const jobStatusSchema = z.object({
   estimate: costEstimateSchema.nullable(),
   estimateUrl: z.string().optional(),
   statusUrl: z.string(),
+  /**
+   * How a finished run job went, beside `status`: `succeeded`, `partial` (completed, some documents failed) or
+   * `failed`; null while it runs or when cancelled. Absent: not reported (an older server, or a job that is not a run).
+   */
+  outcome: z.enum(["succeeded", "partial", "failed"]).nullable().optional(),
 });
 export type JobStatus = z.infer<typeof jobStatusSchema>;

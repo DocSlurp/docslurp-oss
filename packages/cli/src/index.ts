@@ -1171,7 +1171,17 @@ type CostEstimate = {
 type JobStatus = {
   id: string; kind: string; status: string; reason?: string; runIds: string[];
   queue?: { position: number | null; ahead: number | null }; estimate: CostEstimate | null; estimateUrl?: string;
+  /** How a finished run job went (newer servers): `partial` when it completed with failed documents. */
+  outcome?: "succeeded" | "partial" | "failed" | null;
+  progress?: { documents?: number; documentsTotal?: number; documentsFailed?: number; pages?: number; pagesTotal?: number; pagesSearchable?: number };
 };
+
+/** Exit code for `--wait` (or a job read): 0 succeeded, 1 failed or cancelled, 2 completed with failed documents. */
+export function jobExitCode(job: Pick<JobStatus, "status" | "outcome" | "progress">): number {
+  if (job.status !== "completed") return 1;
+  const partial = job.outcome === "partial" || (job.outcome === undefined && (job.progress?.documentsFailed ?? 0) > 0);
+  return partial ? 2 : 0;
+}
 
 function formatEstimate(estimate: CostEstimate): string {
   const lines = [`Pages:     ${estimate.pages} across ${estimate.documents} document${estimate.documents === 1 ? "" : "s"}`];
@@ -1270,7 +1280,10 @@ async function runEstimate(pathname: string, body: unknown, flags: Record<string
 function printJob(job: JobStatus): void {
   const detail = job.reason ? ` (${job.reason})` : "";
   const queue = job.queue?.position != null ? `, queue position ${job.queue.position}` : "";
-  console.log(`Job ${job.id}: ${job.kind} ${job.status}${detail}${queue}`);
+  const failed = job.status === "completed" && jobExitCode(job) === 2
+    ? `, ${job.progress?.documentsFailed ?? "some"} of ${job.progress?.documentsTotal ?? "its"} documents failed (the rest are searchable)`
+    : "";
+  console.log(`Job ${job.id}: ${job.kind} ${job.status}${detail}${queue}${failed}`);
 }
 
 async function fullIndexCommand(flags: Record<string, string | boolean>): Promise<void> {
@@ -1529,7 +1542,7 @@ async function jobsCommand(action: string | undefined, jobId: string | undefined
           const job = (parsed?.job ?? parsed) as JobStatus;
           if (job?.status && show(job)) {
             await response.body.cancel().catch(() => undefined);
-            process.exitCode = job.status === "completed" ? 0 : 1;
+            process.exitCode = jobExitCode(job);
             return;
           }
         }
@@ -1541,7 +1554,7 @@ async function jobsCommand(action: string | undefined, jobId: string | undefined
   while (Date.now() < deadlineAt) {
     const job = await fetchJob();
     if (!job) return;
-    if (show(job)) { process.exitCode = job.status === "completed" ? 0 : 1; return; }
+    if (show(job)) { process.exitCode = jobExitCode(job); return; }
     if (Date.now() >= deadlineAt) break;
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
@@ -1778,6 +1791,8 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
         pagesProcessed: number;
         pagesSearchable?: number | null;
         pagesCountedAt?: string | null;
+        failedDocuments?: number;
+        outcome?: "succeeded" | "partial" | "failed" | null;
       };
     };
 
@@ -1796,6 +1811,8 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
       ...(typeof run.pagesSearchable === "number"
         ? [`Indexed:   [${renderBar(run.pagesSearchable, run.pagesTotal)}] ${run.pagesSearchable}/${run.pagesTotal}${run.pagesCountedAt === null ? " (still counting pages)" : ""}`]
         : []),
+      // A run with failed documents still completes: say how many failed (the rest are searchable).
+      ...((run.failedDocuments ?? 0) > 0 ? [`Failed:    ${run.failedDocuments} of ${run.totalDocuments} documents`] : []),
       `Elapsed:   ${elapsed}`
     ];
 
@@ -1813,10 +1830,14 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
     const done = run.status === "completed" || run.status === "failed" || stopped;
     if (done) {
       const succeeded = run.status === "completed" && !stopped;
-      console.log(`\n${succeeded ? "Done" : "Stopped"}: run ${run.controlState ?? run.status} in ${elapsed}`);
+      const partial = succeeded && (run.outcome === "partial" || (run.outcome === undefined && (run.failedDocuments ?? 0) > 0));
+      console.log(`\n${succeeded ? partial ? "Done with failures" : "Done" : "Stopped"}: run ${run.controlState ?? run.status} in ${elapsed}${partial ? `; ${run.failedDocuments ?? "some"} of ${run.totalDocuments} documents failed` : ""}`);
       if (!succeeded) {
         process.exitCode = 1;
         if (run.error) console.error(run.error);
+      } else if (partial) {
+        // Distinct from a failure (1): the run completed and the rest of its documents are searchable.
+        process.exitCode = 2;
       }
     }
 

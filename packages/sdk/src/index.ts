@@ -475,7 +475,30 @@ export type ProjectRun = JsonObject & {
   pagesCountedAt?: string | null;
   /** When a worker first picked the run up. Null while the run waits for a worker; absent when not reported. */
   workerStartedAt?: string | null;
+  /** Documents in the run. */
+  totalDocuments?: number;
+  /** Documents that failed and are not searchable. A run with some failed documents still has `status: "completed"`. */
+  failedDocuments?: number;
+  /**
+   * How the finished run went, beside `status`: `succeeded`, `partial` (completed, some documents failed) or `failed`.
+   * Null while the run is not finished, or when it was cancelled; absent from an older server (use `runOutcome`).
+   */
+  outcome?: RunOutcome | null;
 };
+
+/** How a finished run went: see `ProjectRun.outcome`. */
+export type RunOutcome = "succeeded" | "partial" | "failed";
+
+/**
+ * The run's outcome: the server's `outcome` when it reports one, else derived from `status` and `failedDocuments`
+ * (so it works against older servers too). Null while the run is not finished.
+ */
+export function runOutcome(run: Pick<ProjectRun, "status" | "failedDocuments" | "outcome">): RunOutcome | null {
+  if (run.outcome !== undefined) return run.outcome;
+  if (run.status === "failed") return "failed";
+  if (run.status !== "completed") return null;
+  return (run.failedDocuments ?? 0) > 0 ? "partial" : "succeeded";
+}
 
 export type DocumentRecord = JsonObject & {
   filename: string;
@@ -750,7 +773,11 @@ export type RejectedUpload = {
   filename: string;
   /** HTTP status the file would have produced on its own. */
   statusCode: 400 | 409 | 413 | 415 | 422;
-  code: "unsupported_type" | "file_too_large" | "unreadable_source" | "rejected";
+  /**
+   * `empty_file`: the file has no content (0 bytes, or only a byte-order mark). `unverified_size`: the server could
+   * not verify the stored file's size; upload it again. Newer servers may add codes: treat an unknown one as `rejected`.
+   */
+  code: "unsupported_type" | "remote_format_disabled" | "file_too_large" | "unreadable_source" | "empty_file" | "unverified_size" | "rejected";
   message: string;
 };
 
@@ -1268,6 +1295,11 @@ export type IngestReportOptions = RequestOptions & { runId?: string; documentIds
 export type WaitForRunOptions = RequestOptions & {
   /** Polling interval. Default: one second. */
   pollIntervalMs?: number;
+  /**
+   * Throw `DocSlurpRunError` when the run completes with failed documents (`runOutcome(run) === "partial"`), as for a
+   * failed run. Default false: such a run is returned (it completed; check `runOutcome(run)` or `run.failedDocuments`).
+   */
+  failOnDocumentFailures?: boolean;
 };
 
 export class DocSlurpRunError extends Error {
@@ -2247,7 +2279,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         if (run.status === "failed" || (!isSpendPaused(run) && ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? ""))) {
           throw new DocSlurpRunError("We couldn’t finish processing this run. Check its status and try again.", run);
         }
-        if (run.status === "completed") return run;
+        if (run.status === "completed") {
+          if (waitOptions.failOnDocumentFailures && runOutcome(run) === "partial") {
+            throw new DocSlurpRunError(`${run.failedDocuments ?? "Some"} of ${run.totalDocuments ?? "the"} documents in this run failed; the rest are searchable.`, run);
+          }
+          return run;
+        }
         await sleep(pollIntervalMs, bound.signal);
       }
     } catch (error) {
@@ -2575,7 +2612,22 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (paths.some(Boolean)) fields.paths = JSON.stringify(paths);
     if (!fields.canonicalId && canonicalIds.some(Boolean)) fields.canonicalIds = JSON.stringify(canonicalIds);
     for (const [name, value] of Object.entries(fields)) form.set(name, value);
-    return request<UploadResponse>(`${intakeBase(options)}/bulk`, { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
+    const send = () => request<UploadResponse>(`${intakeBase(options)}/bulk`, { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
+    if (!metadata.idempotencyKey) return send();
+    // With a key the request is safe to repeat: a coded 409 that says the first request with this key is still running
+    // (`idempotency_in_flight`) or the server is briefly busy (`upload_session_busy`) is waited out with backoff, honouring
+    // Retry-After, until the request timeout; the repeat replays the first request's response instead of uploading twice.
+    const giveUpAt = Date.now() + (options.timeoutMs ?? defaultTimeoutMs);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await send();
+      } catch (error) {
+        if (!(error instanceof DocSlurpApiError) || error.status !== 409 || (error.code !== "idempotency_in_flight" && error.code !== "upload_session_busy") || options.signal?.aborted) throw error;
+        const wait = Math.max(Math.min(2_000, 250 * 2 ** attempt), (error.retryAfterSeconds ?? 0) * 1000);
+        if (Date.now() + wait >= giveUpAt) throw error;
+        await sleep(wait, options.signal ?? new AbortController().signal);
+      }
+    }
   }
 
   /**
