@@ -328,10 +328,10 @@ describe("council #469 round 2", () => {
     expect((await charged.ledger.runMeasurements("run-1", null, [])).ocrFrames).toBe(0);
   });
 
-  it("the memory ledger leaves deduplicated copies out of the run-wide sum, as the SQL does", async () => {
+  it("the memory ledger counts a document marked as a content copy in the run-wide sum, as the SQL does", async () => {
     const copy = doc("c", { pageCount: 900, intakePageCount: 1, pageCountSource: "counted", dedupedFromDocumentId: "orig" } as Partial<Document>);
     const { ledger } = basis([copy]);
-    expect(await ledger.runMeasurements("run-1", null, [])).toEqual({ fastPages: 0, ocrFrames: 0, documentChargedPages: 0 });
+    expect(await ledger.runMeasurements("run-1", null, [])).toEqual({ fastPages: 899, ocrFrames: 0, documentChargedPages: 0 });
   });
 
   it("an Office document's own pages count from its durable intake, never its raised count", async () => {

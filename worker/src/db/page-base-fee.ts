@@ -259,7 +259,7 @@ export function fastPerDocumentConfigured(env: NodeJS.ProcessEnv = process.env):
 /**
  * Pin the run's Fast rule unless it has one. Called by startRun before any other billing pin is written. "1" (per document)
  * only on the run's first start: no page billing pin yet, no OCR class decision, no completion report (`pageCharges`) and no
- * document it completed itself (a copy's seeded checkpoints do not count), so a run an earlier release started, billed or
+ * document it completed itself, so a run an earlier release started, billed or
  * completed (and that is now retried) keeps the run-wide rule and is never billed under both. Then only when the operator has
  * it on and every live worker advertises the capability; a fleet check that fails reads as no.
  */

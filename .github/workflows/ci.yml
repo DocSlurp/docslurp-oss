@@ -186,7 +186,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:17@sha256:ae69c452f483507a6b99fb654cf93aad7fe156ffd2c56247707eef4e36d3c12b
+        image: postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
         env:
           POSTGRES_PASSWORD: ci
           POSTGRES_DB: docslurp_native_ci
@@ -209,7 +209,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm db:migrate
       - name: Native Postgres tests
-        run: pnpm --filter @docslurp/worker exec vitest run .native.test.ts
+        # A dropped env var would make every native test skip and the job pass: require passed tests and no skips.
+        run: |
+          pnpm --filter @docslurp/worker exec vitest run .native.test.ts --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/native.json"
+          node -e 'const r = require(process.argv[1]); if (!(r.numPassedTests > 0) || r.numPendingTests > 0) { console.error(`native tests: ${r.numPassedTests} passed, ${r.numPendingTests} skipped`); process.exit(1) }' "$RUNNER_TEMP/native.json"
 
   # The real OCR CLI (worker/scripts/docslurp_ocr.py) with its pinned models, alone and under the real parser sandbox.
   # Models are fetched and sha256-verified at install (scripts/install-ocr-runtime.sh); the CLI loads them only by path
