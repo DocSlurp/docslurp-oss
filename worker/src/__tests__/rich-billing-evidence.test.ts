@@ -113,12 +113,16 @@ describe("Rich pages bill from recorded vision reads only", () => {
       const charges = await recordPageBaseFee(sql(), state);
       expect(charges).toMatchObject({ fastPages: 3, richPages: 2 });
       expect(await chargedPages(runId, BILLABLE_UNIT_METRICS.richPage)).toBe(2);
-      // A retried completion, and a retried read checkpoint, charge nothing twice.
-      routeAndRead(state, `${runId}-scan`, [1, 2].map((pageNumber) => ({
+      // A retried read checkpoint and a retried completion charge nothing twice. The retry is a new worker's state, whose
+      // ledger has never seen the first charges: the database's conflict handling on the deterministic ids is what holds.
+      const retry = WorkflowState.create(await store.loadRun(runId), []);
+      pinRunPageBillingRules(retry);
+      routeAndRead(retry, `${runId}-scan`, [1, 2].map((pageNumber) => ({
         text: claim, evidence: { pageNumber, wordCount: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1 },
       })), routingV2);
-      await persist(state);
-      await recordPageBaseFee(sql(), state);
+      expect(retry.usageLedger.snapshot().filter((event) => event.id?.startsWith("rich:"))).toHaveLength(2);
+      await persist(retry);
+      await recordPageBaseFee(sql(), retry);
       expect(await chargedPages(runId, BILLABLE_UNIT_METRICS.richPage)).toBe(2);
       expect(await chargedPages(runId, BILLABLE_UNIT_METRICS.fastPage)).toBe(3);
     });
