@@ -482,6 +482,16 @@ a while on a large session), confirm waits up to 10 seconds and then answers
 `409` `upload_session_busy` with `Retry-After`. Repeat the same request; it
 never starts a second run.
 
+A file that fails its storage or policy check does not fail the session: it is
+reported in the confirm response's `rejected[]` and the other files are
+ingested and billed. A session where no file completed answers `409`
+`upload_session_no_completed_files` and starts nothing. A confirm sent while a
+file is still uploading answers `409` `upload_files_incomplete`, naming each
+such file in `issues`, so a file is never dropped silently; send
+`?skipIncomplete=true` (or `{ "skipIncomplete": true }`) to go ahead with the
+completed files, which closes the others and reports them in `rejected[]`. A
+session that expires with some files completed is ingested with those files.
+
 ### Matching files, partial acceptance and idempotency
 
 `POST /v1/uploads/direct/sessions` takes `files[]`, each with an optional
@@ -895,6 +905,8 @@ A server key with the `ingest` scope can keep the documents it uploads current w
 | Reprocess, retag or delete many documents (at most 500 per request; the SDK splits deletes and tag changes) | `POST /v1/documents/bulk` with `{ action, documentIds, tags? }` | `bulkDocuments` |
 | Act on an ingest report recommendation | `POST /v1/projects/:project/ingest-report/reprocess` (`ingest`) or `…/apply` (`projects:manage`) | `reprocessIngestRecommendation` / `applyIngestRecommendation` |
 
+- Reprocess (`POST /v1/runs/:runId/reprocess` and the bulk `reprocess` action) accepts an `Idempotency-Key` header (1-255 printable ASCII characters). A repeat with the same key and body returns the run the first request made (`201` with `Idempotency-Replayed: true`) and charges nothing again, even when the two requests race; the same key with a different body is `409` `idempotency_conflict`. Keys are scoped to your organization, user, API key and project. Without a key every request creates a run, so send one when you may retry.
+- A source document with no stored size and no counted page count is left out of a reprocess and reported (`skipped` and `warnings` on a run reprocess, `failed` on bulk, code `reprocess_document_unmeasurable`); the rest run. When none remains the request is `422` `reprocess_no_measurable_documents`.
 - Browser keys never get these, whatever their scopes.
 - A key never exceeds its user's role: the user must be able to edit the project. Keys restricted to specific projects reach only documents and runs in those projects. A request naming anything outside them answers 404 before any change, including bulk requests where only one document is out of scope.
 - The bulk `export-artifacts` action is a read and needs `artifacts` instead.
