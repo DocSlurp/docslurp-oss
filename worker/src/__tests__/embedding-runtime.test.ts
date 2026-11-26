@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fromEnv } from "../config.js";
 import { createConcurrencyLimiter } from "../lib/bounded-concurrency.js";
@@ -61,6 +61,13 @@ vi.mock("@ai-sdk/openai", () => ({
 const originalDtype = process.env.DOCSLURP_LOCAL_TRANSFORMERSJS_DTYPE;
 
 describe("embedTextChunks", () => {
+  beforeEach(() => {
+    // The OpenAI key is passed to the SDK explicitly (never read from the environment by the SDK); a test-only value.
+    vi.stubEnv("OPENAI_API_KEY", "openai-test-only");
+    // The vLLM fixtures below listen on a non-standard port, so the operator allows it.
+    vi.stubEnv("DOCSLURP_TENANT_LOCAL_MODEL_PORTS", "11434,8000,1234,18100");
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
     transformersMock.pipeline.mockClear();

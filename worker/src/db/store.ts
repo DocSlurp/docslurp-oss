@@ -16,6 +16,7 @@ import {
   lexicalColumnProbe,
   ocrPageClassSettlementProbe,
   fastPerDocumentSchemaProbe,
+  piiFindingsTableProbe,
   resolveWorkerCapabilities,
   WorkerCapabilityRegistry,
   type WorkerCapabilityRegistryOptions,
@@ -82,6 +83,7 @@ export class Store extends PostgresRunLedger {
     const lexicalColumnPresent = lexicalColumnProbe(this.sql);
     const ocrSettlement = ocrPageClassSettlementProbe(this.sql);
     const fastPerDocumentSchema = fastPerDocumentSchemaProbe(this.sql);
+    const piiFindingsTable = piiFindingsTableProbe(this.sql);
     return new WorkerCapabilityRegistry({
       ...options,
       sql: this.sql,
@@ -90,6 +92,7 @@ export class Store extends PostgresRunLedger {
         ocrPageClassSettlement: ocrSettlement,
         fastPerDocumentSchema,
         lexicalColumnPresent,
+        piiFindingsTable,
         firstPassBatch: () => sandboxedPdfBatchProvider() !== null,
       }),
       config: () => advertisedWorkerConfig(),

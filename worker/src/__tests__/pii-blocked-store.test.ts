@@ -61,8 +61,11 @@ describe("PII-blocked documents in the run lifecycle", () => {
     await sink.recordDetections("d-block", "run-1", [match], false);
     await sink.recordDetections("d-block", "run-1", [match], false);
     await sink.setDocumentOutcome("d-block", {
-      runId: "run-1", action: "block_indexing", matchCount: 1, patternTypes: ["ssn"],
+      runId: "run-1", scope: "document", withheldPages: [], withheldSectionCount: 0, pageCount: 2,
+      action: "block_indexing", matchCount: 1, patternTypes: ["ssn"],
       blocked: true, reviewRequired: false, redacted: false, reason: "PII policy blocked indexing: 1 match (ssn)",
+      withheldPageTypes: {},
+      findings: [],
       withheldArtifactUris: ["s3://b/k1"],
     });
     await sink.close();
@@ -89,10 +92,12 @@ describe("PII-blocked documents in the run lifecycle", () => {
     );
     expect(documents.rows.map((row) => [row.id, row.status])).toEqual([["d-block", "pii_blocked"], ["d-ok", "completed"]]);
     expect(documents.rows[0]?.metadata.pii).toMatchObject({
-      blocked: true, action: "block_indexing", matchCount: 1, patternTypes: ["ssn"],
+      blocked: true, action: "block_indexing", patternTypes: ["ssn"],
       reason: "PII policy blocked indexing: 1 match (ssn)",
       withheldArtifactUris: ["s3://b/k1"],
     });
+    // Categories only: no count of matches reaches tenant-visible metadata.
+    expect(documents.rows[0]?.metadata.pii).not.toHaveProperty("matchCount");
     const run = await db.query<{ status: string }>(`select status from project_runs where id = 'run-1'`);
     expect(run.rows[0]?.status).toBe("completed");
     const detections = await db.query<{ pattern_type: string; page_number: number; matched_prefix: string }>(
@@ -131,8 +136,9 @@ describe("PII-blocked documents in the run lifecycle", () => {
     });
     const sink = createPostgresPiiDetectionSink(url);
     await sink.setDocumentOutcome("d-rescan", {
-      runId: "run-1", action: "block_indexing", matchCount: 0, patternTypes: [],
-      blocked: false, reviewRequired: false, redacted: false, reason: null, withheldArtifactUris: [],
+      runId: "run-1", scope: "none", withheldPages: [], withheldSectionCount: 0, pageCount: 2,
+      action: "block_indexing", matchCount: 0, patternTypes: [],
+      blocked: false, reviewRequired: false, redacted: false, withheldPageTypes: {}, findings: [], reason: null, withheldArtifactUris: [],
     });
     await sink.close();
 
@@ -140,6 +146,82 @@ describe("PII-blocked documents in the run lifecycle", () => {
       `select status, metadata from documents where id = 'd-rescan'`,
     );
     expect(row.rows[0]).toEqual({ status: "processing", metadata: { keep: 1 } });
+  });
+
+  it("page-scoped withholding: a blocked document rescanned with one PII page becomes processable, its pages recorded", async () => {
+    await db.exec(`
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, metadata)
+        values ('d-pages', 'o1', 'u1', 'w', 'run-1', 'p.pdf', 'application/pdf', 'k5', 'pii_blocked', 5, '{"pii": {"blocked": true}}');
+    `);
+    await withStore(async (store) => {
+      const state = await loadRunState(store, "run-1");
+      await store.startDocumentStage(state, "d-pages", "pii-detect");
+    });
+    const sink = createPostgresPiiDetectionSink(url);
+    await sink.setDocumentOutcome("d-pages", {
+      runId: "run-1", scope: "pages", withheldPages: [3], withheldSectionCount: 0, pageCount: 5,
+      action: "block_indexing", matchCount: 1, patternTypes: ["ssn"],
+      withheldPageTypes: { "3": ["ssn"] },
+      findings: [{ pageNumber: 3, patternType: "ssn", detector: "rule", validation: "structure", confidence: null }],
+      blocked: false, reviewRequired: false, redacted: false, reason: "PII policy withheld 1 page", withheldArtifactUris: ["s3://b/page-3.png"],
+    });
+    await sink.close();
+
+    const row = await db.query<{ status: string; metadata: { pii: Record<string, unknown> } }>(
+      `select status, metadata from documents where id = 'd-pages'`,
+    );
+    expect(row.rows[0]?.status).toBe("processing");
+    expect(row.rows[0]?.metadata.pii).toMatchObject({
+      scope: "pages", withheldPages: [3], withheldPageCount: 1, pageCount: 5, blocked: false, withheldArtifactUris: ["s3://b/page-3.png"],
+      withheldPageTypes: { "3": ["ssn"] },
+    });
+    // The confidence (none: a rule-based detector, recorded as its basis) is in the operator-only table, never metadata.
+    expect(JSON.stringify(row.rows[0]?.metadata)).not.toMatch(/confidence|validation|structure/);
+    const findings = await db.query(`select org_id, project_id, run_id, page_number, pattern_type, detector, validation, confidence from pii_page_findings where document_id = 'd-pages'`);
+    expect(findings.rows).toEqual([{ org_id: "o1", project_id: "w", run_id: "run-1", page_number: 3, pattern_type: "ssn", detector: "rule", validation: "structure", confidence: null }]);
+
+    // A clean rescan clears the findings with the outcome.
+    const rescan = createPostgresPiiDetectionSink(url);
+    await rescan.setDocumentOutcome("d-pages", {
+      runId: "run-1", scope: "none", withheldPages: [], withheldSectionCount: 0, pageCount: 5,
+      action: "block_indexing", matchCount: 0, patternTypes: [], withheldPageTypes: {}, findings: [],
+      blocked: false, reviewRequired: false, redacted: false, reason: null, withheldArtifactUris: [],
+    });
+    await rescan.close();
+    expect((await db.query(`select 1 from pii_page_findings where document_id = 'd-pages'`)).rows).toEqual([]);
+  });
+
+  it("page-scoped outcome: removes earlier rough-text rows and kept reads of the withheld pages, and withdraws an existing summary tree", async () => {
+    await db.exec(`
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
+        values ('d-rows', 'o1', 'u1', 'w', 'run-1', 'r.pdf', 'application/pdf', 'k-rows', 'processing', 3);
+      insert into document_page_states (document_id, page_number, state, read_text) values
+        ('d-rows', 1, 'parsed', 'page one read'), ('d-rows', 2, 'parsed', 'page two read'), ('d-rows', 3, 'unseen', null);
+      insert into document_pages (id, document_id, run_id, user_id, page_number, text, token_estimate) values
+        ('d-rows-page-0001', 'd-rows', 'run-1', 'u1', 1, 'page one text', 3), ('d-rows-page-0002', 'd-rows', 'run-1', 'u1', 2, 'page two Jane Doe', 4);
+      insert into document_summary_trees (document_id, org_id, project_id, run_id, status, embedding_model, dimension, node_count)
+        values ('d-rows', 'o1', 'w', 'run-1', 'ready', 'm', 3, 1);
+    `);
+    const sink = createPostgresPiiDetectionSink(url);
+    await sink.setDocumentOutcome("d-rows", {
+      runId: "run-1", scope: "pages", withheldPages: [2], withheldSectionCount: 0, pageCount: 3,
+      action: "block_indexing", matchCount: 1, patternTypes: ["ssn"],
+      blocked: false, reviewRequired: false, redacted: false, withheldPageTypes: {}, findings: [], reason: "PII policy withheld 1 page", withheldArtifactUris: [],
+    });
+    await sink.close();
+
+    const pages = await db.query<{ page_number: number }>(`select page_number from document_pages where document_id = 'd-rows' order by page_number`);
+    expect(pages.rows.map((row) => row.page_number)).toEqual([1]);
+    const states = await db.query<{ page_number: number; state: string; read_text: string | null }>(
+      `select page_number, state, read_text from document_page_states where document_id = 'd-rows' order by page_number`,
+    );
+    expect(states.rows).toEqual([
+      { page_number: 1, state: "parsed", read_text: "page one read" },
+      { page_number: 2, state: "blocked-pii", read_text: null },
+      { page_number: 3, state: "unseen", read_text: null },
+    ]);
+    const tree = await db.query<{ status: string; error: string | null }>(`select status, error from document_summary_trees where document_id = 'd-rows'`);
+    expect(tree.rows[0]).toMatchObject({ status: "partial", error: "pii-withheld" });
   });
 
   it("a PII rescan withdraws early keyword search until embed rewrites the chunks", async () => {

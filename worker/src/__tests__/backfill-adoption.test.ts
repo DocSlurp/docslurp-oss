@@ -141,6 +141,57 @@ describe("backfill completion when the source changed mid-run", () => {
     expect(tmp!.canonical_id).toBeNull();
   });
 
+  it("never adopts a temporary version whose pages the PII policy withheld: its vectors stay off the source", async () => {
+    await seedPair("piiw");
+    await db.exec(`update documents set metadata = '{"pii": {"scope": "pages", "withheldPages": [2]}}' where id = 'tmp-piiw'`);
+
+    await completeRun("bf-piiw");
+
+    expect(await rows(`select 1 from document_page_vectors where document_id = 'src-piiw'`)).toHaveLength(0);
+    expect((await rows<{ indexing_mode: string }>(`select indexing_mode from documents where id = 'src-piiw'`))[0]!.indexing_mode).toBe("map");
+    const [tmp] = await rows<{ superseded_at: string | null; canonical_id: string | null }>(`select superseded_at, canonical_id from documents where id = 'tmp-piiw'`);
+    expect(tmp!.superseded_at).not.toBeNull();
+    expect(tmp!.canonical_id).toBeNull();
+  });
+
+  it("a source with no outcome is adopted with no outcome: the temp's scan progress is not carried", async () => {
+    await seedPair("pscan");
+    await db.exec(`update documents set metadata = '{"pii": {"scope": "none", "action": "block_indexing", "pageCount": 3, "scanPending": true, "scannedPages": [1], "withheldArtifactUris": []}}' where id = 'tmp-pscan'`);
+    await completeRun("bf-pscan");
+    expect(await rows(`select 1 from document_page_vectors where document_id = 'src-pscan'`)).not.toHaveLength(0);
+    const [src] = await rows<{ pii: unknown }>(`select metadata->'pii' as pii from documents where id = 'src-pscan'`);
+    expect(src!.pii).toBeNull();
+  });
+
+  it("a source that tracks a scan gains the temp's scanned pages (union); nothing else of its outcome changes", async () => {
+    await seedPair("punion");
+    await db.exec(`update documents set metadata = '{"pii": {"scope": "pages", "withheldPages": [3], "withheldPageCount": 1, "pageCount": 5, "scanPending": true, "scannedPages": [2, 3]}}' where id = 'src-punion';
+      update documents set metadata = '{"pii": {"scope": "none", "pageCount": 5, "scanPending": true, "scannedPages": [1, 2]}}' where id = 'tmp-punion'`);
+    await completeRun("bf-punion");
+    const [src] = await rows<{ pii: Record<string, unknown> }>(`select metadata->'pii' as pii from documents where id = 'src-punion'`);
+    expect(src!.pii).toEqual({ scope: "pages", withheldPages: [3], withheldPageCount: 1, pageCount: 5, scanPending: true, scannedPages: [1, 2, 3] });
+  });
+
+  it("scan progress is not carried when the temp ran under a different PII policy than the source", async () => {
+    await seedPair("ppol");
+    await db.exec(`update project_runs set pipeline = '{"indexingMode":"visual","stageSubset":["page-embed"],"piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing"}}' where id = 'bf-ppol';
+      update documents set metadata = '{"pii": {"scope": "none", "pageCount": 5, "scanPending": true, "scannedPages": [2]}}' where id = 'src-ppol';
+      update documents set metadata = '{"pii": {"scope": "none", "pageCount": 5, "scanPending": true, "scannedPages": [1, 2, 3, 4, 5, 9]}}' where id = 'tmp-ppol'`);
+    await completeRun("bf-ppol");
+    const [src] = await rows<{ pii: Record<string, unknown> }>(`select metadata->'pii' as pii from documents where id = 'src-ppol'`);
+    expect(src!.pii).toEqual({ scope: "none", pageCount: 5, scanPending: true, scannedPages: [2] });
+  });
+
+  it("a source with withheld pages and no scan tracking keeps its outcome exactly", async () => {
+    await seedPair("pkeep");
+    const outcome = { scope: "pages", withheldPages: [2], withheldPageCount: 1, redacted: true, redactedPages: [1] };
+    await db.exec(`update documents set metadata = '${JSON.stringify({ pii: outcome })}' where id = 'src-pkeep';
+      update documents set metadata = '{"pii": {"scope": "none", "scanPending": true, "scannedPages": [1, 3]}}' where id = 'tmp-pkeep'`);
+    await completeRun("bf-pkeep");
+    const [src] = await rows<{ pii: Record<string, unknown> }>(`select metadata->'pii' as pii from documents where id = 'src-pkeep'`);
+    expect(src!.pii).toEqual(outcome);
+  });
+
   it("skips a purged source", async () => {
     await seedPair("pur");
     await db.exec(`update documents set purged_at = now() where id = 'src-pur'`);
@@ -199,5 +250,13 @@ describe("backfill adoption guards", () => {
     expect(pages.map((p) => p.page_number)).toEqual([1]);
     const states = await rows<{ page_number: number; state: string }>(`select page_number, state from document_page_states where document_id = 'src-pii' order by page_number`);
     expect(states.map((p) => p.state)).toEqual(["indexed", "blocked-pii", "unseen"]);
+  });
+});
+
+describe("carriedScan", () => {
+  it("ignores scanned pages outside 1..pageCount when deciding completion", async () => {
+    const { carriedScan } = await import("../deferred/backfill-adoption.js");
+    expect(carriedScan({ scope: "none", pageCount: 5, scanPending: true, scannedPages: [1, 2] }, { scannedPages: [3, 4, 9, 10] }))
+      .toEqual({ scope: "none", pageCount: 5, scanPending: true, scannedPages: [1, 2, 3, 4] });
   });
 });
