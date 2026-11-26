@@ -262,7 +262,9 @@ export class SessionStaging {
   }
 }
 
-/** An absolute path with no `.`/`..` or empty segment: what a directory listing of our own roots can honestly contain. */
+/** An absolute path with no `.`/`..`, empty or over-long segment and no NUL: what a directory listing of our own roots can honestly contain. */
 export function isPlainChildPath(p: string): boolean {
-  return path.isAbsolute(p) && path.normalize(p) === p && !p.endsWith(path.sep);
+  if (!path.isAbsolute(p) || path.normalize(p) !== p || p.endsWith(path.sep) || p.includes("\0")) return false;
+  // A name the host could not create is the VM's bad output, refused here rather than as a host filesystem error.
+  return p.split(path.sep).every((segment) => Buffer.byteLength(segment) <= 255);
 }
