@@ -29,16 +29,28 @@ import { CHART_INLINE_SLOT, chartExportInlineEnabled, chartInlineSlotValue, inli
 import { INLINE_COMMAND_BUDGET_CAPABILITY } from "../chart-export/inline-guest.js";
 import { chartExportVmUsageEvent, deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import { applyParseSource, clearParseSource, originalSourceForQuarantine } from "../lib/parse-source.js";
+import { detectDocumentFormat } from "../lib/document-format.js";
+import { hostCountsTextPages, hostTextPages, needsTextPageCount, pagesFromTextInspection, recordTextPages, TextEvidenceCounter, textEvidenceWanted, textPagesRequestFor } from "../lib/text-page-count.js";
 
-/** Keep the header and enough overlap for a slash, seven escaped name bytes and a delimiter. */
-export async function quarantineSourceEvidence(file: string) {
+/**
+ * What the host takes from the upload while it hashes it, all by fixed per-byte comparisons (never a decoder or parser):
+ * the sha256, the first 1 KiB (magic numbers), whether a PDF names /Encrypt, and the text byte facts that bound the
+ * guest's text page count (lib/text-page-count.ts HostTextEvidence). Keeps the header and enough overlap for a slash,
+ * seven escaped name bytes and a delimiter.
+ */
+export async function quarantineSourceEvidence(file: string, options: { countText?: (header: Uint8Array) => boolean } = {}) {
   const hash = createHash("sha256");
+  // The text facts are counted only when `countText` says so from the first chunk's header (a provisional text-rule format,
+  // or a header no binary magic number claims): a PDF or media file pays only for its hash.
+  let text: TextEvidenceCounter | null | undefined;
   let bytes = Buffer.alloc(0);
   let tail: Buffer = Buffer.alloc(0);
   let encryptName = false;
   for await (const chunk of createReadStream(file)) {
     const data = chunk as Buffer;
     hash.update(data);
+    if (text === undefined) text = !options.countText || options.countText(data.subarray(0, 1024)) ? new TextEvidenceCounter() : null;
+    text?.update(data);
     if (bytes.length < 1024) bytes = Buffer.concat([bytes, data.subarray(0, 1024 - bytes.length)]);
     if (!encryptName && bytes.subarray(0, 5).toString("latin1") === "%PDF-") {
       const window = Buffer.concat([tail, data]);
@@ -47,7 +59,8 @@ export async function quarantineSourceEvidence(file: string) {
       tail = Buffer.from(window.subarray(-32));
     }
   }
-  return { bytes, scannedSha256: hash.digest("hex"), encryptName: encryptName || containsPdfEncryptName(tail) };
+  // An empty file has no chunk: its (empty) text facts are still counted.
+  return { bytes, scannedSha256: hash.digest("hex"), encryptName: encryptName || containsPdfEncryptName(tail), text: text === null ? null : (text ?? new TextEvidenceCounter()).result() };
 }
 
 export class QuarantineStage implements Stage {
@@ -102,7 +115,10 @@ export class QuarantineStage implements Stage {
 
             const copyDir = await mkdtemp(path.join(tmpdir(), "docslurp-quarantine-copy-"));
             try {
-              const evidence = vmOnlyParsing() ? await quarantineSourceEvidence(tempFile) : undefined;
+              const provisional = detectDocumentFormat(document).format;
+              const evidence = vmOnlyParsing()
+                ? await quarantineSourceEvidence(tempFile, { countText: (header) => textEvidenceWanted(header, document.filename, provisional) })
+                : undefined;
               const bytes = evidence?.bytes ?? await readFile(tempFile);
               // The scanned bytes must be the bytes the server hashed. Their hash is what the decision binds parsers of the
               // upload to (council R8-L1), so a swap after this scan is refused even for a row without a server hash.
@@ -117,7 +133,12 @@ export class QuarantineStage implements Stage {
               const wanted = inlineChartRequest(state.run.pipeline, document.mimeType, process.env);
               const inlineRefusal = wanted ? await inlineChartAdmission({ pipeline: state.run.pipeline, documentId: document.id, runId: state.run.id, orgId: state.run.orgId ?? null, budgets: state.store?.budgets }) : null;
               const charts = inlineRefusal ? null : wanted;
-              const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(charts ? { charts } : {}), ...(signal ? { signal } : {}) });
+              // The text page count rides on the same inspection (DocSlurp/app issue 599): no second command, download or staging.
+              // Under the VM-only floor the guest is asked only when this host cannot count the file itself (pure-ASCII plain
+              // text it counts from its own byte facts) and has those facts to check the answer against.
+              const textRequest = evidence && (evidence.text === null || hostCountsTextPages(evidence.text, provisional))
+                ? null : textPagesRequestFor(document, provisional);
+              const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(charts ? { charts } : {}), ...(signal ? { signal } : {}), ...(textRequest ? { text: textRequest, ...(evidence?.text ? { textEvidence: evidence.text } : {}) } : {}) });
               const verified = verifyIntakeFileFacts(document, inspection);
               const artifact = await scanDocumentForQuarantine({
                 inspection,
@@ -196,9 +217,27 @@ export class QuarantineStage implements Stage {
               if (telemetry) console.warn(telemetry);
               assertAcceptedQuarantine(artifact, artifactUri);
 
+              // A text file intake only estimated (from its size): record the inspection's count now, on the verified type,
+              // before any later stage uses it or anything bills. Persisted only: format-detect makes the spend decision (pauses an
+              // unfunded run) on every attempt, so a resume never repeats this download, inspection and scan.
+              const { format } = detectDocumentFormat(document);
+              let textPages: { pages: number; estimate: number } | null = null;
+              if (needsTextPageCount(document, format)) {
+                if (hostCountsTextPages(evidence?.text, format)) {
+                  // Pure-ASCII plain text: the host's own count by the shared rule; no guest answer is used, at any size.
+                  textPages = await recordTextPages(state, document, hostTextPages(evidence!.text!), evidence!.text!.bytes, "quarantine");
+                } else if (textRequest) {
+                  // An inspection without the answer (an image older than this worker) is retried, never decoded on the host.
+                  const pages = pagesFromTextInspection(inspection.text, format);
+                  // Not measured here (HTML only recognised after this inspection, a file over the measuring limit):
+                  // format-detect measures or refuses it.
+                  if (pages !== null) textPages = await recordTextPages(state, document, pages, inspection.text!.bytes, "quarantine");
+                }
+              }
+
               return {
                 artifactUri,
-                stats: buildQuarantineStats(artifact)
+                stats: { ...buildQuarantineStats(artifact), ...(textPages ? { textPages: textPages.pages, textPagesEstimate: textPages.estimate } : {}) }
               };
             } finally {
               await cleanupTempFile(tempFile);

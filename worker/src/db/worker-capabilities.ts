@@ -44,6 +44,9 @@ export async function resolveWorkerCapabilities(probes: WorkerCapabilityProbes):
     "workflow.quarantine-document-threshold",
     // This build resolves DOCSLURP_PROFILE and enforces every DOCSLURP_DISABLE token at execution (release R0).
     "extraction.config-v1",
+    // Quarantine and format-detect measure every text document (in the parser VM under the VM-only floor, where startup
+    // refuses an image without inspection-text-pages), so intake need not decode text on the API host (app issue 599).
+    "inspection.text-pages",
   ];
   const [leases, lexical, ocrSettlement, piiFindings] = await Promise.all([
     probes.creditLeasesActive().catch(() => false),

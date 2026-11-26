@@ -1,8 +1,12 @@
-import { assertServiceProfileRuntime } from "../lib/vm-only-parsing.js";
+import { assertServiceProfileRuntime, vmOnlyParsing } from "../lib/vm-only-parsing.js";
+import { INSPECTION_TEXT_PAGES_CAPABILITY } from "../lib/text-page-count.js";
 import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
 import { assertSandboxPolicy } from "./policy.js";
 import { loadSandboxProvider, resolveSandboxProviderId } from "./registry.js";
 import { type ParserSandboxProvider, type SandboxIsolation } from "./types.js";
+
+/** Guest capabilities a remote parser image must report for this worker to start under the VM-only floor. */
+export const REQUIRED_PARSER_CAPABILITIES: readonly string[] = [INSPECTION_TEXT_PAGES_CAPABILITY];
 
 export interface InitializedParserSandbox {
   provider: ParserSandboxProvider;
@@ -32,6 +36,13 @@ export async function initializeParserSandbox(
   if (!probe.ok) throw new Error(`parser isolation unavailable: ${probe.detail}`);
 
   const { warnings } = assertSandboxPolicy({ providerId: provider.id, isolation: probe.isolation, env });
+  // Capabilities every document needs (DocSlurp/app issue 599): without the inspection's text answer every text upload
+  // would stall, so under the VM-only floor a remote image without it is a startup refusal and this worker never takes
+  // traffic. A local sandbox runs this checkout's own guest scripts (parserImageCapability).
+  const missing = REQUIRED_PARSER_CAPABILITIES.filter((capability) => probe.isolation.location === "remote" && !(probe.capabilities ?? []).includes(capability));
+  if (vmOnlyParsing(env) && missing.length) {
+    throw new Error(`parser VM image lacks required capabilities: ${missing.join(", ")} (deploy the parser image built from this core before the worker)`);
+  }
   for (const warning of warnings) console.warn(warning);
   const { isolation } = probe;
   console.log(

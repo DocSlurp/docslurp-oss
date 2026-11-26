@@ -124,10 +124,12 @@ export type PageCountSource = "counted" | "assumed";
 
 /**
  * The evidence behind intake's page count (server source-metadata.ts), never the file's name or declared type:
- * - `text-rule`: the text rule over the whole decoded text file.
+ * - `text-rule`: the text rule over the whole decoded text file. Intake no longer decodes text (it estimates from size); the
+ *   value stays for counts recorded before, and is still `counted`.
  * - `image-header`: the bytes' magic is a single-frame raster format (one page by definition).
- * - `text-sample`: the text rule over a sample, scaled by size (an estimate).
- * - `size-estimate`: pages from the size alone (a PDF: the API never parses one).
+ * - `text-sample`: the text rule over a sample, scaled by size (an estimate). Likewise no longer produced by intake.
+ * - `size-estimate`: pages from the size alone: a PDF (the API never parses one) or a text file (the API never decodes one;
+ *   the worker counts it in its parser VM before anything bills).
  * - `none`: no count at all (a format only the worker counts, a multi-frame image, an empty or unrecognised file).
  */
 export type IntakePageEvidence = "text-rule" | "image-header" | "text-sample" | "size-estimate" | "none";

@@ -19,7 +19,7 @@ import {
 const SOURCE_BYTES = "pdf bytes for page size reuse";
 const SOURCE_SHA = createHash("sha256").update(SOURCE_BYTES).digest("hex");
 /** pdfinfo's A4 (two standard pages of area, so the rendered area is recorded for billing). */
-const A4 = { widthPt: 595.276, heightPt: 841.89 };
+const A4 = { widthPt: 595.276, heightPt: 841.89, rotate: 0 as const };
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -80,12 +80,12 @@ function worker(storage: ReturnType<typeof sharedStorage>, options: { reuse?: bo
         pdfinfo.push([first, last]);
         if (options.failWideProbe && last - first > 1) throw new Error("wide probe reached its deadline");
         const size = options.size ?? A4;
-        const lines = Array.from({ length: last - first + 1 }, (_, i) => `Page ${String(first + i).padStart(4)} size: ${size.widthPt} x ${size.heightPt} pts`);
+        const lines = Array.from({ length: last - first + 1 }, (_, i) => [`Page ${String(first + i).padStart(4)} size: ${size.widthPt} x ${size.heightPt} pts`, `Page ${String(first + i).padStart(4)} rot:  0`]).flat();
         return { stdout: [`Pages:           ${last}`, ...lines].join("\n"), stderr: "" };
       }
       const [prefix, first, last] = plan.args;
       const header = Buffer.alloc(24);
-      header.writeUInt32BE(0x89504e47);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header);
       header.write("IHDR", 12);
       header.writeUInt32BE(100, 16);
       header.writeUInt32BE(100, 20);
@@ -216,7 +216,7 @@ describe("raster page size reuse: stored sizes that fail closed to pdfinfo", () 
   const binding = pageSizeBinding(document, "run-1", SOURCE_SHA)!;
   const key = pageSizesArtifactKey(binding);
   /** A different measurement makes a mistaken reuse visible in billing. */
-  const small = new Map(Array.from({ length: 30 }, (_, i) => [i + 1, { widthPt: 300, heightPt: 400 }] as const));
+  const small = new Map(Array.from({ length: 30 }, (_, i) => [i + 1, { widthPt: 300, heightPt: 400, rotate: 0 as const }] as const));
 
   it.each([
     ["another document's sizes copied over", () => serializePageSizes({ ...binding, documentId: "doc-2" }, small)],
@@ -236,7 +236,17 @@ describe("raster page size reuse: stored sizes that fail closed to pdfinfo", () 
     expect(rows.map((row) => row.area)).toEqual([2, 2]);
     // The refused artifact is replaced by this run's own measurement.
     const stored = JSON.parse(storage.objects.get(key)!.toString("utf8")) as { pages: number[][] };
-    expect(stored.pages[0]).toEqual([1, A4.widthPt, A4.heightPt]);
+    expect(stored.pages[0]).toEqual([1, A4.widthPt, A4.heightPt, 0]);
+    await w.sources.clear();
+  });
+
+  it("treats a stored size without its rotation (written before rotations were kept) as missing, so pdfinfo runs again", async () => {
+    const storage = sharedStorage();
+    storage.objects.set(key, serializePageSizes(binding, new Map([[1, { widthPt: A4.widthPt, heightPt: A4.heightPt }]])));
+    const w = worker(storage);
+    const [page] = await w.cache.renderSelectedPages({ document, runId: "run-1", pageNumbers: [1] });
+    expect(w.pdfinfo).toEqual([[1, 30]]);
+    expect(page!.widthPx).not.toBeNull();
     await w.sources.clear();
   });
 

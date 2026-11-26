@@ -62,7 +62,7 @@ export function createStages(args: {
   const rasterCache = new PdfRasterCache(args.runner, args.storage, sourceCache);
   const stages: Record<PipelineRunStage, () => Stage> = {
     quarantine: () => new QuarantineStage(args.runner, args.storage, args.config),
-    "format-detect": () => new FormatDetectStage(args.storage, args.runner),
+    "format-detect": () => new FormatDetectStage(args.storage, args.runner, args.config),
     "to-canonical": () => new ToCanonicalStage(args.runner, args.storage),
     "format-tooling": () => new FormatToolingStage(args.runner, args.storage),
     normalize: () => new NormalizeStage(args.runner),

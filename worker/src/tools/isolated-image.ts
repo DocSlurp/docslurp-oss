@@ -6,6 +6,7 @@ import path from "node:path";
 import { resolveScriptsDir } from "./scripts-dir.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
+import { readGuestResultFile } from "../lib/guest-result.js";
 
 const MAX_BYTES = 64 * 1024 * 1024;
 const METHODS = new Set(["rotate", "flatten", "resize", "png", "jpeg", "webp", "raw", "extract", "composite", "greyscale", "grayscale", "toColourspace", "toColorspace"]);
@@ -64,7 +65,7 @@ async function execute(input: unknown, options: unknown, operations: Operation[]
     const { CommandRunner } = await import("./runner.js");
     const runner = new CommandRunner();
     await runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "image-task.mjs"), requestFile, resultFile], available: true, readOnlyInputs: true, timeoutMs: 60_000 });
-    const result = decode(JSON.parse((await boundedRead(resultFile)).toString("utf8")));
+    const result = decode(JSON.parse((await readGuestResultFile(resultFile, MAX_BYTES, () => new Error("image task exceeds file limit"))).toString("utf8")));
     if (terminal === "metadata" || (args[0] as { resolveWithObject?: boolean } | undefined)?.resolveWithObject) {
       const info = (terminal === "metadata" ? result : (result as { info?: unknown })?.info) as Record<string, unknown> | undefined;
       if (!info || typeof info !== "object") throw new Error("invalid image metadata result");

@@ -58,6 +58,9 @@ const INFRASTRUCTURE_ERROR_NAMES = new Set([
   "PageBasisUnboundError",
   // The PDF page counter is missing or broke its contract (lib/pdf-page-count.ts): the platform's fault, retried.
   "PdfPageCountUnavailableError",
+  // The parser image cannot count text pages (no text answer in its inspection) or no VM runner is configured
+  // (lib/text-page-count.ts): the platform's fault, retried, never a host decode and never a permanent document failure.
+  "TextPageCountUnavailableError",
 ]);
 
 function causeChain(error: unknown): unknown[] {

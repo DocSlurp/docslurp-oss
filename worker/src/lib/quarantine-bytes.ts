@@ -22,6 +22,11 @@ export interface QuarantineInspection {
    * and whether its readers could disagree on the encryption (pdf-encryption-structure.ts, council N-H1): refused.
    */
   pdf: { encryptName: boolean; encryptConflict: boolean } | null;
+  /**
+   * The text page count (lib/text-pages-guest.ts inspectTextPages), when the host asked for it: null when not measured;
+   * absent from an image older than the count (the host reads that as unavailable). Validated by the host.
+   */
+  text?: import("./text-pages-guest.js").TextPagesInspection | null;
   /** Inline chart extraction's answer, when the host asked for it (chart-export/inline.ts); validated by the host. */
   charts?: import("../chart-export/inline.js").InlineCharts;
 }

@@ -27,9 +27,10 @@
  * Host-side, without a scan: GFM pipe tables (line shape checks, no HTML) and the `<table` presence checks
  * (`hasHtmlTableMarkup`, `htmlTableBlockCount`) that decide which pages need the VM.
  */
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { readGuestResultText } from "../lib/guest-result.js";
 
 import {
   hasHtmlTableMarkup,
@@ -119,8 +120,7 @@ async function runGuest(pages: string[], runner: Pick<CommandRunner, "run">, sig
     const input = path.join(dir, "pages.json"), output = path.join(dir, "scans.json");
     await writeFile(input, JSON.stringify(pages), { mode: 0o600 });
     await runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "table-routing.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, signal);
-    if ((await stat(output)).size > MAX_RESULT_BYTES) throw new Error("table routing result exceeds limit");
-    const parsed = JSON.parse(await readFile(output, "utf8")) as unknown;
+    const parsed = JSON.parse(await readGuestResultText(output, MAX_RESULT_BYTES, () => new Error("table routing result exceeds limit"))) as unknown;
     if (!Array.isArray(parsed) || parsed.length !== pages.length) throw new Error("invalid table routing result");
     return parsed;
   } finally {

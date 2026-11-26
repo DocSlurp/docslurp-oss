@@ -200,12 +200,12 @@ export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions
     } },
     { id: "pandoc-text-markdown", accepts: ["page/text"], emits: ["page/markdown"], scope: "page", cost: 1, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
-      const bytes = await command("pandoc", ["-f", "markdown", "-t", "gfm", filePath(input)], maxBytes, timeoutMs, ctx.signal);
+      const bytes = await command("pandoc", ["--sandbox", "-f", "markdown", "-t", "gfm", filePath(input)], maxBytes, timeoutMs, ctx.signal);
       return [await emit("pandoc-text-markdown", "page/markdown", input, bytes, "text/markdown; charset=utf-8", "md", number)];
     } },
     { id: "pandoc-html-markdown", accepts: ["page/html"], emits: ["page/markdown"], scope: "page", cost: 1, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
-      const bytes = await command("pandoc", ["-f", "html", "-t", "gfm", filePath(input)], maxBytes, timeoutMs, ctx.signal);
+      const bytes = await command("pandoc", ["--sandbox", "-f", "html", "-t", "gfm", filePath(input)], maxBytes, timeoutMs, ctx.signal);
       return [await emit("pandoc-html-markdown", "page/markdown", input, bytes, "text/markdown; charset=utf-8", "md", number)];
     } },
     { id: "assemble-page-markdown", accepts: ["page/markdown"], emits: ["document/markdown"], scope: "aggregate", cost: 1, async run(inputs, ctx) {

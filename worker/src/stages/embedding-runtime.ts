@@ -25,6 +25,7 @@ import { textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { readSourceBytes, stageSourceFile } from "../sandbox/source-integrity.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import type { Document, EmbeddingProfile } from "../models.js";
 import { chunkTextWithMeta, type ChunkMeta } from "../pipeline/chunking.js";
 import { estimateTokens, normalizeNfc } from "../lib/unicode-text.js";
@@ -147,6 +148,19 @@ const CONTEXTUAL_CHUNK_SUMMARY_TOKENS = 96;
 const CONTEXTUAL_SOURCE_LIMIT = 12_000;
 
 /**
+ * Refusal of the source-file text fallback under the VM-only parsing floor. Should be unreachable: the worker forces
+ * Markdown extraction whenever a stage reads the document's text (stage-execution.ts coerceMarkdownExtractionForVmFloor),
+ * so a document reaching here has no extraction artifact by a bug, not by an option. The source is never staged, decoded
+ * or parsed for it on this host.
+ */
+export class SourceTextUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SourceTextUnavailableError";
+  }
+}
+
+/**
  * The text of a document as it is chunked, embedded and indexed. Always NFC:
  * "ü" typed as one character and as "u" plus a combining diaeresis must find the
  * same chunks, and a decomposed Hangul or accented text must not split a query.
@@ -219,6 +233,13 @@ async function extractTextForEmbeddingRaw(
 
   if (!allowSourceFallback) {
     return { text: "", extractor: "no-extracted-text", canonicalDocument };
+  }
+
+  // No Markdown or canonical artifact. Under the VM-only floor this cannot come from an option (Markdown extraction always
+  // runs when a stage reads the text), so it is a refusal, never a read of the source on this host (DocSlurp/app issue 599).
+  if (vmOnlyParsing()) {
+    console.error(`[parser-sandbox] status=refused reason=source-text-fallback document=${document.id}: no extraction artifact; the source is never read for its text on this host`);
+    throw new SourceTextUnavailableError(`source-text-unavailable: ${document.id} has no extracted text`);
   }
 
   if (isCsvLike(document)) {

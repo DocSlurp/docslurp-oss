@@ -117,6 +117,10 @@
     "./file-sniff": {
       "types": "./dist/file-sniff.d.ts",
       "import": "./dist/file-sniff.js"
+    },
+    "./text-page-rule": {
+      "types": "./dist/text-page-rule.d.ts",
+      "import": "./dist/text-page-rule.js"
     }
   },
   "files": [
