@@ -53,12 +53,12 @@ describe("PostgresPageBasisLedger.setBillingPages", () => {
     expect(document).toMatchObject({ pageCount: 1, billingPages: 300, fileFacts: { format: "office-word", mismatch: "same-family", declaredMimeType: "application/msword" } });
   }, 60_000);
 
-  it("never writes another run's document or a deduplicated copy", async () => {
+  it("never writes another run's document; a document marked as a content copy is measured like any other", async () => {
     expect(await store.pageBasisLedger.setBillingPages("run1", "other-run", 999, "pdf-conversion")).toBe(false);
-    expect(await store.pageBasisLedger.setBillingPages("run1", "copy", 999, "pdf-conversion")).toBe(false);
+    expect(await store.pageBasisLedger.setBillingPages("run1", "copy", 999, "pdf-conversion")).toBe(true);
     expect(await store.pageBasisLedger.setBillingPages("run1", "missing", 999, "pdf-conversion")).toBe(false);
     const rows = (await db.query<{ id: string; billing_pages: number | null }>(`select id, billing_pages from documents where id in ('other-run','copy') order by id`)).rows;
-    expect(rows).toEqual([{ id: "copy", billing_pages: null }, { id: "other-run", billing_pages: null }]);
+    expect(rows).toEqual([{ id: "copy", billing_pages: 999 }, { id: "other-run", billing_pages: null }]);
   }, 60_000);
 
   it("refuses a negative billing count at the database; 0 is a measured empty file (migration 0130)", async () => {
@@ -84,12 +84,12 @@ describe("Store.setDocumentFileFacts", () => {
     expect(document).toMatchObject({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileFacts: { inspection: "full", mismatch: "corrected" } });
   }, 60_000);
 
-  it("never writes another run's document or a deduplicated copy", async () => {
+  it("never writes another run's document; a document marked as a content copy is written like any other", async () => {
     expect(await store.records.setDocumentFileFacts("run1", "other-run", full)).toBe(false);
-    expect(await store.records.setDocumentFileFacts("run1", "copy", full)).toBe(false);
+    expect(await store.records.setDocumentFileFacts("run1", "copy", full)).toBe(true);
     expect(await store.records.setDocumentFileFacts("run1", "missing", full)).toBe(false);
     const rows = (await db.query<{ id: string; mime_type: string }>(`select id, mime_type from documents where id in ('other-run','copy') order by id`)).rows;
-    expect(rows).toEqual([{ id: "copy", mime_type: "application/msword" }, { id: "other-run", mime_type: "application/msword" }]);
+    expect(rows).toEqual([{ id: "copy", mime_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }, { id: "other-run", mime_type: "application/msword" }]);
   }, 60_000);
 });
 

@@ -19,8 +19,8 @@ import { serveOnRandomPort } from "../test/migrated-postgres.js";
 process.env.RUN_CREDIT_OVERDRAFT_CREDITS = "0";
 
 /*
- * The page basis's Postgres adapter (db/page-basis-ledger.ts) against a migrated database: writes scoped to the run's own,
- * non-deduplicated document, the run-wide reads the spend check sums, and the real balance check, through PageBasis as every
+ * The page basis's Postgres adapter (db/page-basis-ledger.ts) against a migrated database: writes scoped to the run's own
+ * documents, the run-wide reads the spend check sums, and the real balance check, through PageBasis as every
  * hydrated WorkflowState uses it (Store.hydrateState binds it).
  */
 let db: PGlite;
@@ -80,16 +80,22 @@ async function activity(runId: string, documentIds: string[]): Promise<WorkflowS
   return state;
 }
 
-describe("PostgresPageBasisLedger writes: the run's own, non-deduplicated document only", () => {
-  it("never writes another run's document, a deduplicated copy or a missing one", async () => {
+describe("PostgresPageBasisLedger writes: the run's own documents only", () => {
+  it("never writes another run's document or a missing one", async () => {
     const ledger = store.pageBasisLedger;
     const generation = (await store.loadRun("run1")).executionGeneration;
-    for (const id of ["other-run", "copy", "missing"]) {
+    for (const id of ["other-run", "missing"]) {
       expect(await ledger.setPageCount("run1", id, 99, generation)).toBe(false);
       expect(await ledger.setBillingPages("run1", id, 99, "text-rule")).toBe(false);
     }
     expect(await row("other-run")).toMatchObject({ page_count: 1, billing_pages: null });
-    expect(await row("copy")).toMatchObject({ page_count: 3, billing_pages: null });
+  }, 60_000);
+
+  it("measures a document an earlier release marked as a content copy, like any other", async () => {
+    const ledger = store.pageBasisLedger;
+    expect(await ledger.setBillingPages("run1", "copy", 5, "text-rule")).toBe(true);
+    expect(await row("copy")).toMatchObject({ billing_pages: 5 });
+    await db.exec(`update documents set billing_pages = null, billing_pages_method = null where id = 'copy'`);
   }, 60_000);
 });
 
@@ -146,11 +152,11 @@ describe("PageBasis over Postgres", () => {
     await state.pageBasis.record(pdf, { kind: "page-count", pages: 10 });
     expect(await row("pdf")).toMatchObject({ page_count: 10, page_count_source: "counted" });
     expect(pdf).toMatchObject({ pageCount: 10, pageCountSource: "counted" });
-    // One run-wide sum: the PDF's 7 Fast pages and the TIFF's 29 uncharged frames; the failed document, the deduplicated copy
-    // and another run's are not counted, and the excluded document is left for the caller.
+    // One run-wide sum: the PDF's 7 Fast pages, the copy-marked document's 27 (it bills like any other) and the TIFF's 29
+    // uncharged frames; the failed document and another run's are not counted, and the excluded document is left for the caller.
     await db.exec(`update documents set page_count = 30 where id in ('tiff', 'failed', 'other-run', 'copy')`);
-    expect(await store.pageBasisLedger.runMeasurements("run1", "none", PAGE_READ_METRICS)).toEqual({ fastPages: 7, ocrFrames: 29, documentChargedPages: 0 });
-    expect(await store.pageBasisLedger.runMeasurements("run1", "pdf", PAGE_READ_METRICS)).toEqual({ fastPages: 0, ocrFrames: 29, documentChargedPages: 0 });
+    expect(await store.pageBasisLedger.runMeasurements("run1", "none", PAGE_READ_METRICS)).toEqual({ fastPages: 34, ocrFrames: 29, documentChargedPages: 0 });
+    expect(await store.pageBasisLedger.runMeasurements("run1", "pdf", PAGE_READ_METRICS)).toEqual({ fastPages: 27, ocrFrames: 29, documentChargedPages: 0 });
     await db.exec(`update documents set page_count = 1 where id in ('tiff', 'failed', 'other-run')`);
     await db.exec(`update documents set page_count = 3 where id = 'copy'`);
   }, 60_000);

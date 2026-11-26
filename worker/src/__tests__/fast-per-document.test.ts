@@ -416,5 +416,18 @@ describe("run-wide runs (pinned 0) are unchanged", () => {
     await complete("wide", "g2");
     expect(await fastCharges("wide")).toEqual([{ id: "fast:wide", pages: 5, org: "o1" }]);
   });
+
+  it("a document marked as a content copy bills its pages like any other, run-wide and per document", { timeout: 60_000 }, async () => {
+    // Run creation no longer makes copies; a row an earlier release marked (deduped_from_document_id) still bills as processed.
+    await seedRun("cw", [{ id: "cw-a", pages: 3 }, { id: "cw-b", pages: 2 }], { perDocument: false });
+    await db.query(`update documents set deduped_from_document_id = 'cw-a' where id = 'cw-b'`);
+    await complete("cw");
+    expect(await fastCharges("cw")).toEqual([{ id: "fast:cw", pages: 5, org: "o1" }]);
+    await seedRun("cd", [{ id: "cd-a", pages: 3 }, { id: "cd-b", pages: 2 }]);
+    await db.query(`update documents set deduped_from_document_id = 'cd-a' where id = 'cd-b'`);
+    await indexDocument("cd", "cd-b");
+    await complete("cd");
+    expect(await fastCharges("cd")).toEqual([{ id: "fast:cd:cd-a", pages: 3, org: "o1" }, { id: "fast:cd:cd-b", pages: 2, org: "o1" }]);
+  });
 });
 

@@ -29,7 +29,7 @@ export class PostgresPageBasisLedger implements PageBasisLedger {
         for no key update
       ), prior as (
         select d.id, d.page_count from owner join documents d on d.run_id = owner.id
-        where d.id = ${documentId} and d.deduped_from_document_id is null
+        where d.id = ${documentId}
         for no key update of d
       ), measured as (
         update documents d set page_count = ${pages}, page_count_source = 'counted', updated_at = now()
@@ -56,7 +56,7 @@ export class PostgresPageBasisLedger implements PageBasisLedger {
   async setBillingPages(runId: string, documentId: string, pages: number, method: string): Promise<boolean> {
     const rows = await this.sql`
       update documents set billing_pages = ${pages}, billing_pages_method = ${method}, updated_at = now()
-      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
+      where id = ${documentId} and run_id = ${runId}
       returning id
     `;
     return rows.length > 0;
