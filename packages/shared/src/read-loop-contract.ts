@@ -11,7 +11,7 @@
  * Trust: slice text, file names, metadata and everything a model writes after reading them are untrusted. Nothing in a
  * reply can change a budget, the source, the task or the allowed actions. A proposed stop is advice.
  *
- * This file is types and constants only. The engine is `read-loop.ts`.
+ * This file is types, constants and the `ReadStepError` class only. The engine is `read-loop.ts`.
  */
 
 /** What a loop addresses: pages (1-based) or chunks (0-based index) of already-extracted text. Never source bytes. */
@@ -83,6 +83,10 @@ export interface ReadTask<S> {
   /**
    * One model read over a batch. Returns the whole new state (small, bounded, validated by the task) and what the call
    * cost. Throwing fails this step only: the state is kept and the batch's units are counted as failed.
+   *
+   * A failed call may still have spent money. If the thrown value is an object with a finite, non-negative number
+   * `costCents` and/or `inputTokens`, the engine adds them to usage before handling the failure, so `maxCostCents` and
+   * `maxInputTokens` see them. Throw a `ReadStepError` to do this. Nothing else on a thrown value is read or trusted.
    */
   step(args: { state: S; slices: Array<Extract<Slice, { status: "ok" }>>; step: number; signal: AbortSignal }): Promise<{
     reply: StepReply<S>;
@@ -108,6 +112,18 @@ export type SliceStrategy = (ctx: {
   room: number;
 }) => SliceRef[];
 
+/** Throw from `ReadTask.step` to report what a failed call spent. The engine reads only these two numbers. */
+export class ReadStepError extends Error {
+  readonly costCents?: number;
+  readonly inputTokens?: number;
+  constructor(message: string, spent: { costCents?: number; inputTokens?: number } = {}, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ReadStepError";
+    this.costCents = spent.costCents;
+    this.inputTokens = spent.inputTokens;
+  }
+}
+
 /** Every limit is enforced by the engine before the work it bounds. */
 export interface ReadBudget {
   /** Model calls. */
@@ -129,6 +145,15 @@ export interface ReadBudget {
   maxCostCents: number;
   /** Reads and searches of one wave in flight at once. */
   concurrency: number;
+  /**
+   * Consecutive waves that produced no step (every requested unit came back missing or withheld) before the loop stops
+   * with `unreadable`. A wave that produces a step resets the count. Required: callers must choose it. Each step-less
+   * wave also yields to the macrotask queue once, so a port that stops answering cannot spin the event loop. A source
+   * small enough to be consumed within this many waves still ends `exhausted`.
+   */
+  maxEmptyWaves: number;
+  /** Optional, default 0. Do not start a step (or plan a wave) when less wall time than this remains: stop `wall-clock`. */
+  minStepWallMs?: number;
 }
 
 /**
@@ -165,10 +190,12 @@ export interface ReadPorts {
 
 export type ReadStoppedBy =
   | "done" | "exhausted" | "model-stop"
-  | "steps" | "input-tokens" | "wall-clock" | "cost" | "errors" | "aborted";
+  | "steps" | "input-tokens" | "wall-clock" | "cost" | "errors" | "aborted"
+  /** `maxEmptyWaves` consecutive waves produced no readable text. */
+  | "unreadable";
 
 export interface ReadResult<S> {
-  /** `complete` for done, exhausted and model-stop; `partial` for every budget, error or abort stop. */
+  /** `complete` for done, exhausted and model-stop; `partial` for every budget, error, unreadable or abort stop. */
   status: "complete" | "partial";
   stoppedBy: ReadStoppedBy;
   /** The best state so far. Always present: a budget stop is a result, never an exception. */

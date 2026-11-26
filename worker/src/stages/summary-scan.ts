@@ -290,6 +290,7 @@ export function scanBudget(args: { wallMs: number }): ReadBudget {
     maxWallMs: args.wallMs,
     maxCostCents: MAX_COST_CENTS,
     concurrency: 4,
+    maxEmptyWaves: 3,
   };
 }
 

@@ -196,7 +196,9 @@ function validateInputs(source: ReadSource, budget: ReadBudget): void {
   if (!isUnit(source.unit) || !isInt(source.first) || !isInt(source.last) || source.first > source.last) {
     throw new Error("read loop: invalid source");
   }
+  if (typeof budget.maxEmptyWaves !== "number") throw new Error("read loop: invalid budget maxEmptyWaves");
   for (const [key, value] of Object.entries(budget)) {
+    if (key === "minStepWallMs" && value === undefined) continue;
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
       throw new Error(`read loop: invalid budget ${key}`);
     }
@@ -294,6 +296,8 @@ export async function runReadLoop<S>(args: {
   let costCents = 0;
   let proposalsDropped = 0;
   let wave = 0;
+  let emptyWaves = 0;
+  const minStepWallMs = typeof budget.minStepWallMs === "number" ? budget.minStepWallMs : 0;
 
   // The seed is trusted but still validated: a bad value is ignored, never an error.
   const seedInput: ReadSeed | undefined = args.seed && typeof args.seed === "object" ? args.seed : undefined;
@@ -479,7 +483,7 @@ export async function runReadLoop<S>(args: {
       if (steps >= budget.maxSteps) return finish("steps");
       if (inputTokens >= budget.maxInputTokens) return finish("input-tokens");
       if (costCents >= budget.maxCostCents) return finish("cost");
-      if (now() - startedAt >= budget.maxWallMs) return finish("wall-clock");
+      if (now() - startedAt >= budget.maxWallMs || budget.maxWallMs - (now() - startedAt) < minStepWallMs) return finish("wall-clock");
 
       let batch: OkSlice[];
       let batchTokens = 0;
@@ -577,6 +581,12 @@ export async function runReadLoop<S>(args: {
         }
         if (batch.length === 0) {
           if (seen.size <= seenBefore) return finish("exhausted");
+          // A wave with no step: bound the run of them and let timers and other requests run between waves.
+          emptyWaves++;
+          if (emptyWaves >= budget.maxEmptyWaves) return finish("unreadable");
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          if (ports.signal?.aborted) return finish("aborted");
+          if (deadlinePassed()) return finish("wall-clock");
           continue;
         }
         for (const slice of batch) for (let u = slice.ref.start; u <= slice.ref.end; u++) batchUnits.push(u);
@@ -584,13 +594,26 @@ export async function runReadLoop<S>(args: {
 
       // 6. Step.
       if (ports.signal?.aborted) return finish("aborted");
-      if (deadlinePassed()) return finish("wall-clock");
+      if (deadlinePassed() || budget.maxWallMs - (now() - startedAt) < minStepWallMs) return finish("wall-clock");
+      emptyWaves = 0;
       steps++;
       let out: Awaited<ReturnType<ReadTask<S>["step"]>>;
       try {
         out = await task.step({ state, slices: batch, step: steps, signal: ctl.signal });
         void out.reply.state;
-      } catch {
+      } catch (error) {
+        // A failed call may have spent money: read only two numeric fields, defensively, and charge them.
+        try {
+          const spent = error as { costCents?: unknown; inputTokens?: unknown } | null;
+          if (spent && typeof spent === "object") {
+            const c = spent.costCents;
+            const t = spent.inputTokens;
+            if (typeof c === "number" && Number.isFinite(c) && c >= 0) costCents += c;
+            if (typeof t === "number" && Number.isFinite(t) && t >= 0) inputTokens += t;
+          }
+        } catch {
+          // A hostile getter reports nothing.
+        }
         if (ports.signal?.aborted) return finish("aborted");
         if (deadlinePassed()) return finish("wall-clock");
         failedSteps++;

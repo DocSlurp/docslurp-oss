@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { NEXT_ACTIONS_MAX, SEARCH_EXPAND_MAX, SEARCH_TERMS_MAX, SEARCH_TERM_MAX_CHARS } from "./read-loop-contract.js";
+import { NEXT_ACTIONS_MAX, ReadStepError, SEARCH_EXPAND_MAX, SEARCH_TERMS_MAX, SEARCH_TERM_MAX_CHARS } from "./read-loop-contract.js";
 import type { ReadBudget, ReadPorts, ReadSeed, ReadSource, ReadTask, Slice, SliceRef, SliceStrategy } from "./read-loop-contract.js";
 import { actionKind, parseNextActions, runReadLoop, sequentialWindows, stratifiedRounds } from "./read-loop.js";
 
@@ -21,6 +21,7 @@ const BUDGET: ReadBudget = {
   maxWallMs: 60000,
   maxCostCents: 1000,
   concurrency: 3,
+  maxEmptyWaves: 3,
 };
 
 type State = number[];
@@ -484,7 +485,7 @@ describe("failures, withheld and missing units", () => {
 
   it("ends when nothing can be admitted and the loop makes no progress", async () => {
     const h = harness({ slices: () => [] });
-    const result = await run(h, 40);
+    const result = await run(h, 40, { maxEmptyWaves: 100 });
     expect(result.stoppedBy).toBe("exhausted");
     expect(result.coverage).toMatchObject({ unitsRead: 0, missing: 40 });
     expect(result.usage.steps).toBe(0);
@@ -922,5 +923,120 @@ describe("runReadLoop seed", () => {
     const result = await run(h, 5, { maxSteps: 1 }, sequentialWindows(2), { batch: [ok(4, 9)] });
     expect(result.coverage.ranges).toEqual([[4, 5]]);
     expect(result.coverage.unitsRead).toBe(2);
+  });
+});
+
+describe("step-less waves", () => {
+  const refuse = (refs: SliceRef[]): Slice[] => refs.map((ref) => ({ ref, status: "missing" }));
+
+  it("stops unreadable after maxEmptyWaves on a huge source and yields to timers", async () => {
+    const h = harness({ slices: refuse });
+    let fired = false;
+    setTimeout(() => (fired = true), 0);
+    const result = await run(h, 20000, { maxUnitsPerStep: 4, maxEmptyWaves: 3 }, stratifiedRounds(5));
+    expect(result).toMatchObject({ status: "partial", stoppedBy: "unreadable" });
+    expect(h.reads.length).toBeLessThanOrEqual(3 * BUDGET.concurrency);
+    expect(result.usage.steps).toBe(0);
+    expect(result.coverage.unitsRead).toBe(0);
+    expect(fired).toBe(true);
+  });
+
+  it("a source consumed within maxEmptyWaves still ends exhausted", async () => {
+    const h = harness({ slices: refuse });
+    const result = await run(h, 4, { maxUnitsPerStep: 4, maxEmptyWaves: 3 });
+    expect(result).toMatchObject({ status: "complete", stoppedBy: "exhausted" });
+    expect(result.coverage.missing).toBe(4);
+  });
+
+  it("skips an interior gap smaller than the limit and keeps reading", async () => {
+    const h = harness({});
+    h.ports.read = async (refs) =>
+      refs.flatMap((ref): Slice[] =>
+        Array.from({ length: ref.end - ref.start + 1 }, (_, i): Slice => {
+          const u = ref.start + i;
+          const r = { unit: ref.unit, start: u, end: u };
+          return u >= 3 && u <= 6 ? { ref: r, status: "missing" } : { ref: r, status: "ok", text: `p${u}` };
+        }),
+      );
+    const result = await run(h, 12, { maxUnitsPerStep: 2, maxEmptyWaves: 3, concurrency: 1 });
+    expect(result.stoppedBy).toBe("exhausted");
+    expect(result.coverage.missing).toBe(4);
+    expect(result.coverage.unitsRead).toBe(8);
+  });
+
+  it("resets the count after a step", async () => {
+    // Waves of 2 units: pages 3-4 and 7-8 refused (one empty wave each); limit 2 would trip without a reset.
+    const h = harness({});
+    h.ports.read = async (refs) =>
+      refs.flatMap((ref): Slice[] =>
+        Array.from({ length: ref.end - ref.start + 1 }, (_, i): Slice => {
+          const u = ref.start + i;
+          const r = { unit: ref.unit, start: u, end: u };
+          return [3, 4, 7, 8].includes(u) ? { ref: r, status: "missing" } : { ref: r, status: "ok", text: `p${u}` };
+        }),
+      );
+    const result = await run(h, 10, { maxUnitsPerStep: 2, maxEmptyWaves: 2, concurrency: 1 });
+    expect(result.stoppedBy).toBe("exhausted");
+    expect(result.coverage.unitsRead).toBe(6);
+  });
+});
+
+describe("minStepWallMs", () => {
+  it("stops on wall-clock instead of starting a step with too little time left", async () => {
+    let t = 0;
+    const h = harness({ ports: { now: () => t } });
+    const step = h.task.step;
+    h.task.step = async (a) => {
+      t += 600;
+      return step(a);
+    };
+    const result = await run(h, 100, { maxWallMs: 1000, minStepWallMs: 500 });
+    expect(result).toMatchObject({ status: "partial", stoppedBy: "wall-clock" });
+    expect(result.usage.steps).toBe(1);
+  });
+
+  it("defaults to no minimum", async () => {
+    let t = 0;
+    const h = harness({ ports: { now: () => t } });
+    const step = h.task.step;
+    h.task.step = async (a) => {
+      t += 600;
+      return step(a);
+    };
+    const result = await run(h, 100, { maxWallMs: 1000 });
+    expect(result.usage.steps).toBe(2);
+  });
+});
+
+describe("failed step spend", () => {
+  it("charges cost reported by failing steps and stops on cost", async () => {
+    const h = harness({ cost: 1 });
+    const step = h.task.step;
+    h.task.step = async (a) => {
+      if (a.step % 2 === 1) throw new ReadStepError("down", { costCents: 4 });
+      return step(a);
+    };
+    // 4 (fail) + 1 (ok) + 4 (fail) = 9 < 10, + 1 (ok) = 10 -> stop after step 4.
+    const result = await run(h, 100, { maxCostCents: 10 });
+    expect(result).toMatchObject({ stoppedBy: "cost" });
+    expect(result.usage.steps).toBe(4);
+    expect(result.usage.costCents).toBe(10);
+    expect(result.usage.failedSteps).toBe(2);
+  });
+
+  it("charges reported input tokens and ignores untrusted values", async () => {
+    const h = harness({});
+    h.task.step = async () => {
+      throw { costCents: -5, inputTokens: 700, get nope() { throw new Error("x"); } };
+    };
+    const r1 = await run(h, 100, { maxInputTokens: 1000 });
+    expect(r1.stoppedBy).toBe("errors");
+    expect(r1.usage.inputTokens).toBe(1400);
+    expect(r1.usage.costCents).toBe(0);
+    h.task.step = async () => {
+      throw Object.assign(new Error("x"), { costCents: "9", inputTokens: Number.NaN });
+    };
+    const r2 = await run(h, 100);
+    expect(r2.usage).toMatchObject({ costCents: 0, inputTokens: 0 });
   });
 });
