@@ -83,7 +83,8 @@ Every reader asks `piiWithholding()` and `isPageWithheld()` from `@docslurp/shar
 - **Pixels follow `isPageImageWithheld()`**: a page's image, render and figures are refused when the page is withheld, when the outcome redacted a value on it (`redactedPages`), or on every page when an outcome redacted without recording its pages. Text readers use `isPageWithheld()`: redacted text is servable, its image is not.
 - **Page renders** are refused for such a page before queueing; the worker refuses again before rasterizing and under the write lock. Page-image readiness reports the page as `unavailable`.
 - **Exports** leave out withheld pages' images and replace page text with the placeholder.
-- **Before the scan**: while a document's run has a PII policy and its scan has not completed, its source file and run artifacts are not served.
+- **Before the scan**: while a document's run has a PII policy and its scan has not completed, its source file and run artifacts are not served. The scan has completed when pii-detect completed for the document's run, or when an outcome is recorded on `metadata.pii` (deferred modes record theirs page by page, below). Every other state waits: `failed` or `cancelled` before the scan, or a document stuck in `processing`. A failed or cancelled copy does not decide for a live document that shares its source file. The document map completing is not a scan: it reads only some pages.
+- **Unscanned pages (deferred modes)**: under a withholding or redaction policy (`block_indexing`, `block_document`, `redact_artifacts`), a page's pixels and text are served only once that page has been scanned, and the source file and every artifact without a page only once every page has been. See [Map indexing mode](#map-indexing-mode).
 - **Deferred materialization** refuses pages the ingest scan withheld.
 - **First-pass figures** are stored after the scan, so pii-detect never saw them:
   - Under page scope, figure slots (`<doc>:doppler-figure:pN.M`) join `withheldArtifactUris` only for withheld pages.
@@ -99,10 +100,50 @@ Every reader asks `piiWithholding()` and `isPageWithheld()` from `@docslurp/shar
 - **Chunks of placeholders only** are not indexed; a chunk spanning a clean and a withheld page keeps its clean text and drops the withheld page.
 - **`block_document`**: the document map drops matched rough-text pages, and a match found by deferred materialization blocks the whole document (`pii_blocked`).
 
+## Map indexing mode
+
+Map mode runs no pii-detect. Pages are read later, when a query needs them, and each read is scanned on its own. So
+the outcome records the scan in progress: `metadata.pii.scanPending: true` with `scannedPages`, the pages scanned so
+far. Readers (`isPageWithheld`, `isPageImageWithheld`, `piiScanIncomplete`) treat every other page as withheld, and
+withhold the source and every artifact without a page while the scan is incomplete. The fields go once every page has
+been scanned.
+
+- **The document map** starts the scan with the pages whose rough text it read and scanned (the coarse pages of a
+  born-digital PDF). A scanned PDF or a non-PDF starts with none.
+- **Materialization** reads a page a query needs (text layer, OCR or a model read), scans it, and adds it to the scan
+  in the same locked update that records a match. A page that matched is withheld; one that did not becomes servable.
+- **The coarse visual layer** (`visualPages.coarseFallback`) embeds no page images under such a policy.
+- **Visual mode** embeds page images without reading their text, so it is refused with every withholding or redaction
+  policy, `redact_artifacts` included (`visual_mode_privacy`).
+
+What a map-mode project with such a policy sees:
+
+- No source download, and no whole-document artifacts or export, until every page has been read. A document whose
+  pages are never all read never serves its source.
+- Page images, renders and figures only for pages a query (or the map) has read and scanned; other pages show as
+  pending (`piiWithheld.scanPending`), not as withheld for PII.
+- Search and chat are unchanged: they only ever return pages that were read, and every read is scanned first.
+
+Documents processed in map mode before this change keep their recorded outcome and read as before. A map-mode document
+with no recorded outcome (it matched nothing) and no pii-detect run now waits for the scan like any other.
+
 ## Rollout
 
 - An action this worker does not know (a newer API configured it) blocks the document.
 - The findings table must exist before this worker runs: a missing table fails the stage as retryable infrastructure, never the document.
+- The stage writes its outcome, findings, page rows and summary-tree withdrawal in one transaction, and a rescan that
+  finds only redaction markers records a carried redaction (pages unknown), never a clean document.
+
+### Rolling back the worker
+
+A worker-only rollback is not safe once page-scoped or `block_document` outcomes exist:
+
+- an older worker does not know `block_document` and indexes in-flight `block_document` runs in full;
+- an older worker rescanning a page-scoped document reads the rewritten text, finds no PII and records it clean;
+- an older worker does not record deferred scan progress.
+
+Roll forward. If a rollback cannot be avoided, first cancel the `block_document` runs and pause reprocessing of
+projects with a PII policy, then roll back.
 - Deploy order: the migration, then workers, then the API and UI. An older worker does not know `block_document` and would index such documents in full, so an API offers `block_document` only once the fleet runs a worker that handles it.
 
 ## Rescans
@@ -181,4 +222,10 @@ There is no admin UI for it yet.
   withholding) adds one primary-key read of its titles and map, and a write only when something changed; a rescan of
   text holding a placeholder adds one primary-key read of the previous categories. A deferred match adds one locked
   read and one update of the document row, and one findings insert, per batch with a match.
+- Deferred scan progress: the document map adds no statement (its outcome write already runs); each materialized
+  batch under a withholding policy adds one locked read and, when it scans a new page, one update of the document row.
+  `scannedPages` is one integer per scanned page in `metadata.pii` until the scan completes.
 - Read: no new query. Summaries parse a few more fields of the `metadata.pii` object the readers already load.
+  `isPageWithheld` adds one set lookup per page while a scan is pending. The artifact export reads scan stages only for
+  documents whose run has an enabled policy.
+- Locating short values counts their occurrences in the whole text once per document with such a match (one pass).
