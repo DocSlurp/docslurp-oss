@@ -59,3 +59,16 @@ describe("a deferred scan in progress", () => {
     expect(piiPolicyWithholds(null)).toBe(false);
   });
 });
+
+describe("context detectors in Markdown tables", () => {
+  it("find a passport and a bank account number labelled by a row cell or by the column header", async () => {
+    const { scanForPii } = await import("../pii.js");
+    const row = "| Field | Value |\n| --- | --- |\n| Passport number | X1234567 |\n| Account number | 12345678901 |\n";
+    const column = "| Name | Passport number | Bank account |\n|---|---|---|\n| Jane Roe | X7654321 | 98765432101 |\n";
+    const types = (text: string) => scanForPii(text, ["passport", "bank-account"]).map((match) => match.patternType).sort();
+    expect(types(row)).toEqual(["bank-account", "passport"]);
+    expect(types(column)).toEqual(["bank-account", "passport"]);
+    // A value in an unlabelled column is still not a match.
+    expect(types("| Name | Order |\n|---|---|\n| Jane | 12345678901 |\n")).toEqual([]);
+  });
+});

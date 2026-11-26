@@ -239,32 +239,68 @@ const ibans: PiiDetector = (content) => {
 
 // ---------------------------------------------------- numbers needing context
 
-const BANK_CONTEXT = /\b(?:account|acct|a\/c|checking|savings|bank)(?:\s+(?:no|num|number|#))?\.?\s*[:#-]?\s*$/i;
-const ROUTING_CONTEXT = /\b(?:routing|aba|rtn)(?:\s+(?:no|num|number|#))?\.?\s*[:#-]?\s*$/i;
+const BANK_CONTEXT = /\b(?:account|acct|a\/c|checking|savings|bank)(?:\s+(?:no|num|number|#))?\.?\s*[:#|-]?\s*$/i;
+const ROUTING_CONTEXT = /\b(?:routing|aba|rtn)(?:\s+(?:no|num|number|#))?\.?\s*[:#|-]?\s*$/i;
+
+/**
+ * The label a Markdown table gives a cell: its column's header, as "Header: ". A cell in a row (`| Passport number |
+ * X1234567 |`) already has its label just before it (a `|` boundary is accepted by the context patterns); a value under
+ * a header row (`| Name | Passport number |`, `|---|---|`, `| Jane | X1234567 |`) gets it from here. Empty when the
+ * match is not in a table body. Cost: only for a candidate whose own context did not match, on a line starting `|`.
+ */
+function tableHeaderContext(content: string, index: number): string {
+  const lineStart = content.lastIndexOf("\n", index - 1) + 1;
+  const lineEndAt = content.indexOf("\n", index);
+  const line = content.slice(lineStart, lineEndAt < 0 ? content.length : lineEndAt);
+  if (!line.trimStart().startsWith("|")) return "";
+  const column = (content.slice(lineStart, index).match(/\|/g) ?? []).length - 1;
+  if (column < 0) return "";
+  // Walk up the table's rows to the header row (the one above the `|---|` separator).
+  let end = lineStart - 1;
+  for (let rows = 0; end > 0 && rows < 2000; rows += 1) {
+    const start = content.lastIndexOf("\n", end - 1) + 1;
+    const row = content.slice(start, end);
+    if (!row.trimStart().startsWith("|")) return "";
+    if (/^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(row)) {
+      const headerStart = content.lastIndexOf("\n", start - 2) + 1;
+      const header = content.slice(headerStart, start - 1);
+      const cells = header.trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
+      const cell = cells[column]?.trim();
+      return cell ? `${cell}: ` : "";
+    }
+    end = start - 1;
+  }
+  return "";
+}
+
+/** Whether the label before a candidate (or its table column header) matches `context`. */
+function labelledBy(content: string, index: number, context: RegExp): boolean {
+  if (context.test(content.slice(Math.max(0, index - 40), index))) return true;
+  const header = tableHeaderContext(content, index);
+  return header !== "" && context.test(header);
+}
 
 const bankAccounts: PiiDetector = (content) => {
   const spans: PiiSpan[] = [];
   for (const match of matchAll(content, /(?<![\w.-])\d{8,17}(?![\w]|[.-]\d)/g)) {
     const span = { start: match.index, end: match.index + match[0].length };
-    const before = content.slice(Math.max(0, span.start - 40), span.start);
-    if (ROUTING_CONTEXT.test(before)) {
+    if (labelledBy(content, span.start, ROUTING_CONTEXT)) {
       if (match[0].length === 9 && abaChecksumValid(match[0])) spans.push(span);
-    } else if (BANK_CONTEXT.test(before) && !/^(\d)\1+$/.test(match[0])) {
+    } else if (labelledBy(content, span.start, BANK_CONTEXT) && !/^(\d)\1+$/.test(match[0])) {
       spans.push(span);
     }
   }
   return spans;
 };
 
-const PASSPORT_CONTEXT = /\bpassport(?:\s+(?:no|num|number|#))?\.?\s*[:#-]?\s*$/i;
-const LICENSE_CONTEXT = /\b(?:driver'?s?|driving)\s+licen[cs]e(?:\s+(?:no|num|number|#))?\.?\s*[:#-]?\s*$|\bdl\s*(?:no|num|number|#)\s*[:#-]?\s*$|\blicen[cs]e\s+(?:no|num|number|#)\s*[:#-]?\s*$/i;
+const PASSPORT_CONTEXT = /\bpassport(?:\s+(?:no|num|number|#))?\.?\s*[:#|-]?\s*$/i;
+const LICENSE_CONTEXT = /\b(?:driver'?s?|driving)\s+licen[cs]e(?:\s+(?:no|num|number|#))?\.?\s*[:#|-]?\s*$|\bdl\s*(?:no|num|number|#)\s*[:#|-]?\s*$|\blicen[cs]e\s+(?:no|num|number|#)\s*[:#|-]?\s*$/i;
 
 function contextualId(context: RegExp, shape: RegExp, minDigits: number): PiiDetector {
   return (content) => {
     const spans: PiiSpan[] = [];
     for (const match of matchAll(content, shape)) {
-      const before = content.slice(Math.max(0, match.index - 40), match.index);
-      if (!context.test(before)) continue;
+      if (!labelledBy(content, match.index, context)) continue;
       if (digitsOf(match[0]).length < minDigits) continue;
       spans.push({ start: match.index, end: match.index + match[0].length });
     }
