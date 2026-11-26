@@ -382,6 +382,7 @@ export function selectRasterPagesFromClassification(
       page.extractorHint === "vision-rescue"
       || (typeof page.confidence === "number" && page.confidence < 0.65)
       || page.route === "handwriting-or-degraded"
+      // Routes only triage stored by an earlier release carries (no classifier writes them since DocSlurp/app issue 601).
       || page.route === "chart-or-figure"
       || page.route === "image-heavy",
     )

@@ -72,7 +72,11 @@ export function inheritExtractEscalatedPages(ledger: Ledger, documentId: string,
   if (inherited) ledger.recordDocument(documentId, LADDER_EXTRACT_ESCALATED_KEY, inherited);
 }
 
-/** Triage routes whose content is a figure: read on the intelligent rung (the hosted vision model). */
+/**
+ * Triage routes whose content is a figure: read on the intelligent rung (the hosted vision model). Only v1's keyword triggers
+ * produced them, and no classifier writes them since DocSlurp/app issue 601: this reads page triage an earlier release stored,
+ * for a run resumed across the deploy. Delete with v1 routing.
+ */
 const FIGURE_ROUTES = new Set(["chart-or-figure", "image-heavy"]);
 
 /** Why triage selected a page, in ladder terms. */

@@ -813,6 +813,7 @@ const NO_NATIVE_TEXT_SIGNALS = new Set([
 export const DRAWN_CONTENT_MIN_BYTES_PER_PAGE = PAGE_RASTER_ROUTING.drawnContentMinBytesPerPage;
 /** Extracted words on a page with neither a text layer nor images that make it drawn text, not blank. */
 export const DRAWN_TEXT_MIN_WORDS = 10;
+// `chart-or-figure` (and `image-heavy` below) are no longer produced (DocSlurp/app issue 601); kept for triage an earlier release stored.
 const STRUCTURED_TEXT_ROUTES = new Set<AdaptivePageRoute>(["table-heavy", "form", "formula-heavy", "chart-or-figure"]);
 
 /**

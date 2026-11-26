@@ -122,7 +122,10 @@ export function guardedScopesFromPlan(plan: Pick<RoutePlan, "assignments"> | nul
   });
 }
 
-/** Legacy classifier pages routed `chart-or-figure` (kind unknown: the page may hold a chart or a diagram). */
+/**
+ * Legacy classifier pages routed `chart-or-figure` (kind unknown: the page may hold a chart or a diagram). No classifier writes
+ * the route since DocSlurp/app issue 601: these come from page triage an earlier release stored. Delete with v1 routing.
+ */
 export function candidatesFromLegacyRoutes(pages: ReadonlyArray<{ pageNumber: number; route?: string | null }>): VisualCandidate[] {
   return pages
     .filter((page) => page.route === "chart-or-figure")
