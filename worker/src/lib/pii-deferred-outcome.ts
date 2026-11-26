@@ -8,6 +8,9 @@ import {
   type PiiPolicy,
 } from "@docslurp/shared";
 
+import { scrubTitlesAndMapForPii, type WithheldPagesForMap } from "./pii-document-map.js";
+import { withdrawSummaryTreeForPii } from "../summary-tree/state-store.js";
+
 /**
  * The page-scoped PII outcome for pages a deferred read matched (docs/pii-page-withholding.md).
  *
@@ -34,7 +37,11 @@ export type DeferredPiiMatch = {
 };
 
 /** What a caller knows about a deferred match; the artifacts to withhold are read from the document's run. */
-export type DeferredPiiMatchInput = Omit<DeferredPiiMatch, "withheldArtifactUris"> & { sourceUri: string };
+export type DeferredPiiMatchInput = Omit<DeferredPiiMatch, "withheldArtifactUris"> & {
+  sourceUri: string;
+  /** The policy scanner: titles and map entries it matches are scrubbed with the match. */
+  matches?: (text: string) => boolean;
+};
 
 /** Artifacts a page-scoped outcome withholds: the source, every slot without a page, and the withheld pages' own slots. */
 export function deferredWithheldArtifactUris(
@@ -244,6 +251,14 @@ export async function recordDeferredPiiMatch(sql: Sql, documentId: string, input
       update document_page_states set state = 'blocked-pii', failure_reason = 'pii-policy', read_text = null, updated_at = now()
       where document_id = ${documentId} and page_number = any(${pages}::int[]) and state in ('unseen', 'failed', 'parsed')
     `;
+  }
+  if (match.pages.size > 0) {
+    // Every deferred match path (the document map, page materialization) gets what pii-detect does after a match: the
+    // titles and the map lose what matches or came from a withheld page, and a summary tree built from the unscanned
+    // text stops being served (its rows and artifact are queued for removal).
+    const withheldForMap: WithheldPagesForMap = merged.blocked ? "all" : new Set(merged.withheldPages);
+    await scrubTitlesAndMapForPii(sql, documentId, withheldForMap, input.matches ?? (() => false));
+    await withdrawSummaryTreeForPii(sql as never, documentId);
   }
   return { blocked: merged.blocked, withheldPages: merged.withheldPages };
 }

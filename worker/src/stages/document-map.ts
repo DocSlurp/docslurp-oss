@@ -513,8 +513,9 @@ export class DocumentMapStage implements Stage {
     let searchText = mapSearchText(built.nodes, built.terms);
     const policyWithholds = piiPolicyWithholds(policy);
     const scannedPages = new Set<number>();
-    if (policy.enabled && policy.patterns.length > 0) {
-      const scan = createPiiTextScanner(policy.patterns, policy.allowlistPatterns);
+    const scanText = policy.enabled && policy.patterns.length > 0 ? createPiiTextScanner(policy.patterns, policy.allowlistPatterns) : null;
+    if (scanText) {
+      const scan = scanText;
       for (const [pageNumber] of coarseRows) scannedPages.add(pageNumber);
       coarseRows = coarseRows.flatMap(([pageNumber, text]): Array<[number, string]> => {
         const scanned = scan(text, pageNumber);
@@ -608,6 +609,7 @@ export class DocumentMapStage implements Stage {
         await recordDeferredPiiMatch(q as never, document.id, {
           pages: matchedPages, action: policy.action, runId: state.run.id, pageCount, sourceUri: this.storage.uri(document.sourceKey),
           ...(policyWithholds ? { scan: { pages: scannedPages, reset: true } } : {}),
+          ...(scanText ? { matches: (text: string) => scanText(text).matches.length > 0 } : {}),
         });
       }
 

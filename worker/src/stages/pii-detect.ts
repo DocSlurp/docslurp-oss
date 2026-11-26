@@ -38,7 +38,7 @@ import {
   type PiiWithholdingPlan,
 } from "../lib/pii-page-withholding.js";
 import { measureOp, pushPerfMetric } from "../lib/perf-context.js";
-import { documentTitleWithheld, scrubDocumentMap, type WithheldPagesForMap } from "../lib/pii-document-map.js";
+import { scrubTitlesAndMapForPii, type WithheldPagesForMap } from "../lib/pii-document-map.js";
 import { findingsStatement } from "../lib/pii-deferred-outcome.js";
 import { extractTextForEmbedding } from "./embedding-runtime.js";
 import { refreshSummaryEvidence } from "./summary-evidence-refresh.js";
@@ -315,31 +315,7 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
       return recorded?.scope === "pages" && recorded.pageTypes ? new Map([...recorded.pageTypes].map(([page, types]) => [page, [...types]])) : new Map();
     },
     async scrubTitlesAndMap(documentId, withheld, matches) {
-      // One read of the document's titles and map (primary keys); a write only when something changed.
-      const [row] = await db<Array<{ title: string | null; title_source: string | null; map_title: string | null; nodes: unknown; terms: unknown; has_map: boolean }>>`
-        select d.metadata->>'title' as title, d.metadata->>'titleSource' as title_source, d.metadata->>'mapTitle' as map_title,
-               m.nodes, m.terms, m.document_id is not null as has_map
-        from documents d left join document_maps m on m.document_id = d.id
-        where d.id = ${documentId}
-      `;
-      if (!row) return;
-      const clearTitle = documentTitleWithheld(row.title, row.title_source, withheld, matches);
-      const map = scrubDocumentMap({
-        nodes: Array.isArray(row.nodes) ? row.nodes as Array<{ title?: unknown; physicalStart?: unknown }> : [],
-        terms: Array.isArray(row.terms) ? row.terms as Array<{ term?: unknown; physicalPages?: unknown }> : [],
-        title: row.map_title,
-      }, withheld, matches);
-      if (clearTitle || map.title !== row.map_title) {
-        const drop = [...(clearTitle ? ["title", "titleSource"] : []), ...(map.title !== row.map_title ? ["mapTitle"] : [])];
-        await db`update documents set metadata = coalesce(metadata, '{}'::jsonb) - ${drop}::text[] where id = ${documentId}`;
-      }
-      if (row.has_map && map.changed) {
-        await db`
-          update document_maps set nodes = ${db.json(map.nodes as never)}, terms = ${db.json(map.terms as never)},
-            search_text = to_tsvector('simple', ${map.searchText}), version = version + 1, updated_at = now()
-          where document_id = ${documentId}
-        `;
-      }
+      await scrubTitlesAndMapForPii(db as never, documentId, withheld, matches);
     },
     async close() {
       await db.end();

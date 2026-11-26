@@ -619,6 +619,7 @@ export async function materializePageRange(
     const merged = await deps.sql.begin((tx) => recordDeferredPiiMatch(tx as never, documentId, {
       pages: newMatches, action: policy.action, runId: input.runId, pageCount: document.pageCount,
       sourceUri: deps.storage.uri(document.sourceKey), ...scanProgress,
+      matches: (text) => scan!(text).matches.length > 0,
     }));
     // Null: the document was withheld whole meanwhile (a concurrent read); fail closed for this batch too.
     if (merged?.blocked || (merged === null && policy.action !== "flag_for_review")) {

@@ -52,3 +52,26 @@ describe("deferred scan progress (map mode)", () => {
     expect(mergeDeferredPiiOutcome({ status: "pii_blocked", pii: {} }, base({ pages: new Set([1]), reset: true }))).toBeNull();
   });
 });
+
+describe("a deferred match scrubs titles and the map and withdraws the summary tree (M2)", () => {
+  it("every recordDeferredPiiMatch caller gets them", async () => {
+    const { recordDeferredPiiMatch } = await import("../lib/pii-deferred-outcome.js");
+    const queries: string[] = [];
+    const fake = Object.assign(async (strings: TemplateStringsArray) => {
+      const text = strings.join("?");
+      queries.push(text);
+      if (text.includes("for update of d")) return [{ status: "processing", pii: null, artifacts: {} }];
+      if (text.includes("as has_map")) return [{ title: "Report for passport X1234567", title_source: "text", map_title: null, nodes: [{ title: "Page three", physicalStart: 3 }, { title: "Intro", physicalStart: 1 }], terms: [], has_map: true }];
+      if (text.includes("select org_id, project_id from documents")) return [{ org_id: "o1", project_id: "p1" }];
+      if (text.includes("update document_summary_trees")) return [{ document_id: "doc-1" }];
+      return [];
+    }, { json: (value: unknown) => value });
+    await recordDeferredPiiMatch(fake as never, "doc-1", {
+      pages: new Map([[3, ["passport"]]]), action: "block_indexing", runId: "run-1", pageCount: 10, sourceUri: "s3://b/src",
+      matches: (text) => text.includes("X1234567"),
+    });
+    expect(queries.some((q) => q.includes("update documents set metadata = coalesce(metadata, '{}'::jsonb) -"))).toBe(true);
+    expect(queries.some((q) => q.includes("update document_maps set nodes"))).toBe(true);
+    expect(queries.some((q) => q.includes("update document_summary_trees"))).toBe(true);
+  });
+});

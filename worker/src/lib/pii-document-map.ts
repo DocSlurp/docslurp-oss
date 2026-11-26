@@ -63,3 +63,40 @@ export function documentTitleWithheld(
   if (titleSource === "filename") return false;
   return withheld === "all" || withheld.has(1) || withheld.has(2);
 }
+
+type Sql = {
+  <T = unknown>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>;
+  json: (value: unknown) => unknown;
+};
+
+/**
+ * Scrub the stored titles and document map after a scan or a deferred match: one read of the document's titles and
+ * map (primary keys); a write only when something changed. Every path that records a match calls it (pii-detect,
+ * the document map and page materialization, through recordDeferredPiiMatch).
+ */
+export async function scrubTitlesAndMapForPii(sql: Sql, documentId: string, withheld: WithheldPagesForMap, matches: (text: string) => boolean): Promise<void> {
+  const [row] = await sql<Array<{ title: string | null; title_source: string | null; map_title: string | null; nodes: unknown; terms: unknown; has_map: boolean }>>`
+    select d.metadata->>'title' as title, d.metadata->>'titleSource' as title_source, d.metadata->>'mapTitle' as map_title,
+           m.nodes, m.terms, m.document_id is not null as has_map
+    from documents d left join document_maps m on m.document_id = d.id
+    where d.id = ${documentId}
+  `;
+  if (!row) return;
+  const clearTitle = documentTitleWithheld(row.title, row.title_source, withheld, matches);
+  const map = scrubDocumentMap({
+    nodes: Array.isArray(row.nodes) ? row.nodes as Array<{ title?: unknown; physicalStart?: unknown }> : [],
+    terms: Array.isArray(row.terms) ? row.terms as Array<{ term?: unknown; physicalPages?: unknown }> : [],
+    title: row.map_title,
+  }, withheld, matches);
+  if (clearTitle || map.title !== row.map_title) {
+    const drop = [...(clearTitle ? ["title", "titleSource"] : []), ...(map.title !== row.map_title ? ["mapTitle"] : [])];
+    await sql`update documents set metadata = coalesce(metadata, '{}'::jsonb) - ${drop}::text[] where id = ${documentId}`;
+  }
+  if (row.has_map && map.changed) {
+    await sql`
+      update document_maps set nodes = ${sql.json(map.nodes as never)}, terms = ${sql.json(map.terms as never)},
+        search_text = to_tsvector('simple', ${map.searchText}), version = version + 1, updated_at = now()
+      where document_id = ${documentId}
+    `;
+  }
+}
