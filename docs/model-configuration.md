@@ -22,6 +22,28 @@ llm://<provider>/<model-id>
 | `llm://transformers.js/<model>`, `llm://local-cli/<model>`, `llm://vllm/<model>` | A model running in-process, as a local command or on a loopback server (self-hosted deployments). | `llm://transformers.js/Xenova/bge-m3` |
 | `<vendor>/<model>` | Shorthand for `llm://openrouter/<vendor>/<model>`, accepted wherever a hosted model is. | `anthropic/claude-haiku-5.5` |
 
+### Model endpoints and provider keys
+
+A model URI never moves a platform credential. The worker and API send each provider key (OpenRouter, DeepInfra,
+OpenAI) only to that provider's configured base URL, compared on scheme, host, port and path after URL normalisation;
+a look-alike host, user info (`https://api.openai.com@other.example`), another port or any other destination gets
+no key. Base URLs for hosted providers come only from the operator's environment (`OPENAI_BASE_URL`) or the
+[private endpoint registry](#private-model-endpoints).
+
+A `baseUrl` query parameter is accepted only on the local providers `ollama`, `vllm` and `lmstudio`, only on a
+loopback host (`localhost`, `127.0.0.1`, `[::1]`), and only when the operator sets
+`DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS=true`. The flag is off by default, including in `.env.example`; turn it
+on only on a trusted single-tenant host where those servers run next to the worker and API. With it off, a project
+setting that names one of these providers is refused when saved and again before any request is sent (stable code
+`tenant-local-endpoints-disabled`); with it on, a non-loopback, link-local, private-range or internal host is refused
+(`tenant-base-url-not-loopback`). Hosted providers never take a `baseUrl` (`tenant-base-url-not-allowed`). A stored
+setting these rules refuse is never sent: one that no longer validates is dropped when the project is read (it keeps
+its profile's model, and other projects and settings are unaffected); a local endpoint stored while the flag was on
+is refused before each request once it is off.
+
+Errors from a model server are reported to the project as stable codes (for example a vision fallback reason of
+`unavailable`, `timeout` or `routing`); the server's response text goes only to the worker and API logs.
+
 ## Managed models: callers choose categories
 
 Programmatic callers (REST, OpenAI-compatible chat, MCP, SDK, CLI) never choose a backend model or provider. They choose DocSlurp categories:
