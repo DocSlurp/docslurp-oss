@@ -23,7 +23,7 @@ import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { selectSummaryInput } from "./summary-input.js";
 import { readSummarySource } from "./summary-source.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { openScanSource, runSummaryScan, scanArtifactFields, scanEligible, type ScanModelCall, type ScanOutcome } from "./summary-scan.js";
+import { evidenceIsWholeDocument, openScanSource, runEvidenceLabels, runSummaryScan, scanArtifactFields, scanEligible, type ScanModelCall, type ScanOutcome } from "./summary-scan.js";
 
 export const SUMMARY_MAX_CONCURRENCY = 4;
 const SUMMARY_DEADLINE_MS = 120_000;
@@ -234,15 +234,22 @@ export class DocumentSummaryStage implements Stage {
     const { state, document, extracted, selected, model, signal } = args;
     try {
       const coverage = extracted.coverage;
-      if (!scanEligible(coverage, selected.sampled)) return null;
-      // Redaction rewrites the Markdown under the same key; never read pages of a document it touched.
-      if (state.documentStage?.(document.id, "pii-detect")?.stats?.redacted === true) return null;
-      const evidenceUri = state.artifactLedger.readDocument(document.id, "summary-evidence");
-      const markdownUri = state.artifactLedger.readDocument(document.id, "markdown");
-      if (!evidenceUri || !markdownUri) return null;
-      const source = await openScanSource({ storage: this.storage, documentId: document.id, evidenceUri, markdownUri,
-        pagesTotal: coverage.totalPages, signal });
-      if (!source) return null;
+      if (!coverage || coverage.totalPages === null) return null;
+      const pagesTotal = coverage.totalPages;
+      // A document whose evidence holds every page is labelled by one call over that evidence; nothing is left to scan.
+      const whole = evidenceIsWholeDocument(coverage);
+      let source: Awaited<ReturnType<typeof openScanSource>> = null;
+      if (!whole) {
+        if (!scanEligible(coverage, selected.sampled)) return null;
+        // Redaction rewrites the Markdown under the same key; never read pages of a document it touched.
+        if (state.documentStage?.(document.id, "pii-detect")?.stats?.redacted === true) return null;
+        const evidenceUri = state.artifactLedger.readDocument(document.id, "summary-evidence");
+        const markdownUri = state.artifactLedger.readDocument(document.id, "markdown");
+        if (!evidenceUri || !markdownUri) return null;
+        source = await openScanSource({ storage: this.storage, documentId: document.id, evidenceUri, markdownUri,
+          pagesTotal, signal });
+        if (!source) return null;
+      }
       const textGeneration = state.run.pipeline.textGeneration;
       const call: ScanModelCall = async ({ system, prompt, maxOutputTokens, signal: callSignal }) => {
         const result = await generateOpenRouterText({
@@ -270,9 +277,7 @@ export class DocumentSummaryStage implements Stage {
           costCents: costCents ?? calculateAiUsageCostCents({ inputTokens, outputTokens,
             costPer1kInputTokens: this.config.costPer1kInputTokens, costPer1kOutputTokens: this.config.costPer1kOutputTokens }) };
       };
-      const outcome = await runSummaryScan({
-        call,
-        onAttempt: (result, info) => {
+      const onAttempt = (result: Parameters<Parameters<typeof runSummaryScan>[0]["onAttempt"]>[0], info: { step: number; attempt: number }) => {
           state.usageLedger.record({
             ...textUsageLabels(model),
             metric: "summary-generation",
@@ -284,7 +289,18 @@ export class DocumentSummaryStage implements Stage {
             outputTokens: result.outputTokens,
             metadata: { ...result.metadata, documentId: document.id, scanStep: info.step, scanAttempt: info.attempt },
           });
-        },
+      };
+      if (whole) {
+        const labelled = await runEvidenceLabels({ call, onAttempt, fileName: document.filename ?? "", evidenceText: selected.text,
+          pagesTotal, signal });
+        if (!labelled) console.warn(`[document-summary] summary_scan_first_step_failed document=${document.id}`);
+        else console.info(`[document-summary] summary_scan document=${document.id} steps=1 stopped_by=exhausted pages_read=${labelled.pagesRead} pages_total=${labelled.pagesTotal}`);
+        return labelled;
+      }
+      if (!source) return null;
+      const outcome = await runSummaryScan({
+        call,
+        onAttempt,
         source,
         fileName: document.filename ?? "",
         evidenceText: selected.text,

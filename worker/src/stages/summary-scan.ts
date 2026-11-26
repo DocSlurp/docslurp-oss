@@ -34,7 +34,14 @@ export const SCAN_SUMMARY_MAX_CHARS = 2_000;
 export const SCAN_FILENAME_MAX_CHARS = 200;
 export const SCAN_MAX_MODEL_CALLS = 6;
 export const SCAN_PAGES_PER_STEP = 10;
-export const SCAN_STABLE_OVERLAP = 0.8;
+/** A later round's sentence of additions is clipped to this many characters. */
+export const SCAN_ADDS_MAX_CHARS = 280;
+/** Topics one later round may add. */
+export const SCAN_ROUND_TOPICS = 3;
+/** Consecutive later rounds that add nothing before the scan stops. */
+export const SCAN_QUIET_ROUNDS = 2;
+/** Topics of the first round that later rounds can never push out. */
+const SCAN_FIRST_ROUND_TOPICS_KEPT = 4;
 export const SCAN_LARGE_DOCUMENT_PAGES = 200;
 /** Output budget of the first attempt of a step (labels, summary paragraph and proposals); a cut-off reply is retried at double. */
 export const SCAN_OUTPUT_TOKENS = 640;
@@ -43,25 +50,103 @@ const MAX_PAGE_READ_BYTES = 8_000;
 const MAX_RUN_READ_BYTES = 96_000;
 const ALLOWED_ACTIONS = ["read-exact", "read-relative", "stop"] as const;
 
-// --- The stability rule ------------------------------------------------------------------------------------------
+// --- Merging rounds ----------------------------------------------------------------------------------------------
+//
+// The first round reads a sample spread over the whole document and returns the whole result. Every later round reads
+// ten more pages and reports only what those pages add. Code merges the reports, so a round can extend the result but
+// can never replace what an earlier round established.
 
 function foldTopic(topic: string): string {
   return topic.normalize("NFC").toLowerCase().replace(/\s+/gu, " ").trim();
 }
 
-/** Overlap of two topic lists as sets of case-folded, whitespace-normalised strings. Two empty sets are equal. */
-export function topicOverlap(a: readonly string[], b: readonly string[]): number {
-  const left = new Set(a.map(foldTopic).filter(Boolean));
-  const right = new Set(b.map(foldTopic).filter(Boolean));
-  if (left.size === 0 && right.size === 0) return 1;
-  let shared = 0;
-  for (const topic of left) if (right.has(topic)) shared++;
-  return shared / (left.size + right.size - shared);
+/** What one later round reports about the pages it was shown. */
+export interface ScanDelta {
+  /** The pages belong in a document of the kind the result so far describes. */
+  fits: boolean;
+  /** The type of the pages shown, judged on their own. */
+  docType: DocType;
+  /** Subjects of these pages the topics so far lack. */
+  topics: string[];
+  /** One sentence naming what these pages cover and the summary lacks; empty when they add nothing. */
+  adds: string;
 }
 
-/** The loop condition: same document type and topic overlap of at least 0.8 across two consecutive states. */
-export function labelsStable(previous: ScanState, next: ScanState): boolean {
-  return previous.docType === next.docType && topicOverlap(previous.topics, next.topics) >= SCAN_STABLE_OVERLAP;
+/** The loop's carried state: the first round's result and every later round's report. */
+export interface ScanProgress {
+  /** Null until the first round has answered. */
+  base: ScanState | null;
+  rounds: ScanDelta[];
+  /** Later rounds in a row that added nothing. */
+  quiet: number;
+}
+
+/** A round that neither disagrees with the result so far nor adds to it. */
+function quietRound(base: ScanState, delta: ScanDelta): boolean {
+  if (delta.adds) return false;
+  return base.docType === "mixed" ? true : delta.fits || delta.docType === base.docType;
+}
+
+/**
+ * The document type, decided in code. The first round saw pages from across the document, so its type stands unless
+ * the later rounds contradict it: at least two of them, and at least half, say their pages do not fit and are of
+ * another type, which makes the document `mixed`. A first round that said `mixed` is overruled only when three or more
+ * later rounds exist and every one of them names the same single type.
+ */
+export function decideDocType(first: DocType, rounds: readonly ScanDelta[]): DocType {
+  if (rounds.length === 0) return first;
+  if (first === "mixed") {
+    const types = new Set(rounds.map((round) => round.docType));
+    const only = [...types][0]!;
+    return rounds.length >= 3 && types.size === 1 && only !== "mixed" ? only : "mixed";
+  }
+  const against = rounds.filter((round) => !round.fits && round.docType !== first).length;
+  return against >= 2 && against * 2 >= rounds.length ? "mixed" : first;
+}
+
+/**
+ * At most six topics: the first round's own, then what later rounds added, most often named first. The first four
+ * topics of the first round always stay.
+ */
+export function mergeTopics(first: readonly string[], rounds: readonly ScanDelta[]): string[] {
+  const known = new Set(first.map(foldTopic));
+  const added = new Map<string, { topic: string; count: number; order: number }>();
+  for (const round of rounds) {
+    for (const topic of round.topics) {
+      const key = foldTopic(topic);
+      if (!key || known.has(key)) continue;
+      const entry = added.get(key);
+      if (entry) entry.count++;
+      else added.set(key, { topic, count: 1, order: added.size });
+    }
+  }
+  const later = [...added.values()].sort((a, b) => b.count - a.count || a.order - b.order).map((entry) => entry.topic);
+  const kept = first.slice(0, Math.max(SCAN_MAX_TOPICS - later.length, SCAN_FIRST_ROUND_TOPICS_KEPT));
+  return [...kept, ...later.slice(0, SCAN_MAX_TOPICS - kept.length)];
+}
+
+/** The first round's summary followed by each later round's sentence, whole sentences only, within the summary limit. */
+export function mergeSummary(first: string, rounds: readonly ScanDelta[]): string {
+  let summary = first;
+  const seen = new Set<string>();
+  for (const round of rounds) {
+    const sentence = round.adds;
+    const key = foldTopic(sentence);
+    if (!sentence || seen.has(key)) continue;
+    seen.add(key);
+    if (Array.from(summary).length + 1 + Array.from(sentence).length > SCAN_SUMMARY_MAX_CHARS) continue;
+    summary = `${summary} ${sentence}`;
+  }
+  return summary;
+}
+
+/** The result a scan stores: the first round's result with every later round merged in. */
+export function composeScanState(progress: { base: ScanState; rounds: readonly ScanDelta[] }): ScanState {
+  return {
+    docType: decideDocType(progress.base.docType, progress.rounds),
+    topics: mergeTopics(progress.base.topics, progress.rounds),
+    summary: mergeSummary(progress.base.summary, progress.rounds),
+  };
 }
 
 // --- The reply ----------------------------------------------------------------------------------------------------
@@ -97,22 +182,74 @@ export function parseScanReply(text: string): { state: ScanState; next: unknown 
   return { state: { docType: docType as DocType, topics, summary }, next: reply.next };
 }
 
+function cleanTopics(raw: unknown, max: number): string[] {
+  const topics: string[] = [];
+  const seen = new Set<string>();
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (typeof item !== "string") continue;
+    const topic = clipChars(stripSummaryControlCharacters(item).replace(/\s+/gu, " ").trim(), SCAN_TOPIC_MAX_CHARS);
+    const key = foldTopic(topic);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    topics.push(topic);
+    if (topics.length >= max) break;
+  }
+  return topics;
+}
+
+/**
+ * Strict parse of a later round's reply. Invalid JSON, a non-object, a `fits` that is not a boolean or an out-of-enum
+ * type throws. Topics and the sentence are optional, cleaned and clipped.
+ */
+export function parseScanDelta(text: string): { delta: ScanDelta; next: unknown } {
+  const body = text.trim().replace(/^```(?:json)?\s*\n([\s\S]*)\n```$/u, "$1").trim();
+  const value: unknown = JSON.parse(body);
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("summary scan reply is not an object");
+  const reply = value as Record<string, unknown>;
+  if (typeof reply.fits !== "boolean") throw new Error("summary scan reply has no fits flag");
+  const docType = reply.docType;
+  if (typeof docType !== "string" || !(DOC_TYPES as readonly string[]).includes(docType)) throw new Error("summary scan reply has an unknown docType");
+  const adds = typeof reply.adds === "string"
+    ? clipChars(stripSummaryControlCharacters(reply.adds).replace(/\s+/gu, " ").trim(), SCAN_ADDS_MAX_CHARS)
+    : "";
+  return { delta: { fits: reply.fits, docType: docType as DocType, topics: cleanTopics(reply.topics, SCAN_ROUND_TOPICS), adds }, next: reply.next };
+}
+
 // --- The prompt ---------------------------------------------------------------------------------------------------
 
-const INSTRUCTION = "Label this document and summarize it for a search index. You are reading it in rounds: each round shows a few more pages, and you return the whole updated result.";
+const INSTRUCTION = "Label this document and summarize it for a search index. You are reading it in rounds: the first round shows pages sampled from across the document, and each later round shows a few more pages.";
 
-function outputContract(): string {
+const NEXT_CONTRACT = `"next" is a list holding at most a few of these actions, and nothing else is allowed: {"do":"read","unit":"page","at":N} or {"do":"read","unit":"page","at":N,"to":M} to read page N (or N to M); {"do":"read","unit":"page","relative":"next"|"prev"|"around","span":N} to read N pages after, before or around the pages shown now; {"do":"stop","reason":"answered"} when more pages would not change the result. Reading is limited and a proposal may be refused.`;
+
+const TYPE_LIST = DOC_TYPES.map((type) => `"${type}"`).join(", ");
+
+/** The first round returns the whole result. */
+function firstRoundContract(): string {
   return [
     "Return only one JSON object, with no markdown fence and no commentary:",
-    `{"docType": one of ${DOC_TYPES.map((type) => `"${type}"`).join(", ")}, "topics": at most ${SCAN_MAX_TOPICS} short strings (each at most ${SCAN_TOPIC_MAX_CHARS} characters), "summary": a one-paragraph summary that is concise and captures the main topics, entities and purpose, "next": optional list of what to read next}.`,
-    "The input contains representative excerpts, not the full document. Do not claim exhaustive coverage or infer details from omitted sections. Revise docType, topics and summary from everything seen so far, and keep them unchanged when the new pages add nothing.",
-    `"next" holds at most a few of these actions, and nothing else is allowed: {"do":"read","unit":"page","at":N} or {"do":"read","unit":"page","at":N,"to":M} to read page N (or N to M); {"do":"read","unit":"page","relative":"next"|"prev"|"around","span":N} to read N pages after, before or around the pages shown now; {"do":"stop","reason":"answered"} when more pages would not change the labels. Reading is limited and a proposal may be refused.`,
+    `{"docType": one of ${TYPE_LIST}, "topics": at most ${SCAN_MAX_TOPICS} short strings (each at most ${SCAN_TOPIC_MAX_CHARS} characters), "summary": a one-paragraph summary that is concise and captures the main topics, entities and purpose, "next": optional list of what to read next}.`,
+    "The input contains representative excerpts, not the full document. Do not claim exhaustive coverage or infer details from omitted sections.",
+    NEXT_CONTRACT,
+  ].join("\n");
+}
+
+/** A later round reports only what its pages add. The result so far is never rewritten by the model. */
+function laterRoundContract(): string {
+  return [
+    "The result so far describes the whole document and stays as it is. Report only what the pages shown now add to it.",
+    "Return only one JSON object, with no markdown fence and no commentary:",
+    `{"fits": true or false, "docType": one of ${TYPE_LIST}, "topics": list of at most ${SCAN_ROUND_TOPICS} short strings (each at most ${SCAN_TOPIC_MAX_CHARS} characters), "adds": one sentence or "", "next": optional list of what to read next}.`,
+    `"fits": true when the pages shown now belong in a document of the type the result so far gives; false when they are clearly a different kind of document.`,
+    `"docType": the type of the pages shown now, judged on their own.`,
+    `"topics": subjects of these pages that the topics so far do not already name; [] when there are none.`,
+    `"adds": one sentence of at most 40 words naming the subjects these pages cover that the summary so far does not mention, written so it can follow that summary. Use "" when the summary already covers them. Do not repeat the summary, do not mention page numbers, and do not call the document an excerpt.`,
+    NEXT_CONTRACT,
   ].join("\n");
 }
 
 export interface ScanPromptInput {
   fileName: string;
-  /** The carried state, or null in round 1. */
+  /** The merged result so far, or null in round 1. */
   state: ScanState | null;
   /** Round 1: the evidence text as it is today. Later rounds: one entry per page. */
   evidenceText?: string;
@@ -129,13 +266,13 @@ export function buildScanPrompt(input: ScanPromptInput) {
   const name = clipChars(stripSummaryControlCharacters(input.fileName).replace(/\s+/gu, " ").trim(), SCAN_FILENAME_MAX_CHARS);
   const parts = [
     `File name hint: ${name || "(none)"}`,
-    `Labels and summary from the previous round: ${input.state ? JSON.stringify(input.state) : "none yet (this is the first round)"}`,
+    `Result so far: ${input.state ? JSON.stringify(input.state) : "none yet (this is the first round)"}`,
     input.evidenceText ?? (input.pages ?? []).map((page) => `[Page ${page.page}]\n${page.text}`).join("\n\n"),
   ];
   return buildTrustedDocumentTaskPrompt({
     delimiter: "per-call",
     instruction: INSTRUCTION,
-    outputContract: outputContract(),
+    outputContract: input.state ? laterRoundContract() : firstRoundContract(),
     trustedContext: [{ label: "Progress", value: `Pages read so far: ${input.pagesRead} of ${input.pagesTotal}` }],
     untrustedContent: parts.join("\n\n"),
     untrustedContentLabel: "document text",
@@ -257,8 +394,9 @@ export interface ScanOutcome {
 }
 
 /** One step: one call plus at most one retry at double the output tokens when the reply was cut off. */
-async function callStep(args: { call: ScanModelCall; prompt: { system: string; prompt: string }; signal: AbortSignal;
-  onAttempt: (result: ScanModelResult, attempt: number) => void }): Promise<{ reply: { state: ScanState; next: unknown }; costCents: number; inputTokens: number }> {
+async function callStep<R>(args: { call: ScanModelCall; prompt: { system: string; prompt: string }; signal: AbortSignal;
+  parse: (text: string) => R;
+  onAttempt: (result: ScanModelResult, attempt: number) => void }): Promise<{ reply: R; costCents: number; inputTokens: number }> {
   let budget = SCAN_OUTPUT_TOKENS;
   let costCents = 0;
   let inputTokens = 0;
@@ -272,7 +410,7 @@ async function callStep(args: { call: ScanModelCall; prompt: { system: string; p
       budget *= 2;
       continue;
     }
-    return { reply: parseScanReply(result.text), costCents, inputTokens };
+    return { reply: args.parse(result.text), costCents, inputTokens };
   }
   throw new Error("unreachable");
 }
@@ -296,14 +434,15 @@ export function scanBudget(args: { wallMs: number }): ReadBudget {
 
 const MAX_COST_CENTS = 2;
 
-/** The task's starting state: never a real result (its summary is empty), so the first step can never look stable. */
-const EMPTY_STATE: ScanState = { docType: "other", topics: [], summary: "" };
+/** The task's starting state: no first-round result yet, so the loop can never look finished before it has one. */
+const EMPTY_PROGRESS: ScanProgress = { base: null, rounds: [], quiet: 0 };
 
 /**
  * Run the scan as one loop. The first step is seeded with the evidence text the single-call summary reads today (as one
  * slice and every evidence page marked seen, so the plan never repeats them); later steps read ten further pages each.
- * Replies from the first step are honoured like any other. Returns null when the first step fails (the caller uses the
- * single call); a later failure keeps the latest good state.
+ * The first step returns the whole result; each later step reports what its pages add, and code merges the reports.
+ * The loop stops when two later steps in a row add nothing. Returns null when the first step fails (the caller uses the
+ * single call); a later failure keeps everything merged so far.
  */
 export async function runSummaryScan(args: {
   call: ScanModelCall;
@@ -338,28 +477,31 @@ export async function runSummaryScan(args: {
     args.onAttempt(result, { step, attempt: n });
   };
 
-  const task: ReadTask<ScanState> = {
-    id: "document-labels@1",
-    init: EMPTY_STATE,
+  const task: ReadTask<ScanProgress> = {
+    id: "document-labels@2",
+    init: EMPTY_PROGRESS,
     coverage: "representative",
     allowedActions: ALLOWED_ACTIONS,
     minSteps: total > SCAN_LARGE_DOCUMENT_PAGES ? 2 : 1,
-    // Stable needs two real states: the empty starting state is never one of them.
-    done: (previous, next) => previous.summary !== "" && labelsStable(previous, next),
+    // Finished when later rounds keep adding nothing. One quiet round is not enough: the next pages may differ.
+    done: (_previous, next) => next.base !== null && next.quiet >= SCAN_QUIET_ROUNDS,
     async step({ state, slices, step, signal }) {
-      let prompt: ReturnType<typeof buildScanPrompt>;
-      if (step === 1) {
-        // The seeded batch: the evidence text exactly as the single-call summary reads it, with no carried state.
-        prompt = buildScanPrompt({ fileName: args.fileName, state: null, evidenceText: args.evidenceText, pagesRead: shown, pagesTotal: total });
-      } else {
+      try {
+        if (!state.base) {
+          // The seeded batch: the evidence text exactly as the single-call summary reads it, with no carried state.
+          const prompt = buildScanPrompt({ fileName: args.fileName, state: null, evidenceText: args.evidenceText, pagesRead: shown, pagesTotal: total });
+          const result = await callStep({ call: args.call, prompt, signal, parse: parseScanReply, onAttempt: attempt(step) });
+          firstStepOk = true;
+          return { reply: { state: { base: result.reply.state, rounds: [], quiet: 0 }, next: result.reply.next }, costCents: result.costCents, inputTokens: result.inputTokens };
+        }
+        const base = state.base;
         shown += slices.length;
         const pages = slices.map((slice) => ({ page: slice.ref.start, text: slice.text }));
-        prompt = buildScanPrompt({ fileName: args.fileName, state, pages, pagesRead: shown, pagesTotal: total });
-      }
-      try {
-        const result = await callStep({ call: args.call, prompt, signal, onAttempt: attempt(step) });
-        if (step === 1) firstStepOk = true;
-        return { reply: result.reply, costCents: result.costCents, inputTokens: result.inputTokens };
+        const prompt = buildScanPrompt({ fileName: args.fileName, state: composeScanState({ base, rounds: state.rounds }), pages, pagesRead: shown, pagesTotal: total });
+        const result = await callStep({ call: args.call, prompt, signal, parse: parseScanDelta, onAttempt: attempt(step) });
+        const { delta } = result.reply;
+        const progress: ScanProgress = { base, rounds: [...state.rounds, delta], quiet: quietRound(base, delta) ? state.quiet + 1 : 0 };
+        return { reply: { state: progress, next: result.reply.next }, costCents: result.costCents, inputTokens: result.inputTokens };
       } catch (error) {
         if (step === 1) firstStepFailed = true;
         throw error;
@@ -388,19 +530,57 @@ export async function runSummaryScan(args: {
         batch: [{ ref: { unit: "page", start: firstPage, end: firstPage }, status: "ok", text: args.evidenceText }],
       },
     });
-    if (!firstStepOk) return null;
+    const base = result.state.base;
+    if (!firstStepOk || !base) return null;
     // The engine counts the seeded batch as one page read. It is an evidence page, so drop that one unit and add the
     // evidence pages themselves; what remains is the pages later steps read.
     const extraPages: number[] = [];
     for (const [from, to] of result.coverage.ranges) for (let page = from; page <= to; page++) if (!evidence.has(page)) extraPages.push(page);
     return {
-      state: result.state, steps: result.usage.steps, stoppedBy: result.stoppedBy,
+      state: composeScanState({ base, rounds: result.state.rounds }), steps: result.usage.steps, stoppedBy: result.stoppedBy,
       pagesRead: evidence.size + extraPages.length, pagesTotal: total, extraPages,
       costCents: cost, inputTokens: inTokens, outputTokens: outTokens,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Labels for a document whose evidence already holds every page: one call with the first round's prompt, no page reads
+ * and no loop. Returns null when the reply cannot be used (the caller uses the single call).
+ */
+export async function runEvidenceLabels(args: {
+  call: ScanModelCall;
+  onAttempt: (result: ScanModelResult, info: { step: number; attempt: number }) => void;
+  fileName: string;
+  evidenceText: string;
+  pagesTotal: number;
+  signal: AbortSignal;
+}): Promise<ScanOutcome | null> {
+  let costCents = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  try {
+    const prompt = buildScanPrompt({ fileName: args.fileName, state: null, evidenceText: args.evidenceText, pagesRead: args.pagesTotal, pagesTotal: args.pagesTotal });
+    const result = await callStep({ call: args.call, prompt, signal: args.signal, parse: parseScanReply,
+      onAttempt: (attempt, n) => {
+        costCents += attempt.costCents ?? 0;
+        inputTokens += attempt.inputTokens;
+        outputTokens += attempt.outputTokens;
+        args.onAttempt(attempt, { step: 1, attempt: n });
+      } });
+    return { state: result.reply.state, steps: 1, stoppedBy: "exhausted", pagesRead: args.pagesTotal, pagesTotal: args.pagesTotal,
+      extraPages: [], costCents, inputTokens, outputTokens };
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a document's evidence holds every page, so one call can label it and nothing is left to scan. */
+export function evidenceIsWholeDocument(coverage: { totalPages: number | null; pages: Array<{ pageNumber: number }>; pageReferences: "verified" | "unavailable" } | undefined): boolean {
+  return !!coverage && coverage.pageReferences === "verified" && coverage.totalPages !== null
+    && coverage.totalPages > 0 && coverage.pages.length === coverage.totalPages;
 }
 
 /** The optional artifact fields for a finished scan. */
