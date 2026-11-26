@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { SUMMARY_TREE_BUILD_HEARTBEAT_MS, SUMMARY_TREE_BUILD_STALE_MS, SUMMARY_TREE_CORRECTED_SKIP_REASON, summaryTreeNodeCap, type SummaryRow, type SummaryTreeSkipReason } from "@docslurp/shared";
 import type { Sql } from "postgres";
 
@@ -388,7 +389,9 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
   const artifactRoot = summaryTreeArtifactRoot(input.runRoot, documentId);
   const artifactUri = deps.artifacts.uri(summaryTreePackKey(artifactRoot));
   let space = { model: input.space.model, dimensions: input.space.dimensions };
-  const owner = input.owner ?? `run:${runId}`;
+  // Unique per build: a stale build of an earlier attempt of the same run never shares the owner of the build that took
+  // the tree over after a rescan, so its later writes (rows from the pre-rescan text) are refused.
+  const owner = input.owner ?? `run:${runId}#${randomUUID()}`;
 
   let prior: Awaited<ReturnType<typeof loadSummaryTreeState>>;
   try {

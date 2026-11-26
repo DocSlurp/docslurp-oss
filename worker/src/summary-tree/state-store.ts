@@ -1,4 +1,5 @@
 import {
+  piiWithholding,
   SUMMARY_TREE_BUILD_STALE_MS,
   SUMMARY_TREE_CLEANUP_KIND,
   SUMMARY_TREE_CORRECTED_SKIP_REASON,
@@ -121,20 +122,34 @@ export class SummaryTreeBuildInProgress extends SummaryTreeStateRefused {
  * FOR NO KEY UPDATE: it still excludes deletion (FOR UPDATE), the supersession trigger's update and other
  * builders, but not the FOR KEY SHARE that run creation takes on a chain's latest version, so uploading a new
  * version while this tree builds is not refused. */
+/**
+ * Whether the PII outcome lets a tree be built, read through the shared fail-closed helper (a malformed or unknown
+ * outcome withholds the whole document). Page- and section-scoped withholding build from the rewritten text (withheld
+ * pages are already the placeholder), so the pre-scan artifacts they withhold and the earlier tree they withdrew do not
+ * refuse a new one. Whole-document, redaction and every other withheld outcome do.
+ */
+function summaryTreePiiAllows(row: { status: string | null; pii: unknown; indexing_mode?: string | null; withheld_count: number; redacted_detection: boolean; withdrawn: boolean }): boolean {
+  const withholding = piiWithholding({ status: row.status, metadata: row.pii === null || row.pii === undefined ? {} : { pii: row.pii }, indexingMode: row.indexing_mode });
+  if (withholding.scope === "document") return false;
+  if ((row.pii as { redacted?: unknown } | null)?.redacted === true || row.redacted_detection) return false;
+  if (withholding.scope === "pages" || withholding.scope === "sections") return true;
+  return Number(row.withheld_count) === 0 && !row.withdrawn;
+}
+
 export async function withSummaryTreeDocumentLock<T>(sql: Client, scope: SummaryTreeScope, documentId: string, owner: string | undefined, work: (tx: Client) => Promise<T>): Promise<T> {
   assertScope(scope);
   const run = async (tx: Client): Promise<T> => {
-    const [document] = await tx`
-      select id from documents where id = ${documentId} and org_id = ${scope.orgId} and project_id = ${scope.projectId}
+    const [document] = await tx<Array<{ id: string; status: string | null; pii: unknown; indexing_mode: string | null; withheld_count: number; redacted_detection: boolean; withdrawn: boolean }>>`
+      select id, status, indexing_mode, metadata->'pii' as pii,
+        coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
+          then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) as withheld_count,
+        exists (select 1 from pii_detections pd where pd.document_id = documents.id and pd.redacted) as redacted_detection,
+        exists (select 1 from document_summary_trees t where t.document_id = documents.id and t.error = 'pii-withheld') as withdrawn
+      from documents where id = ${documentId} and org_id = ${scope.orgId} and project_id = ${scope.projectId}
         and purged_at is null and superseded_at is null and archived_at is null
-        and not coalesce((metadata->'pii'->>'blocked')::boolean, false)
-        and not coalesce((metadata->'pii'->>'redacted')::boolean, false)
-        and coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
-          then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) = 0
-        and not exists (select 1 from pii_detections pd where pd.document_id = documents.id and pd.redacted)
-        and not exists (select 1 from document_summary_trees t where t.document_id = documents.id and t.error = 'pii-withheld')
         for no key update
     `;
+    if (document && !summaryTreePiiAllows(document)) throw new SummaryTreeStateRefused("The document is not live in this project");
     if (!document) throw new SummaryTreeStateRefused("The document is not live in this project");
     if (owner !== undefined) {
       const [held] = await tx`select document_id from document_summary_trees
@@ -297,8 +312,11 @@ export async function enqueueSummaryTreeCleanup(sql: Client, args: {
  * A document that already has a tree was blocked or redacted by the PII policy (a rescan of a document processed
  * before the policy, a retry in place): what the tree says was written from the text that is now withheld. Its state
  * leaves `ready` at once (search reads only `ready` trees) and strict removal of its summary rows and artifact is
- * queued; an in-place redacted/withheld document cannot build again. A new document/version is required,
- * so an old in-flight object write can never overwrite a safe replacement under the same artifact root. A document without
+ * queued. A redacted or wholly withheld document cannot build again (a new document or version is required, so an old
+ * in-flight object write can never overwrite a safe replacement under the same artifact root). A page- or
+ * section-scoped document builds again from the rewritten text; a stale build of an earlier attempt of the same run is
+ * fenced by its owner, which is unique per build (`run:<runId>#<build>`, summary-tree/build.ts), so its later writes are
+ * refused once a newer build holds the tree. A document without
  * a tree (every first ingestion) is left alone, so its own build is not disturbed. Returns whether a tree was withdrawn.
  */
 export async function withdrawSummaryTreeForPii(sql: Client, documentId: string): Promise<boolean> {

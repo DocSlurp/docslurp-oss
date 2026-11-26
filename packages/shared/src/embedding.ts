@@ -3,6 +3,10 @@ import { assertNoAutomaticSelectionDenied } from "./automatic-model-selection.js
 import { lookupPrivateModelRoute, parsePrivateModelUri, PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
 import { hostedModelsAllowed } from "./private-model-mode.js";
 import { embeddingSpaceUri, type ModelCallConfig } from "./model-provenance.js";
+import { defaultLocalModelBaseUrl, loopbackModelBaseUrlProblem, tenantModelEndpointRefusalMessage } from "./model-endpoints.js";
+
+// Endpoint admission lives in model-endpoints.ts; these names stay importable from here for existing callers.
+export { assertTenantModelEndpointAllowed, isLoopbackModelBaseUrl } from "./model-endpoints.js";
 
 export const supportedEmbeddingModels = [
   "text-embedding-3-small",
@@ -532,10 +536,7 @@ export function resolveEmbeddingRoute(config: EmbeddingConfig) {
   }
   const known = embeddingModelCatalogByUri[embeddingModelBaseUri(config.modelUri)];
   const openAiCompatibleLocal = ["ollama", "vllm", "lmstudio"].includes(parsed.provider);
-  const defaultBaseUrl =
-    parsed.provider === "ollama" ? "http://127.0.0.1:11434/v1" :
-      parsed.provider === "vllm" ? "http://127.0.0.1:8000/v1" :
-        parsed.provider === "lmstudio" ? "http://127.0.0.1:1234/v1" : null;
+  const defaultBaseUrl = defaultLocalModelBaseUrl(parsed.provider);
   // Explicit project dimensions; only these are sent as a request parameter to
   // OpenAI-compatible servers that support Matryoshka truncation (e.g. vLLM).
   const requestedDimensions = config.dimensions;
@@ -1057,7 +1058,8 @@ export function visionModelUriProblem(uri: string): string | null {
   const baseUrl = params.get("baseUrl");
   if (baseUrl !== null) {
     if (!(LOCAL_BASE_URL_PROVIDERS as readonly string[]).includes(provider)) return "baseUrl overrides are only supported for local model providers";
-    if (!isLoopbackModelBaseUrl(baseUrl)) return "Local model baseUrl must use a loopback host";
+    const shape = loopbackModelBaseUrlProblem(baseUrl);
+    if (shape) return tenantModelEndpointRefusalMessage(shape);
   }
   if (provider === PRIVATE_MODEL_PROVIDER) return null;
   if ((LOCAL_VISION_PROVIDERS as readonly string[]).includes(provider)) return null;
@@ -1441,11 +1443,12 @@ export const embeddingConfigSchema = z
         message: "baseUrl overrides are only supported for local model providers",
       });
     }
-    if (baseUrl && !isLoopbackModelBaseUrl(baseUrl)) {
+    const baseUrlShape = baseUrl ? loopbackModelBaseUrlProblem(baseUrl) : null;
+    if (baseUrlShape) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["modelUri"],
-        message: "Local model baseUrl must use a loopback host",
+        message: tenantModelEndpointRefusalMessage(baseUrlShape),
       });
     }
   })
@@ -1637,11 +1640,7 @@ export function resolveVisionRoute(config: VisionConfig): VisionExecutionConfig 
       benchmarkProfile: config.benchmarkProfile,
     };
   }
-  const defaultBaseUrl =
-    provider === "openrouter" ? OPENROUTER_BASE_URL :
-      provider === "ollama" ? "http://127.0.0.1:11434/v1" :
-        provider === "vllm" ? "http://127.0.0.1:8000/v1" :
-          provider === "lmstudio" ? "http://127.0.0.1:1234/v1" : null;
+  const defaultBaseUrl = provider === "openrouter" ? OPENROUTER_BASE_URL : defaultLocalModelBaseUrl(provider);
 
   return {
     target: config.target,
@@ -1654,23 +1653,4 @@ export function resolveVisionRoute(config: VisionConfig): VisionExecutionConfig 
     remoteFallbackModelUri: config.remoteFallbackModelUri,
     benchmarkProfile: config.benchmarkProfile,
   };
-}
-
-/** True when `value` is a URL on a loopback host (`localhost`, `127.0.0.1`, `[::1]`). */
-export function isLoopbackModelBaseUrl(value: string): boolean {
-  try {
-    const host = new URL(value).hostname.toLowerCase();
-    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
-  } catch {
-    return false;
-  }
-}
-
-/** Server-side admission for tenant-selected loopback services; opt in only on trusted single-tenant hosts. */
-export function assertTenantModelEndpointAllowed(modelUri: string): void {
-  const provider = parseLlmModelUri(modelUri).provider;
-  if (["ollama", "vllm", "lmstudio"].includes(provider)
-      && process.env.DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS !== "true") {
-    throw new Error("Tenant-selected local model endpoints are disabled");
-  }
 }

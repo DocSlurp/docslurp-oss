@@ -2,7 +2,7 @@ import { ApplicationFailure } from "@temporalio/common";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import { createHash } from "node:crypto";
 import type { RenderDocumentPageInput } from "@docslurp/shared";
-import { pageImagesOnSql, pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, isBillingEnforced } from "@docslurp/shared";
+import { isPageImageWithheld, piiScanIncomplete, pageImagesOnSql, pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, piiWithholding, isBillingEnforced } from "@docslurp/shared";
 import type { Store } from "../db/store.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
 import { orgSpendBlock } from "../db/spend-check.js";
@@ -12,6 +12,21 @@ import { buildAllocatedResourceObservation, buildLocalComputeUsageEvent, resolve
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { assertParseSourceDecided } from "../lib/parse-source.js";
+
+/**
+ * A page is never rasterized from the source when the PII policy withholds it. Page-scoped withholding refuses only
+ * the withheld pages; any other withholding with withheld artifacts (redaction, unpaged sections, a malformed outcome)
+ * refuses every page, since its page attribution is unknown.
+ */
+export function pageRenderWithheld(row: { status: string | null; metadata: unknown; withheld: boolean; indexing_mode?: string | null }, pageNumber: number): boolean {
+  const withholding = piiWithholding({ status: row.status, metadata: row.metadata, indexingMode: row.indexing_mode });
+  // Page scope, or a redaction that recorded its pages: a page renders only when its pixels are known clean (a redacted
+  // page's image still shows the value it redacted).
+  // A scan in progress (deferred modes) never renders a page it has not scanned.
+  if (piiScanIncomplete(withholding) && isPageImageWithheld(withholding, pageNumber)) return true;
+  if (withholding.scope === "pages" || (withholding.scope === "none" && withholding.redactedPages)) return isPageImageWithheld(withholding, pageNumber);
+  return withholding.scope === "document" || row.withheld;
+}
 
 /** Revalidate the live document before rendering and under the final write lock. */
 export async function renderDocumentPage(deps: { store: Store; storage: ArtifactStore; runner: CommandRunner }, input: RenderDocumentPageInput, signal?: AbortSignal) {
@@ -29,8 +44,8 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   } catch (error) {
     throw ApplicationFailure.nonRetryable("Document page needs a fresh scan: reprocess the document", "ParseSourceUnscanned", error instanceof Error ? error.name : "refused");
   }
-  const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; page_images: boolean; low: string | null; high: string | null }[]>`
-    select d.org_id, d.project_id,
+  const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; status: string | null; metadata: unknown; page_images: boolean; low: string | null; high: string | null }[]>`
+    select d.org_id, d.project_id, d.status, d.metadata, d.indexing_mode,
       coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'), 0) > 0 as withheld,
       ${sql.unsafe(pageImagesOnSql("p"))} as page_images,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 120)} as low,
@@ -38,7 +53,7 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
     from documents d join project_runs r on r.id=d.run_id left join projects p on p.id=d.project_id
     where d.id=${document.id} and r.id=${input.runId}
   `;
-  if (!row || row.withheld) throw new Error("Document page is unavailable");
+  if (!row || pageRenderWithheld(row, input.pageNumber)) throw new Error("Document page is unavailable");
   // Page images off for the project (pipeline.pageImages: false): no viewer page image is rendered (fail closed).
   if (row.page_images === false) throw ApplicationFailure.nonRetryable("Page images are turned off for this project", "PageImagesDisabled");
   const dpi = input.dpi ?? pageRenderDpi(quality);
@@ -73,10 +88,12 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   signal?.throwIfAborted();
   await sql.begin(async tx => {
     const client = tx as unknown as typeof sql;
-    const live = await client`select d.id from documents d
-      where d.id=${document.id} and d.run_id=${input.runId} and d.status='completed'
-      and coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'),0)=0 for update of d`;
-    if (!live.length) throw new Error("Document page is unavailable");
+    const live = await client<{ status: string | null; metadata: unknown; withheld: boolean; indexing_mode: string | null }[]>`select d.status, d.metadata, d.indexing_mode,
+      coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'),0) > 0 as withheld
+      from documents d
+      where d.id=${document.id} and d.run_id=${input.runId} and d.status='completed' for update of d`;
+    // Rechecked under the lock: a rescan that withheld this page between the read and the write wins.
+    if (!live[0] || pageRenderWithheld(live[0], input.pageNumber)) throw new Error("Document page is unavailable");
     signal?.throwIfAborted();
     await client`update project_runs set artifacts=coalesce(artifacts,'{}'::jsonb) || ${client.json({ [slot]: page.artifactUri, ...(quality === "reader" ? { [`${document.id}:page-${input.pageNumber}`]: page.artifactUri } : {}) })}::jsonb where id=${input.runId}`;
     await client`delete from document_page_renders where document_id=${document.id} and run_id=${input.runId} and page_number=${input.pageNumber} and quality=${quality} and dpi=${dpi}`;

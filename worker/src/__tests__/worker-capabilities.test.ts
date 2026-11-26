@@ -170,6 +170,14 @@ describe("WorkerCapabilityRegistry", () => {
       lexicalColumnPresent: async () => false,
     })).toEqual(["extraction.config-v1", "workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards", "workflow.quarantine-document-threshold", "workflow.quarantine-shards"]);
   });
+
+  it("advertises pii.block-document only once the findings table exists", async () => {
+    const base = { creditLeasesActive: async () => false, lexicalColumnPresent: async () => false };
+    expect(await resolveWorkerCapabilities({ ...base, piiFindingsTable: async () => true })).toContain("pii.block-document");
+    expect(await resolveWorkerCapabilities({ ...base, piiFindingsTable: async () => false })).not.toContain("pii.block-document");
+    expect(await resolveWorkerCapabilities({ ...base, piiFindingsTable: async () => { throw new Error("db down"); } })).not.toContain("pii.block-document");
+    expect(await resolveWorkerCapabilities(base)).not.toContain("pii.block-document");
+  });
 });
 
 describe("workerInstanceId", () => {

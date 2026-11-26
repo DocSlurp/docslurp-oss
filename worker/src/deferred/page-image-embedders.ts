@@ -1,4 +1,16 @@
 import { instrumentFetch } from "@docslurp/shared/observability";
+import { logProviderErrorDetail, providerErrorCodeForStatus, providerErrorSummary } from "../lib/provider-retry.js";
+
+/** The response body as JSON; a body that is not JSON fails with a fixed message (the parser's own quotes the body). */
+async function readJsonBody(response: Response, provider: string): Promise<unknown> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    logProviderErrorDetail(provider, "page image embedding", "invalid-json", response.status, text);
+    throw new Error(`Page image embedding response was not valid JSON (${response.status})`);
+  }
+}
 import {
   authorizePrivateModelCall,
   getPrivateModelEndpointRegistry,
@@ -59,8 +71,10 @@ export function createGeminiPageEmbedder(args: { apiKey: string; dims?: 3072; fe
   const url = `${GEMINI_ENDPOINT}/models/${GEMINI_PAGE_EMBED_MODEL}:batchEmbedContents?key=${encodeURIComponent(args.apiKey)}`;
 
   async function post(parts: Array<Record<string, unknown>>, signal?: AbortSignal) {
+    // The key rides in the URL's query: a redirect is refused, never followed with it.
     const response = await doFetch(url, {
       method: "POST",
+      redirect: "error",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         requests: parts.map((part) => ({
@@ -72,10 +86,12 @@ export function createGeminiPageEmbedder(args: { apiKey: string; dims?: 3072; fe
       signal,
     });
     if (!response.ok) {
-      const detail = (await response.text().catch(() => "")).slice(0, 300);
-      throw new Error(`Gemini embedding request failed (${response.status}): ${detail}`);
+      // The response text goes to the worker log; the error (stored on the run) carries the code and status only.
+      const code = providerErrorCodeForStatus(response.status);
+      logProviderErrorDetail("gemini", "page image embedding", code, response.status, await response.text().catch(() => ""));
+      throw new Error(`Gemini embedding request failed: ${providerErrorSummary(code, response.status)}`);
     }
-    const json = (await response.json()) as {
+    const json = await readJsonBody(response, "gemini") as {
       embeddings?: Array<{ values?: number[] }>;
       usageMetadata?: { promptTokenCount?: number };
     };
@@ -139,10 +155,11 @@ export function createPrivateEndpointPageEmbedder(args: { modelUri: string; priv
       signal,
     });
     if (!response.ok) {
-      const detail = (await response.text().catch(() => "")).slice(0, 300);
-      throw new Error(`Private page embedding request failed (${response.status}): ${detail}`);
+      const code = providerErrorCodeForStatus(response.status);
+      logProviderErrorDetail("private", "page image embedding", code, response.status, await response.text().catch(() => ""));
+      throw new Error(`Private page embedding request failed: ${providerErrorSummary(code, response.status)}`);
     }
-    const json = (await response.json()) as {
+    const json = await readJsonBody(response, "private") as {
       data?: Array<{ embedding?: number[]; index?: number }>;
       usage?: { prompt_tokens?: number; total_tokens?: number };
     };

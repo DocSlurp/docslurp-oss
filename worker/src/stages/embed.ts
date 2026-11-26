@@ -4,7 +4,7 @@ import { recordDocumentMilestone } from "../pipeline/run-milestones.js";
 import { createHash } from "node:crypto";
 
 import { RunPolicyError } from "../lib/document-failure.js";
-import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, embeddingRequestConfig, resolveAllowedPipelineTextModel, pipelineVersionFeatures } from "@docslurp/shared";
+import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, embeddingRequestConfig, resolveAllowedPipelineTextModel, pipelineVersionFeatures, withoutPiiPlaceholders } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
@@ -288,6 +288,9 @@ export class EmbedStage implements Stage {
                   sourceKind: document.mimeType.startsWith("image/") ? "image" : null
                 })
               : await fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap, chunkMaxTokens, signal), signal, { cached: tableCells?.cached });
+            // Withheld pages and sections are placeholders in the text: a chunk of placeholders only is not indexed, and a
+            // chunk spanning a clean and a withheld page keeps its clean text and drops the withheld page.
+            chunkDrafts = withoutPlaceholderChunks(chunkDrafts);
             contentHash = hashContent(
               JSON.stringify({
                 documentTitle: document.filename,
@@ -1220,4 +1223,25 @@ async function fallbackChunkDrafts(
     evidenceType: "raw",
     chunkIndex: index
   }));
+}
+
+/**
+ * Chunks with PII placeholders removed (see `withoutPiiPlaceholders`); chunks left empty are dropped. A chunk that loses
+ * a withheld page loses it from its pages and its source trace too, and one left with a single page is on that page.
+ */
+export function withoutPlaceholderChunks<T extends { text: string; pageNumber: number | null; pageNumbers: number[]; sourceTrace?: { pageNumbers?: number[] } | null }>(chunks: T[]): T[] {
+  return chunks.flatMap((chunk) => {
+    const cleaned = withoutPiiPlaceholders(chunk.text);
+    if (!cleaned.changed) return [chunk];
+    if (!cleaned.text) return [];
+    const withheld = new Set(cleaned.withheldPages);
+    if (withheld.size === 0) return [{ ...chunk, text: cleaned.text }];
+    // A section placeholder has no page: such a chunk keeps its pages (the section is gone from its text).
+    const pageNumbers = chunk.pageNumbers.filter((page) => !withheld.has(page));
+    const pageNumber = pageNumbers.length === 1 ? pageNumbers[0]! : chunk.pageNumber !== null && withheld.has(chunk.pageNumber) ? null : chunk.pageNumber;
+    const sourceTrace = chunk.sourceTrace && Array.isArray(chunk.sourceTrace.pageNumbers)
+      ? { ...chunk.sourceTrace, pageNumbers: chunk.sourceTrace.pageNumbers.filter((page) => !withheld.has(page)) }
+      : chunk.sourceTrace;
+    return [{ ...chunk, text: cleaned.text, pageNumbers, pageNumber, ...(sourceTrace !== undefined ? { sourceTrace } : {}) }];
+  });
 }

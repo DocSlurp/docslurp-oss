@@ -133,6 +133,10 @@ export interface VisionPageOutput {
   outputTokens: number;
   usageSource: string;
   fallbackUsed: boolean;
+  /**
+   * Why a fallback produced this page: a vision runtime's `VisionFallbackReason` code, or a page-route executor's own
+   * fallback label (for example `canonical-page-slice`). Never error text.
+   */
   fallbackReason: string | null;
   text: string;
   costCents: number;
@@ -2773,11 +2777,15 @@ export function buildFailedVisionAttemptUsage(args: {
   };
 }
 
-/** A refusal of the run's vision route before anything was sent: an unadmitted or unpriced model, or an unproven host region. */
+/**
+ * A refusal of the run's vision route before anything was sent: an unadmitted or unpriced model, an unproven host
+ * region, or a model endpoint this deployment refuses (`TenantModelEndpointRefusedError`, for example a local server
+ * route while tenant local endpoints are off). The page keeps its own text; the document does not fail.
+ */
 export function isVisionModelRefusal(error: unknown): boolean {
   for (let current = error, depth = 0; current && depth < 8; current = (current as { cause?: unknown }).cause, depth += 1) {
     const name = (current as { name?: unknown }).name;
-    if (name === "VisionRouteRegionError" || name === "UnpricedVisionRouteError") return true;
+    if (name === "VisionRouteRegionError" || name === "UnpricedVisionRouteError" || name === "TenantModelEndpointRefusedError") return true;
   }
   return false;
 }

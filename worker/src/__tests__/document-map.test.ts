@@ -68,7 +68,7 @@ async function setup(options: TestPdfOptions, texts: string[], extra: { pipeline
   const decide = vi.fn();
   const usage = new PipelineUsageEventLedger();
   const stage = new DocumentMapStage(
-    { get: async () => ({ path: file }) } as never, {} as never, {} as never,
+    { get: async () => ({ path: file }) } as never, { bucket: "b", uri: (key: string) => `s3://b/${key}` } as never, {} as never,
     { openRouterApiKey: "k", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.04 } as unknown as Config,
     {
       sql: () => sql,
@@ -223,6 +223,13 @@ describe("DocumentMapStage coarse text layer PII", () => {
     expect(pages.rows).toHaveLength(8);
     const [state] = (await db.query<{ state: string }>(`select state from document_page_states where document_id='d1' and page_number=2`)).rows;
     expect(state!.state).toBe("blocked-pii");
+    // Deferred mode runs no pii-detect: the map's match is the document's page-scoped outcome (H2), which every
+    // serve-side reader uses, with the source withheld and an operator-only finding.
+    const [doc] = (await db.query<{ metadata: { pii?: Record<string, unknown> } }>(`select metadata from documents where id='d1'`)).rows;
+    expect(doc!.metadata.pii).toMatchObject({ scope: "pages", withheldPages: [2], withheldPageTypes: { "2": ["ssn"] } });
+    expect(doc!.metadata.pii!.withheldArtifactUris).toEqual(expect.arrayContaining([expect.stringMatching(/^s3:\/\/b\//)]));
+    const findings = (await db.query<{ page_number: number }>(`select page_number from pii_page_findings where document_id='d1'`)).rows;
+    expect(findings).toEqual([{ page_number: 2 }]);
   });
 
   it("drops a kept model read of a page it blocks (round 8 M1), keeping its billing decision", async () => {

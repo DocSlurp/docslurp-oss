@@ -37,6 +37,19 @@ describe("native Perplexity embeddings", () => {
     expect(onUsage).toHaveBeenCalledExactlyOnceWith(19);
   });
 
+  it("keeps a body that is not JSON out of the error and its cause, and never follows a redirect", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const marker = "INTERNAL-ONLY-BODY service-token=abc123";
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(`<html>${marker}</html>`, { status: 502 }));
+    const error = await embedPerplexity({ model: "pplx-embed-v1-0.6b", apiKey: "test", values: ["first"], onUsage: vi.fn(), fetch })
+      .then(() => new Error("resolved"), (caught: unknown) => caught as Error & { cause?: unknown });
+    expect(error.message).toBe("Native Perplexity embedding response could not be decoded");
+    expect(error.cause).toBeUndefined();
+    expect(JSON.stringify(error)).not.toContain(marker);
+    expect(fetch.mock.calls[0]![1]!.redirect).toBe("error");
+    warn.mockRestore();
+  });
+
   it("exposes status and retry delay without reflecting provider response content", async () => {
     const onUsage = vi.fn();
     await expect(embedPerplexity({ model: "pplx-embed-v1-0.6b", apiKey: "test", values: ["first"], onUsage,

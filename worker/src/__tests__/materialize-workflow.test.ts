@@ -254,7 +254,7 @@ describe("runMaterializeRange activity", () => {
   };
   const deps = (extra: object = {}) => ({
     store, sql,
-    materializer: { storage: {} as never, runner: {} as never, ops,
+    materializer: { storage: { uri: (key: string) => `s3://test-bucket/${key}` } as never, runner: {} as never, ops,
       config: { lancedb: { root: "/tmp/none", storageOptions: undefined, params: new URLSearchParams() }, defaultInferenceLane: "balanced", vectorBackends: ["lancedb"] } as never },
     ...extra,
   });
@@ -262,6 +262,9 @@ describe("runMaterializeRange activity", () => {
 
   beforeEach(async () => {
     await db.exec(`delete from document_chunks; delete from document_pages; delete from document_page_states; delete from usage_events where run_id in ('m1','m2');`);
+    // A deferred match records the PII outcome on the document (status, metadata.pii, findings): reset it so one test's
+    // outcome never decides a later one.
+    await db.exec(`delete from pii_page_findings where document_id = 'd1'; update documents set status = 'processing', metadata = coalesce(metadata, '{}'::jsonb) - 'pii' - 'piiBlocked' where id = 'd1';`);
   });
 
   it("renews the run's lease while pages materialize so only a dead worker leaves it stale", async () => {

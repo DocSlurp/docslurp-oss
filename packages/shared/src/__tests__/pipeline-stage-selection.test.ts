@@ -125,6 +125,18 @@ describe("partial pipeline plans", () => {
     expect(redacting.stageOrder).toEqual(["quarantine", "pii-detect", "document-summary", "embed", "index"]);
   });
 
+  it("cascades from page-scoped withholding: a reprocess that turns block_indexing on re-runs the summary, never reuses it", () => {
+    const pii = { ...defaultPipelineFeatures.piiPolicy, enabled: true };
+    const withholding = compilePipelinePlan({
+      ...defaultPipelineFeatures,
+      summarize: true,
+      piiPolicy: { ...pii, action: "block_indexing" },
+      stageSubset: ["pii-detect"],
+    });
+    expect(withholding.stageOrder).toEqual(expect.arrayContaining(["pii-detect", "document-summary", "embed", "index"]));
+    expect(withholding.reusedStages).not.toContain("document-summary");
+  });
+
   it("restarting at index pulls embed back in", () => {
     const plan = compilePipelinePlan({ ...defaultPipelineFeatures, restartFromStage: "index" });
     expect(plan.stageOrder).toEqual(["quarantine", "embed", "index"]);
