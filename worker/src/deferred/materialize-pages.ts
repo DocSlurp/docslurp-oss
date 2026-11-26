@@ -23,6 +23,9 @@ import {
   switchDisabled,
   isPageWithheld,
   type PiiPatternType,
+  isDeferredMode,
+  piiPolicyWithholds,
+  withoutPendingScan,
 } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -573,7 +576,8 @@ export async function materializePageRange(
   /** Pages with any PII match: their read is never kept, so a retry re-reads under the policy in force then. */
   const piiMatched = new Set<number>();
   // Pages the document's ingest scan withheld stay withheld, whatever this read finds (page-scoped PII, one helper).
-  const recorded = await loadDocumentPiiWithholding(deps.sql as never, documentId);
+  // Pages not scanned yet are what this read is about to scan: only what the policy withheld is dropped here.
+  const recorded = withoutPendingScan(await loadDocumentPiiWithholding(deps.sql as never, documentId));
   for (const entry of [...prepared.values()]) {
     if (!isPageWithheld(recorded, entry.page)) continue;
     piiMatched.add(entry.page);
@@ -582,8 +586,11 @@ export async function materializePageRange(
   }
   /** Pages this read matched (not already withheld), with the kinds of PII found: recorded before anything is indexed. */
   const newMatches = new Map<number, PiiPatternType[]>();
+  /** Pages whose read text this batch scanned. */
+  const scannedNow = new Set<number>();
   if (scan) {
     for (const entry of [...prepared.values()]) {
+      scannedNow.add(entry.page);
       const scanned = scan(entry.text, entry.page);
       if (scanned.matches.length === 0) continue;
       piiMatched.add(entry.page);
@@ -603,15 +610,26 @@ export async function materializePageRange(
   // (pii-deferred-outcome.ts): the page (types, findings, its image and the source withheld), merged with any earlier
   // outcome under the row lock. `block_document` (or every page withheld) blocks the document, and nothing of this
   // batch is indexed. Redaction records the redacted pages, whose images are then withheld.
+  // Under a withholding or redaction policy in a deferred mode, the pages this read scanned are added to the
+  // document's scan: their pixels and text become servable (unless withheld), and the source once every page is.
+  const scanProgress = scan && piiPolicyWithholds(policy) && isDeferredMode(pipeline)
+    ? { scan: { pages: new Set([...scannedNow]), reset: false } }
+    : {};
   if (newMatches.size > 0) {
     const merged = await deps.sql.begin((tx) => recordDeferredPiiMatch(tx as never, documentId, {
       pages: newMatches, action: policy.action, runId: input.runId, pageCount: document.pageCount,
-      sourceUri: deps.storage.uri(document.sourceKey),
+      sourceUri: deps.storage.uri(document.sourceKey), ...scanProgress,
     }));
     // Null: the document was withheld whole meanwhile (a concurrent read); fail closed for this batch too.
     if (merged?.blocked || (merged === null && policy.action !== "flag_for_review")) {
       for (const entry of [...prepared.values()]) { prepared.delete(entry.page); blocked.push(entry.page); }
     }
+  } else if (scanProgress.scan && scannedNow.size > 0) {
+    // Nothing matched: one locked update records the scanned pages (none when the scan is already complete).
+    await deps.sql.begin((tx) => recordDeferredPiiMatch(tx as never, documentId, {
+      pages: new Map(), action: policy.action, runId: input.runId, pageCount: document.pageCount,
+      sourceUri: deps.storage.uri(document.sourceKey), ...scanProgress,
+    }));
   }
 
   // 3. Chunk, with map headings when a document map exists.

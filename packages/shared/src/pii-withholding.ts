@@ -24,8 +24,10 @@ export type PiiWithholding =
       scope: "none";
       /** A redaction outcome that recorded the pages it redacted: only those pages' pixels show a value. */
       redactedPages?: ReadonlySet<number>;
+      /** Set while the document's scan is incomplete (deferred modes): only these pages have been scanned. */
+      scannedPages?: ReadonlySet<number>;
     }
-  | { scope: "sections"; sectionCount: number; types?: readonly PiiPatternType[] }
+  | { scope: "sections"; sectionCount: number; types?: readonly PiiPatternType[]; scannedPages?: ReadonlySet<number> }
   | {
       scope: "pages";
       pages: ReadonlySet<number>;
@@ -37,6 +39,7 @@ export type PiiWithholding =
        * when they were not recorded, in which case no page's pixels are known clean.
        */
       redactedPages?: ReadonlySet<number> | "unknown";
+      scannedPages?: ReadonlySet<number>;
     }
   | { scope: "document"; reason: string; types?: readonly PiiPatternType[] };
 
@@ -173,13 +176,18 @@ export function piiWithholding(document: { status?: string | null; metadata?: un
   const pii = (metadata as { pii?: unknown }).pii;
   if (pii === null || pii === undefined) return { scope: "none" };
   if (typeof pii !== "object" || Array.isArray(pii)) return { scope: "document", reason: "malformed-metadata" };
-  const record = pii as { blocked?: unknown; scope?: unknown; withheldPages?: unknown; withheldSectionCount?: unknown; withheldPageTypes?: unknown; patternTypes?: unknown; redacted?: unknown; redactedPages?: unknown };
+  const record = pii as { scanPending?: unknown; scannedPages?: unknown; blocked?: unknown; scope?: unknown; withheldPages?: unknown; withheldSectionCount?: unknown; withheldPageTypes?: unknown; patternTypes?: unknown; redacted?: unknown; redactedPages?: unknown };
   const redactedPages = record.redacted === true
     ? Array.isArray(record.redactedPages) && record.redactedPages.every(isPositiveInteger) ? new Set(record.redactedPages) : "unknown" as const
     : undefined;
   // Kinds of PII are descriptive: missing or malformed type data never changes what is withheld, only the reason shown.
   const types = piiCategoryIds(record.patternTypes);
   const typed = types.length > 0 ? { types } : {};
+  // Deferred modes scan page by page: until every page has been, the scanned ones are listed and every other page
+  // (and every whole-document artifact) is withheld. A malformed list scans nothing (fail closed).
+  const scanned = record.scanPending === true
+    ? { scannedPages: new Set(Array.isArray(record.scannedPages) ? record.scannedPages.filter(isPositiveInteger) : []) }
+    : {};
   if (record.blocked === true) return { scope: "document", reason: "pii-blocked", ...typed };
   switch (record.scope) {
     case undefined:
@@ -189,7 +197,7 @@ export function piiWithholding(document: { status?: string | null; metadata?: un
       // their unscanned artifacts are still withheld by `withheldArtifactUris`.
       if (record.withheldPages !== undefined) return { scope: "document", reason: "malformed-metadata" };
       // Outcomes written before redacted pages were recorded keep reading as before (their withheld list governs).
-      return redactedPages instanceof Set ? { scope: "none", redactedPages } : { scope: "none" };
+      return redactedPages instanceof Set ? { scope: "none", redactedPages, ...scanned } : { scope: "none", ...scanned };
     case "pages": {
       const pages = record.withheldPages;
       if (!Array.isArray(pages) || pages.length === 0 || !pages.every(isPositiveInteger)) {
@@ -197,10 +205,10 @@ export function piiWithholding(document: { status?: string | null; metadata?: un
       }
       const pageSet = new Set(pages);
       const pageTypes = withheldPageTypes(record.withheldPageTypes, pageSet);
-      return { scope: "pages", pages: pageSet, ...(pageTypes.size > 0 ? { pageTypes } : {}), ...typed, ...(redactedPages ? { redactedPages } : {}) };
+      return { scope: "pages", pages: pageSet, ...(pageTypes.size > 0 ? { pageTypes } : {}), ...typed, ...(redactedPages ? { redactedPages } : {}), ...scanned };
     }
     case "sections":
-      return { scope: "sections", sectionCount: isPositiveInteger(record.withheldSectionCount) ? record.withheldSectionCount : 1, ...typed };
+      return { scope: "sections", sectionCount: isPositiveInteger(record.withheldSectionCount) ? record.withheldSectionCount : 1, ...typed, ...scanned };
     case "document":
       return { scope: "document", reason: "pii-blocked", ...typed };
     default:
@@ -230,11 +238,22 @@ export function isPageWithheld(
   page: number | readonly (number | null | undefined)[] | null | undefined,
 ): boolean {
   if (withholding.scope === "document") return true;
-  if (withholding.scope !== "pages") return false;
+  const scanned = withholding.scannedPages;
+  if (withholding.scope !== "pages" && scanned === undefined) return false;
   const pages = Array.isArray(page) ? page : [page];
   const known = pages.filter(isPositiveInteger);
   if (known.length === 0 || known.length !== pages.length) return true;
-  return known.some((value) => withholding.pages.has(value));
+  // A page not yet scanned is withheld like a matched one: unknown is not clean.
+  if (scanned !== undefined && known.some((value) => !scanned.has(value))) return true;
+  return withholding.scope === "pages" && known.some((value) => withholding.pages.has(value));
+}
+
+/**
+ * Whether the document's scan is incomplete (a deferred mode has not scanned every page yet). The source file and every
+ * artifact without a page are withheld until it completes; scanned pages are served by {@link isPageWithheld}.
+ */
+export function piiScanIncomplete(withholding: PiiWithholding): boolean {
+  return withholding.scope !== "document" && withholding.scannedPages !== undefined;
 }
 
 /**
@@ -275,6 +294,11 @@ export type PiiWithheldSummary = {
   /** Per withheld page (page scope only). */
   pages: PiiWithheldPage[];
   message: string | null;
+  /**
+   * True while a deferred mode has not scanned every page: unscanned pages and the source file are not served yet
+   * (they are read and scanned when a query needs them). Distinct from a policy withholding.
+   */
+  scanPending?: boolean;
 };
 
 /** "Page 3 withheld: contains a payment card number and an email address." (or a generic reason when types are unknown). */
@@ -289,6 +313,12 @@ function withTypes(base: string, types: readonly PiiPatternType[]): string {
 }
 
 export function piiWithheldSummary(withholding: PiiWithholding, pageCount?: number | null): PiiWithheldSummary {
+  const summary = piiWithheldSummaryOf(withholding, pageCount);
+  if (!piiScanIncomplete(withholding)) return summary;
+  return { ...summary, scanPending: true, message: summary.message ?? "Privacy scan pending: pages not read yet are not shown" };
+}
+
+function piiWithheldSummaryOf(withholding: PiiWithholding, pageCount?: number | null): PiiWithheldSummary {
   switch (withholding.scope) {
     case "none":
       return { scope: "none", withheldPages: [], withheldPageCount: 0, withheldSectionCount: 0, types: [], pages: [], message: null };
@@ -474,4 +504,26 @@ export function filterPiiWithheldHits<T extends WithholdableHit>(
     else kept.push(hit);
   }
   return { kept, dropped };
+}
+
+/**
+ * Whether a PII policy withholds or redacts (enabled, with patterns, and an action other than `flag_for_review`). Under
+ * such a policy a page is served only once it has been scanned, and the source file only once every page has been.
+ * Reads an unvalidated stored policy: anything that is not plainly off counts as withholding (fail closed).
+ */
+export function piiPolicyWithholds(policy: unknown): boolean {
+  if (!policy || typeof policy !== "object") return false;
+  const { enabled, patterns, action } = policy as { enabled?: unknown; patterns?: unknown; action?: unknown };
+  if (enabled !== true || !Array.isArray(patterns) || patterns.length === 0) return false;
+  return action !== "flag_for_review";
+}
+
+/**
+ * The withholding without its scan in progress: what the policy itself withholds. Only a reader that is about to scan
+ * pages (deferred materialization) uses it, so an unscanned page can be read and scanned at all.
+ */
+export function withoutPendingScan(withholding: PiiWithholding): PiiWithholding {
+  if (withholding.scope === "document" || withholding.scannedPages === undefined) return withholding;
+  const { scannedPages: _scanned, ...rest } = withholding;
+  return rest as PiiWithholding;
 }

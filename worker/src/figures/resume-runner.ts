@@ -46,7 +46,7 @@ import {
   projectFigureResumeMode, projectFiguresOff, FIGURE_RESUME_LIMITS, type FigureResumeBlockReason,
 } from "@docslurp/shared";
 import { recordFigureTelemetry } from "@docslurp/shared/observability";
-import { isPageImageWithheld, isPageWithheld, piiWithholding, type PiiWithholding } from "@docslurp/shared";
+import { isPageImageWithheld, isPageWithheld, piiScanIncomplete, piiWithholding, type PiiWithholding } from "@docslurp/shared";
 
 import {
   adoptPendingAssets, figureLedgerHooks, isMissingObject, ledgerWriteForStoredFigures, markAssetsLost,
@@ -722,7 +722,8 @@ async function resumeUnit(
       // (They are still uploaded and not billed: the ledger records the folder whole. Ranges withheld whole are skipped.)
       const withheld = await documentPiiWithholding(deps.sql, row);
       if (withheld.scope === "document") return { outcome: "blocked", blocked: "refused", vmMs, added: 0 };
-      if (withheld.scope === "pages") {
+      // Same condition as page renders: withheld pages, redacted pages and pages a scan in progress has not read.
+      if (withheld.scope === "pages" || (withheld.scope === "none" && withheld.redactedPages) || piiScanIncomplete(withheld)) {
         const uris = set.files.filter((file) => isPageImageWithheld(withheld, parseDopplerFigureId(file.id)?.pageNumber ?? null))
           .map((file) => deps.storage.uri(dopplerFolderKey(document, row.run_id, { id: file.id, format: file.format })));
         await withholdUris(deps.sql, row, uris);

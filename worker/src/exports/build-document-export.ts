@@ -8,6 +8,7 @@ import {
   documentExportFolderNames,
   isPageImageReferenceBlock,
   isPageImageWithheld,
+  piiScanIncomplete,
   isPageWithheld,
   piiWithheldPageText,
   piiWithholding,
@@ -216,7 +217,8 @@ export async function* documentExportEntries(
     for (const [slot, uri] of Object.entries(row.artifacts ?? {})) {
       if (!slot.startsWith(prefix)) continue;
       const page = withheldPageOfSlot(slot.slice(prefix.length));
-      if (piiState.scope === "document" || (page !== null && isPageImageWithheld(piiState, page))) withheld.add(uri);
+      // A scan in progress withholds every artifact without a page, and the unscanned pages' own.
+      if (piiState.scope === "document" || (page !== null && isPageImageWithheld(piiState, page)) || (page === null && piiScanIncomplete(piiState))) withheld.add(uri);
     }
     const completed = row.status === "completed";
     const artifacts = completed

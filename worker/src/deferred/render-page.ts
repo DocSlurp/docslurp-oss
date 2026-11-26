@@ -2,7 +2,7 @@ import { ApplicationFailure } from "@temporalio/common";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import { createHash } from "node:crypto";
 import type { RenderDocumentPageInput } from "@docslurp/shared";
-import { isPageImageWithheld, pageImagesOnSql, pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, piiWithholding, isBillingEnforced } from "@docslurp/shared";
+import { isPageImageWithheld, piiScanIncomplete, pageImagesOnSql, pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, piiWithholding, isBillingEnforced } from "@docslurp/shared";
 import type { Store } from "../db/store.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
 import { orgSpendBlock } from "../db/spend-check.js";
@@ -22,6 +22,8 @@ export function pageRenderWithheld(row: { status: string | null; metadata: unkno
   const withholding = piiWithholding(row);
   // Page scope, or a redaction that recorded its pages: a page renders only when its pixels are known clean (a redacted
   // page's image still shows the value it redacted).
+  // A scan in progress (deferred modes) never renders a page it has not scanned.
+  if (piiScanIncomplete(withholding) && isPageImageWithheld(withholding, pageNumber)) return true;
   if (withholding.scope === "pages" || (withholding.scope === "none" && withholding.redactedPages)) return isPageImageWithheld(withholding, pageNumber);
   return withholding.scope === "document" || row.withheld;
 }

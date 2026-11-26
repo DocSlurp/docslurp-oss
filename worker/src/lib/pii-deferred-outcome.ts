@@ -25,6 +25,12 @@ export type DeferredPiiMatch = {
   pageCount: number;
   /** The source file and every recorded artifact of the document that is not a clean page's own image or figure. */
   withheldArtifactUris: readonly string[];
+  /**
+   * Pages this read scanned (deferred modes). Until every page has been scanned the outcome lists them
+   * (`scanPending`, `scannedPages`) and readers withhold every other page and the source. `reset` starts a new scan
+   * (the document map of a new run); otherwise pages are added to the scan in progress. Absent: scan state unchanged.
+   */
+  scan?: { pages: ReadonlySet<number>; reset: boolean };
 };
 
 /** What a caller knows about a deferred match; the artifacts to withhold are read from the document's run. */
@@ -64,6 +70,16 @@ export function mergeDeferredPiiOutcome(
   const redacting = match.action === "redact_artifacts";
   const blocking = match.action === "block_indexing" || match.action === "block_document";
   if (!redacting && !blocking) return null;
+  const scanFields = mergeScan(stored, existing.pii, match);
+  if (match.pages.size === 0) {
+    // Scan progress only: nothing matched, so nothing new is withheld.
+    if (scanFields === "unchanged") return null;
+    const { scanPending: _pending, scannedPages: _scanned, ...rest } = stored;
+    const pii: StoredPii = Object.keys(stored).length > 0
+      ? { ...rest, ...scanFields }
+      : { scope: "none", action: match.action, runId: match.runId, pageCount: match.pageCount, blocked: false, redacted: false, reviewRequired: false, withheldArtifactUris: [], ...scanFields };
+    return { pii, blocked: false, withheldPages: current.scope === "pages" ? [...current.pages].sort((a, b) => a - b) : [] };
+  }
 
   const pageTypes = new Map<number, PiiPatternType[]>();
   if (current.scope === "pages") for (const page of current.pages) pageTypes.set(page, [...(current.pageTypes?.get(page) ?? [])]);
@@ -79,8 +95,11 @@ export function mergeDeferredPiiOutcome(
   ])].sort();
   const withheldPages = [...pageTypes.keys()].sort((a, b) => a - b);
   const blocked = match.action === "block_document" || (withheldPages.length > 0 && withheldPages.length >= match.pageCount);
+  const { scanPending: _pending, scannedPages: _scanned, ...storedWithoutScan } = stored;
+  const scanState = scanFields === "unchanged" ? scanOf(stored) : scanFields;
   const base: StoredPii = {
-    ...stored,
+    ...storedWithoutScan,
+    ...scanState,
     action: stored.action ?? match.action,
     runId: stored.runId ?? match.runId,
     pageCount: match.pageCount,
@@ -92,7 +111,7 @@ export function mergeDeferredPiiOutcome(
   // The match count is not tenant-visible (categories and pages only).
   delete base.matchCount;
   if (blocked) {
-    const { withheldPages: _pages, withheldPageCount: _count, withheldPageTypes: _types, ...rest } = base;
+    const { withheldPages: _pages, withheldPageCount: _count, withheldPageTypes: _types, scanPending: _p, scannedPages: _s, ...rest } = base;
     return {
       pii: { ...rest, scope: "document", blocked: true, redacted: false, reason: match.action === "block_document" ? "PII policy blocked indexing: a deferred page matched" : "PII policy blocked indexing: every page withheld" },
       blocked: true,
@@ -123,6 +142,31 @@ export function mergeDeferredPiiOutcome(
     blocked: false,
     withheldPages,
   };
+}
+
+function scanOf(stored: StoredPii): StoredPii {
+  return stored.scanPending === true ? { scanPending: true, scannedPages: stored.scannedPages } : {};
+}
+
+/**
+ * The scan fields after this read: `{}` when every page has been scanned (or no scan is tracked), else `scanPending`
+ * with the sorted scanned pages. "unchanged" when the read carries no scan or adds nothing.
+ */
+function mergeScan(stored: StoredPii, rawPii: unknown, match: DeferredPiiMatch): StoredPii | "unchanged" {
+  if (!match.scan) return "unchanged";
+  const hasOutcome = rawPii !== null && rawPii !== undefined;
+  const pending = stored.scanPending === true;
+  // An outcome with no scan in progress was a complete scan (an ingest scan, or a deferred one that finished): a later
+  // page read adds nothing unless a new scan starts.
+  if (hasOutcome && !pending && !match.scan.reset) return "unchanged";
+  const before = pending && !match.scan.reset
+    ? new Set((Array.isArray(stored.scannedPages) ? stored.scannedPages : []).filter((page): page is number => Number.isSafeInteger(page) && page >= 1))
+    : new Set<number>();
+  const size = before.size;
+  for (const page of match.scan.pages) if (Number.isSafeInteger(page) && page >= 1 && page <= match.pageCount) before.add(page);
+  if (pending && !match.scan.reset && before.size === size) return "unchanged";
+  if (before.size >= match.pageCount) return {};
+  return { scanPending: true, scannedPages: [...before].sort((a, b) => a - b) };
 }
 
 type Sql = {
@@ -157,7 +201,7 @@ export async function findingsStatement<T>(run: () => Promise<T>): Promise<T> {
  * the document was already withheld whole (nothing to add).
  */
 export async function recordDeferredPiiMatch(sql: Sql, documentId: string, input: DeferredPiiMatchInput): Promise<{ blocked: boolean; withheldPages: number[] } | null> {
-  if (input.pages.size === 0) return null;
+  if (input.pages.size === 0 && !input.scan) return null;
   const [row] = await sql<Array<{ status: string | null; pii: unknown; artifacts: Record<string, string> | null }>>`
     select d.status, d.metadata->'pii' as pii, r.artifacts
     from documents d left join project_runs r on r.id = d.run_id
@@ -193,7 +237,7 @@ export async function recordDeferredPiiMatch(sql: Sql, documentId: string, input
       on conflict (document_id, page_number, pattern_type) do nothing
     `);
   }
-  if (match.action !== "redact_artifacts") {
+  if (match.action !== "redact_artifacts" && match.pages.size > 0) {
     const pages = [...match.pages.keys()];
     await sql`delete from document_pages where document_id = ${documentId} and page_number = any(${pages}::int[])`;
     await sql`
