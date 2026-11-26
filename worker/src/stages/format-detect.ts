@@ -29,6 +29,9 @@ export class FormatDetectStage implements Stage {
   constructor(private readonly storage: ArtifactStore, private readonly runner?: Pick<CommandRunner, "pdfPageCount" | "pdfPopplerAcceptance" | "run">) {}
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
+    // Content-deduplicated copies skip every measuring stage (their checkpoints are seeded), so their pages are authorized
+    // here, before any work, on every attempt: an unfunded run of copies pauses like a run of originals (pipeline/page-basis.ts).
+    await state.pageBasis.authorizeCopies(healthyDocuments(state));
     for (const document of healthyDocuments(state)) {
       const key = `${runArtifactRoot(state.run, document.userId)}/format-detect/${document.id}.json`;
       const artifactSlot = `${document.id}:format-detect`;

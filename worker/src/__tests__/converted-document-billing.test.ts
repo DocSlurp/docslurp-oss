@@ -1,7 +1,7 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { BILLABLE_UNIT_METRICS, defaultPipelineFeatures } from "@docslurp/shared";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { recordPageBaseFee } from "../db/page-base-fee.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
@@ -19,8 +19,7 @@ process.env.RUN_CREDIT_OVERDRAFT_CREDITS = "0";
 /*
  * DocSlurp/app issue 601: Word, slide, sheet and EPUB files arrive counted as one assumed page. The worker measures them from
  * the extractor's output into documents.billing_pages, and the completion charge bills that one stored number: N pages, once,
- * however often the measurement or the charge is retried. A content-deduplicated copy reuses its original's conversion and
- * bills the original's measured pages like the original did (the reuse is the platform's saving, not a discount).
+ * however often the measurement or the charge is retried. Content-deduplicated copies: dedup-copy-billing.test.ts.
  */
 let db: PGlite;
 let server: PGLiteSocketServer;
@@ -52,24 +51,15 @@ const TOTAL = FORMATS.reduce((sum, entry) => sum + entry.pages, 0);
 beforeAll(async () => {
   db = await createMigratedDatabase();
   const originals = FORMATS.map((entry) => `('orig-${entry.key}', 'o1', 'u1', 'w1', 'runA', 'deck.${entry.key}', '${MIME[entry.key]}', 'raw/${entry.key}', 'completed', 1, 'assumed', 'sha-${entry.key}')`).join(",\n");
-  // Copies as intake seeds them (server run-creation findDedupCandidate): same org, intake's assumed one page, pointing at the
-  // original (the vector owner). runC is billed with the flag off; runX's copies point at another organization's documents.
-  const copies = (run: string, org: string, project: string, prefix: string) => FORMATS.map((entry) =>
-    `('${prefix}-${entry.key}', '${org}', 'u1', '${project}', '${run}', 'deck.${entry.key}', '${MIME[entry.key]}', 'raw/${prefix}/${entry.key}', 'completed', 1, 'assumed', 'sha-${entry.key}', 'orig-${entry.key}')`).join(",\n");
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents)
-      values ('o1', 'Org', 'org', 'u1', 8, 10000000), ('o2', 'Other', 'other', 'u1', 8, 10000000);
-    insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'X');
+      values ('o1', 'Org', 'org', 'u1', 8, 10000000);
+    insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W');
     insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values (100, 'runA', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${pipeline}', 4, 4),
-             (100, 'runB', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${pipeline}', 4, 4),
-             (100, 'runC', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${pipeline}', 4, 4),
-             (100, 'runX', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'embed', '${pipeline}', 4, 4);
+      values (100, 'runA', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${pipeline}', 4, 4);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, source_sha256)
       values ${originals};
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, source_sha256, deduped_from_document_id)
-      values ${copies("runB", "o1", "w1", "copy")}, ${copies("runC", "o1", "w1", "flagoff")}, ${copies("runX", "o2", "w2", "foreign")};
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -83,10 +73,6 @@ afterAll(async () => {
   await store?.close();
   await server?.stop();
   await db?.close();
-});
-
-afterEach(() => {
-  delete process.env.DOCSLURP_BILL_DEDUP_COPIES;
 });
 
 const basis = (run: ProjectRun) => ({ pageBasis: new PageBasis({ run, usageLedger: { pendingBillableCents: 0 } }, store.pageBasisLedger) });
@@ -128,23 +114,5 @@ describe("a multi-page DOCX, PPTX, XLSX and EPUB bill their measured pages exact
     // A retried completion charges nothing more: one Fast charge row for the run, for exactly N pages.
     await chargeRun("runA", "orig");
     expect(await fastCharges("runA")).toEqual([{ id: "fast:runA", amount: String(TOTAL) }]);
-  }, 60_000);
-});
-
-describe("a content-deduplicated copy bills like its original", () => {
-  it("a copy in a later run bills the original's measured pages, once", async () => {
-    expect((await chargeRun("runB", "copy")).fastPages).toBe(TOTAL);
-    await chargeRun("runB", "copy");
-    expect(await fastCharges("runB")).toEqual([{ id: "fast:runB", amount: String(TOTAL) }]);
-  }, 60_000);
-
-  it("DOCSLURP_BILL_DEDUP_COPIES=0 restores the earlier rule: copies bill nothing", async () => {
-    process.env.DOCSLURP_BILL_DEDUP_COPIES = "0";
-    expect((await chargeRun("runC", "flagoff")).fastPages).toBe(0);
-  }, 60_000);
-
-  it("a copy never reads another organization's document: it bills nothing rather than the other org's count", async () => {
-    // Intake never pairs documents across organizations; a row that did must not price one org's charge from another's data.
-    expect((await chargeRun("runX", "foreign")).fastPages).toBe(0);
   }, 60_000);
 });

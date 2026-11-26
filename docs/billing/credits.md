@@ -80,12 +80,36 @@ conversion, from the extractor's output (slides, sheet cells and the text rule),
 pages.
 
 A content-deduplicated copy (an upload whose bytes match a completed document of the same organization, so its conversion
-is reused) bills its original's measured pages at completion, like the original did. `DOCSLURP_BILL_DEDUP_COPIES=0` on the
-worker restores the earlier rule, under which copies bill nothing.
+is reused and nothing is read again) bills like its original: the original's measured pages, at the classes those pages
+billed (Fast, OCR, Rich), and an audio or video copy the original's media pages. The reuse is the platform's saving, never a
+discount. When the API creates the copy it records these facts on the copy's own row (`billing_pages`, `page_count_source`,
+`copy_ocr_pages`, `copy_rich_pages`, `copy_media_pages`; migration `20261126T0240_dedup_copy_billing.sql`), in the
+transaction that sets `deduped_from_document_id`, so deleting the original later changes nothing a copy bills. A document
+whose bill was never measured (a legacy original with no measured count, or a copy whose original was deleted before copies
+recorded their facts) is never reused: the upload is processed and billed as an original.
+
+Copies are spend-checked like originals: `run_measured_pages` counts a copy's pages above its intake count at its recorded
+classes, and the worker checks the balance for them before any stage of the run (`PageBasis.authorizeCopies`, called by
+format-detect), pausing an unfunded run exactly as it pauses one whose originals measured more pages than admission priced.
+The completion charge bills copies from their own rows under fixed ids per run (`copy-fast:`, `copy-ocr:`, `copy-rich:`,
+`copy-media:`), only for copies that complete; a copy made before migration `20261126T0240` bills its original's measured
+count Fast through the pointer. Re-indexing a copy bills like re-indexing an original. Per-document feature charges
+(summaries, structured fields, knowledge graph, propositions, chart export, summary tree) are not billed for copies: they are
+recorded per call and per run, and copying them exactly would mean re-pricing each call.
+
+`DOCSLURP_BILL_DEDUP_COPIES` (worker and API): unset, empty, `1`, `true`, `on` or `yes` is on; `0`, `false`, `off` or `no`
+restores the earlier rule (copies bill nothing and are left out of spend checks). Any other value is read as on and logged
+once. Roll out with the variable at `0` until every worker runs this release, then set it to `1`: a worker from an earlier
+release that completes a run bills its copies nothing, and the run's charges are then final.
 
 The upload quote cannot know these pages before conversion, so it prices them over a range of bytes per page
-(`packages/shared/src/upload-pages.ts`). Its high end covers dense files (repeated clauses, generated tables, columns of
-ids, one-line slides) and, when the client sends a file profile, the uncompressed body size the profile measured.
+(`packages/shared/src/upload-pages.ts`). From the size alone the range is ordinary (about 1 KB a page at the high end for
+Word and EPUB) and is not a ceiling: files of repetitive content (a clause template, a generated table, a column of ids)
+compress far below that and can measure more pages. Such a quote says so (`unboundedFiles` and its basis text). With a client
+file profile the high end is a ceiling for Word, slide and EPUB files: it covers the profile's uncompressed body size at
+400 bytes a page, up to the worker's 100,000-page cap. A sheet is never bounded (its cells can repeat one long shared string,
+which is outside the worksheet parts the profile measures). The API never opens an upload to measure this: customer files
+are parsed only inside the parser VM.
 
 ## Stripe
 

@@ -1,9 +1,9 @@
 import { deflateRawSync } from "node:zlib";
 
-import { WORKER_COUNTED_MAX_PAGES, quoteFilePageRange } from "@docslurp/shared";
+import { defaultPipelineFeatures, estimateProfileFor, FILE_PROFILE_SCHEMA, quoteFilePageRange, quoteHighIsCeiling, quoteUpload, WORKER_COUNTED_MAX_PAGES } from "@docslurp/shared";
 import { describe, expect, it } from "vitest";
 
-import { MAX_COUNTED_PAGES, measureExtractedPages } from "../lib/office-page-count.js";
+import { measureExtractedPages } from "../lib/office-page-count.js";
 
 /*
  * DocSlurp/app issue 601: the upload quote cannot know a Word, slide, sheet or EPUB file's pages before conversion, so it prices
@@ -14,9 +14,10 @@ import { MAX_COUNTED_PAGES, measureExtractedPages } from "../lib/office-page-cou
  * entry, plus the end record), with only the parts that hold the content: a real file carries styles, themes and properties
  * besides, so it is larger and its quote wider. The Markdown is what the format's extractor writes for that content.
  *
- * With a file profile (the offline estimator's `office.bodyBytes`, the body parts' uncompressed size) every case is covered.
- * From the size alone, the dense ordinary files are; a file of one clause repeated compresses to a few dozen bytes a page, which
- * no size-only bound covers without widening every quote of the format tenfold, so it relies on the profile.
+ * With a file profile (the offline estimator's `office.bodyBytes`, the body parts' uncompressed size) every Word, slide and
+ * EPUB case is covered: the high end is a ceiling. From the size alone no divisor covers repetitive content without quoting
+ * every ordinary report at the worker's page cap, so the size gives an ordinary range and the quote says it is not a ceiling
+ * (quoteHighIsCeiling, CostEstimate.unboundedFiles). A sheet is never bounded (its cells can repeat one long shared string).
  */
 function zipBytes(entries: ReadonlyArray<readonly [name: string, data: string]>): number {
   return entries.reduce((total, [name, data]) => total + 30 + 46 + 2 * Buffer.byteLength(name) + deflateRawSync(Buffer.from(data), { level: 6 }).length, 22);
@@ -81,28 +82,49 @@ const bodyBytes = (parts: ReadonlyArray<readonly [string, string]>) => parts
   .reduce((total, [, data]) => total + Buffer.byteLength(data), 0);
 
 describe("the quote's high end covers what dense converted files measure", () => {
-  it.each(CASES)("$name, with the file's profile", (entry) => {
+  it.each(CASES.filter((entry) => entry.format !== "office-excel"))("$name, with the file's profile: a ceiling", (entry) => {
     const size = zipBytes(entry.parts);
     const measured = measureExtractedPages(entry.format, entry.extractor, entry.markdown)!;
-    const range = quoteFilePageRange({ ...entry.file, size, profile: { office: { bodyBytes: bodyBytes(entry.parts) } } });
+    const file = { ...entry.file, size, profile: { office: { bodyBytes: bodyBytes(entry.parts) } } };
+    const range = quoteFilePageRange(file);
     expect(measured.pages).toBeGreaterThan(1);
     expect(range.measured).toBe(false);
+    expect(quoteHighIsCeiling(file)).toBe(true);
     expect(measured.pages, `${entry.name}: ${size} bytes measured ${measured.pages} pages, quoted at most ${range.high}`).toBeLessThanOrEqual(range.high);
   });
 
-  it.each(CASES.filter((entry) => entry.sizeOnly))("$name, from its size alone", (entry) => {
+  it.each(CASES)("$name, from its size alone: the quote says its high end is not a ceiling", (entry) => {
     const size = zipBytes(entry.parts);
-    const measured = measureExtractedPages(entry.format, entry.extractor, entry.markdown)!;
-    const range = quoteFilePageRange({ ...entry.file, size });
-    expect(measured.pages, `${entry.name}: ${size} bytes measured ${measured.pages} pages, quoted at most ${range.high}`).toBeLessThanOrEqual(range.high);
+    expect(quoteFilePageRange({ ...entry.file, size }).measured).toBe(false);
+    expect(quoteHighIsCeiling({ ...entry.file })).toBe(false);
   });
 
-  it("a profile that understates its body never narrows the size's bound, and no quote passes the worker's cap", () => {
-    const file = { name: "contract.docx", type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", size: 64 * 1024 };
+  it("a sheet is never a ceiling, profile or not (shared strings are outside the worksheet parts)", () => {
+    const sheet = CASES.find((entry) => entry.format === "office-excel")!;
+    const file = { ...sheet.file, size: zipBytes(sheet.parts), profile: { office: { bodyBytes: bodyBytes(sheet.parts) } } };
+    expect(quoteHighIsCeiling(file)).toBe(false);
+    // The worksheet's body size never widens a sheet's range: it bounds nothing.
+    expect(quoteFilePageRange(file).high).toBe(quoteFilePageRange({ ...sheet.file, size: file.size }).high);
+  });
+
+  it("the estimate names the files whose high end is not a ceiling, whichever provider priced it", () => {
+    const profile = estimateProfileFor(defaultPipelineFeatures, { env: {} });
+    const word = { name: "a.docx", type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", size: 5 * 1024 * 1024 };
+    const bare = quoteUpload({ files: [word, { name: "b.xlsx", size: 1024 * 1024 }, { name: "c.pdf", type: "application/pdf", size: 1024 * 1024, pages: 4 }], profile }).estimate;
+    expect(bare.unboundedFiles).toBe(2);
+    expect(bare.basis).toContain("not a ceiling for 2");
+    const profiled = quoteUpload({ files: [{ ...word, profile: { schema: FILE_PROFILE_SCHEMA, profiler: "test", kind: "office", format: "docx", bytes: word.size, office: { embeddedImages: 0, bodyBytes: 20 * 1024 * 1024 } } }], profile }).estimate;
+    expect(profiled.unboundedFiles).toBeUndefined();
+  });
+
+  it("ordinary files quote ordinary ranges from their size; only a profile widens toward the worker's cap", () => {
+    const docx = { name: "report.docx", type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" };
+    // 1, 5 and 20 MB: 1,024 bytes a page at the high end (not the 100,000-page cap a 128-byte divisor gave a 20 MB report).
+    expect([1, 5, 20].map((mb) => quoteFilePageRange({ ...docx, size: mb * 1024 * 1024 }).high)).toEqual([1_024, 5_120, 20_480]);
+    const file = { ...docx, size: 64 * 1024 };
     const sizeOnly = quoteFilePageRange(file);
     expect(quoteFilePageRange({ ...file, profile: { office: { bodyBytes: 0 } } }).high).toBe(sizeOnly.high);
     expect(quoteFilePageRange({ ...file, profile: { office: { bodyBytes: 10 ** 13 } } }).high).toBe(WORKER_COUNTED_MAX_PAGES);
     expect(quoteFilePageRange({ ...file, size: 10 ** 12 }).high).toBe(WORKER_COUNTED_MAX_PAGES);
-    expect(MAX_COUNTED_PAGES).toBe(WORKER_COUNTED_MAX_PAGES);
   });
 });

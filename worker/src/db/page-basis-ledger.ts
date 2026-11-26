@@ -1,4 +1,5 @@
 import type { Sql } from "postgres";
+import { dedupCopiesBill } from "@docslurp/shared";
 
 import type { PageBasisLedger, PageBasisRun, RunMeasurements, SpendOutcome } from "../pipeline/page-basis.js";
 import { StaleExecutionError } from "./execution-ownership.js";
@@ -72,12 +73,15 @@ export class PostgresPageBasisLedger implements PageBasisLedger {
 
   /** The one run-wide sum (migration 0190 run_measured_pages), shared with the spend-paused resume sweep. */
   async runMeasurements(runId: string, excludeDocumentId: string | null, readMetrics: readonly string[]): Promise<RunMeasurements> {
-    const [row] = await this.sql<{ fast_pages: string | number; ocr_frames: string | number; document_charged_pages: number }[]>`
-      select fast_pages, ocr_frames, document_charged_pages
-      from run_measured_pages(${runId}, ${[...readMetrics]}::text[], ${excludeDocumentId})`;
+    // Copies count unless the copy billing flag is off (migration 20261126T0240: copies' pages split by their recorded classes).
+    const [row] = await this.sql<{ fast_pages: string | number; ocr_frames: string | number; document_charged_pages: number; ocr_pages: string | number; rich_pages: string | number }[]>`
+      select fast_pages, ocr_frames, document_charged_pages, ocr_pages, rich_pages
+      from run_measured_pages(${runId}, ${[...readMetrics]}::text[], ${excludeDocumentId}, ${dedupCopiesBill()})`;
     return {
       fastPages: Number(row?.fast_pages ?? 0),
       ocrFrames: Number(row?.ocr_frames ?? 0),
+      ocrPages: Number(row?.ocr_pages ?? 0),
+      richPages: Number(row?.rich_pages ?? 0),
       documentChargedPages: Number(row?.document_charged_pages ?? 0),
     };
   }

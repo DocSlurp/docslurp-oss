@@ -6,6 +6,7 @@ import {
   UNIT_CHARGE_PROVIDER,
   speedBoostMultiplier,
   compilePipelinePlan,
+  dedupCopiesBill,
   deferredProfilesEnabled,
   pageCredits,
   pricing,
@@ -103,15 +104,18 @@ export function splitLegacyRemainingPages(
   return { fast: remaining - rich, rich };
 }
 
+/** Re-exported for callers of this module; the one parser lives in @docslurp/shared (strict, logged once). */
+export { dedupCopiesBill };
+
 /**
- * Whether a content-deduplicated copy (documents.deduped_from_document_id: intake reused an earlier, completed conversion of
- * the same bytes in the same organization) bills its original's measured pages at completion, like the original did. The
- * reuse is the platform's saving, never a discount. On unless DOCSLURP_BILL_DEDUP_COPIES is `0`, `false` or `off`, which
- * restores the earlier rule (copies bill nothing).
+ * The completion split of one content-deduplicated copy: of its `pages` (its original's measured count), the `rich` and
+ * `ocr` pages its original's pages billed as reads, dearest first, never more than `pages`; the rest bill Fast.
  */
-export function dedupCopiesBill(env: Record<string, string | undefined> = process.env): boolean {
-  const value = (env.DOCSLURP_BILL_DEDUP_COPIES ?? "").trim().toLowerCase();
-  return !(value === "0" || value === "false" || value === "off");
+export function splitCopyPages(row: { pages: number; ocr: number; rich: number }): { fast: number; ocr: number; rich: number } {
+  const pages = Math.max(0, Math.trunc(Number(row.pages)) || 0);
+  const rich = Math.min(pages, Math.max(0, Math.trunc(Number(row.rich)) || 0));
+  const ocr = Math.min(pages - rich, Math.max(0, Math.trunc(Number(row.ocr)) || 0));
+  return { fast: pages - rich - ocr, ocr, rich };
 }
 
 /**
@@ -119,12 +123,23 @@ export function dedupCopiesBill(env: Record<string, string | undefined> = proces
  * (counted, not charged here; a page upgraded from OCR to Rich counts as Rich), the share of the fee this run pays and the
  * Fast credits it charged.
  */
-export type RunPageCharges = { fastPages: number; ocrPages: number; richPages: number; multiplier: number; credits: number };
+export type RunPageCharges = {
+  fastPages: number; ocrPages: number; richPages: number; multiplier: number; credits: number;
+  /** Content-deduplicated copies charged here (included in the totals above): their pages by class and media Rich pages. */
+  copies?: { documents: number; fastPages: number; ocrPages: number; richPages: number; mediaPages: number };
+};
 
 /**
  * Charge the run's remaining pages once it completes (deterministic ids per
  * run, so a retry charges nothing twice), excluding failed and media documents and pages an OCR or vision read already
- * charged (OCR or Rich). A content-deduplicated copy bills its original's measured pages (dedupCopiesBill).
+ * charged (OCR or Rich).
+ *
+ * A content-deduplicated copy reads nothing (intake seeded its checkpoints from its original), so its whole charge is made
+ * here, from its own row (dedupCopiesBill): its billing_pages split by copy_rich_pages and copy_ocr_pages (the classes its
+ * original's pages billed, recorded at intake), and an audio or video copy's copy_media_pages. A copy made before those
+ * columns existed falls back to its original's measured count, all Fast, through the pointer (same organization and bytes).
+ * Only a copy that completes bills (the same rule that marks the run's documents completed). Every charge has a fixed id
+ * per run (`copy-fast:`, `copy-ocr:`, `copy-rich:`, `copy-media:`), so a retry or a concurrent completion bills once.
  */
 export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state: WorkflowState, transaction?: { afterCommit: Array<() => void> }): Promise<RunPageCharges> {
   const multiplier = pageBaseFeeMultiplier(compilePipelinePlan(state.run.pipeline));
@@ -145,11 +160,9 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       client<{ document_id: string; pages: number; rich_read: number; rich_only: number; image: boolean; scanned: number }[]>`
       with docs as (
         -- billing_pages: the worker's measured count of an Office, slide, sheet or EPUB file; page_count (the page basis the text
-        -- splits into) bills for every other document. A content-deduplicated copy (dedupCopiesBill) reuses its original's
-        -- conversion, so it bills its original's measured count: the same organization's document, never another's.
+        -- splits into) bills for every other document. Copies are charged by the statement below.
         select d.id, d.page_count as page_count, coalesce(d.mime_type, '') like 'image/%' as image,
-          greatest(0, (case when d.deduped_from_document_id is null then coalesce(d.billing_pages, d.page_count)
-            else coalesce(owner.billing_pages, owner.page_count) end) - case when ${state.run.kind === "full-index"} then (
+          greatest(0, coalesce(d.billing_pages, d.page_count) - case when ${state.run.kind === "full-index"} then (
             select count(*) from document_page_states s where s.document_id = d.previous_version_id
               -- A stale stamp (its run charged nothing and can no longer commit) paid nothing, so this run charges it.
               -- A page whose read was charged and then failed (read_billed_run) paid its one charge.
@@ -159,16 +172,13 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
                   and au.metadata ->> 'documentId' = d.id and au.metadata ->> 'pageNumber' = s.page_number::text)
           ) else 0 end)::int as pages
         from documents d
-        left join documents owner on ${dedupCopiesBill()} and owner.id = d.deduped_from_document_id and owner.org_id = d.org_id
         where d.run_id = ${state.run.id} and d.status <> 'failed'
-          and (d.deduped_from_document_id is null or owner.id is not null)
+          and ${notCopySql(client)}
           and coalesce(d.mime_type, '') not like 'audio/%' and coalesce(d.mime_type, '') not like 'video/%'
           and (${!deferredProfilesEnabled()} or d.indexing_mode = 'full')
           -- Only measured counts bill: the worker's billing_pages, or a page_count counted from the bytes or by the worker. A count
-          -- still assumed (an intake estimate: a PDF's size, a sampled text file, an Office file's one page) bills nothing. A copy
-          -- is measured when its original is.
-          and (case when d.deduped_from_document_id is null then d.billing_pages is not null or d.page_count_source = 'counted'
-            else owner.billing_pages is not null or owner.page_count_source = 'counted' end)
+          -- still assumed (an intake estimate: a PDF's size, a sampled text file, an Office file's one page) bills nothing.
+          and (d.billing_pages is not null or d.page_count_source = 'counted')
       )
       select docs.id as document_id, docs.pages, docs.image,
         -- Runs started before the per-read rule only (splitLegacyRemainingPages): pages the facts show as scans.
@@ -188,7 +198,8 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
             and (au.metadata ->> 'pageNumber')::int between 1 and docs.page_count), 0)::int as rich_only
       from docs
     `,
-    ], async (client, [lockedRows, rows]) => {
+      copyChargeRows(client, state.run.id),
+    ], async (client, [lockedRows, rows, copyRows]) => {
       const locked = lockedRows[0];
       let fastPages = 0;
       let scanPages = 0;
@@ -211,9 +222,34 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       const ocrPages = Math.max(0, readPages - richReadPages);
       const fastCredits = pageCredits("fast", fastPages) * multiplier;
       const scanCredits = pageCredits("rich", scanPages) * multiplier;
-      charges = { fastPages, ocrPages, richPages, multiplier: multiplier * speedBoostMultiplier(state.usageLedger.speedBoost),
-        credits: (fastCredits + scanCredits) * speedBoostMultiplier(state.usageLedger.speedBoost) };
+      // Copies: one charge per class for the run, from each copy's own recorded split (splitCopyPages).
+      const copy = { documents: 0, fastPages: 0, ocrPages: 0, richPages: 0, mediaPages: 0 };
+      const copyDocuments: Record<string, { fast: number; ocr: number; rich: number; media: number }> = {};
+      for (const row of copyRows) {
+        const media = Math.max(0, Math.trunc(Number(row.media_pages)) || 0);
+        const split = row.media ? { fast: 0, ocr: 0, rich: 0 } : splitCopyPages({ pages: Number(row.pages), ocr: Number(row.ocr_pages), rich: Number(row.rich_pages) });
+        copy.documents += 1;
+        copy.fastPages += split.fast;
+        copy.ocrPages += split.ocr;
+        copy.richPages += split.rich;
+        copy.mediaPages += row.media ? media : 0;
+        if (split.fast + split.ocr + split.rich + (row.media ? media : 0) > 0) copyDocuments[row.document_id] = { ...split, media: row.media ? media : 0 };
+        if (row.legacy) console.warn(`[page-charges] run=${state.run.id} copy=${row.document_id} has no recorded billing facts: billing its original's measured pages Fast (copy made before migration 20261126T0240)`);
+      }
+      const copyFastCredits = pageCredits("fast", copy.fastPages) * multiplier;
+      const copyOcrCredits = pageCredits("ocr", copy.ocrPages) * multiplier;
+      const copyRichCredits = pageCredits("rich", copy.richPages) * multiplier;
+      // Media bills its Rich pages per file whatever the run's stages, as the media stage charges an original (no share).
+      const copyMediaCredits = pageCredits("rich", copy.mediaPages);
+      const boost = speedBoostMultiplier(state.usageLedger.speedBoost);
+      charges = {
+        fastPages: fastPages + copy.fastPages, ocrPages: ocrPages + copy.ocrPages, richPages: richPages + copy.richPages,
+        multiplier: multiplier * boost,
+        credits: (fastCredits + scanCredits + copyFastCredits + copyOcrCredits + copyRichCredits + copyMediaCredits) * boost,
+        ...(copy.documents > 0 ? { copies: copy } : {}),
+      };
       const base = { projectId: state.run.projectId, multiplier, documents: Object.keys(documents).length <= 200 ? documents : undefined };
+      const copyBase = { projectId: state.run.projectId, multiplier, copies: true, documents: Object.keys(copyDocuments).length <= 200 ? copyDocuments : undefined };
       // The insert and its pending debit (for exactly the rows it inserted) are one statement.
       const usage = runUsageEventStatements({ client, state, usageEvents: [
         // A fixed id per run also records a zero-page decision, so a retry cannot change it.
@@ -225,6 +261,25 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
         ...(scanPages > 0 ? [{
           id: `rich-scan:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.richPage,
           amount: scanPages, unit: "page", costCents: scanCredits, metadata: unitChargeMetadata({ ...base, pages: scanPages, readBy: "scan-or-image" }),
+        }] : []),
+        // Copies, each class under its own fixed id. The Fast one is written whenever the run has a copy, so a retry
+        // keeps the first decision; the rest only when they bill something.
+        ...(copy.documents > 0 ? [{
+          id: `copy-fast:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
+          amount: copy.fastPages, unit: "page", costCents: copyFastCredits,
+          metadata: unitChargeMetadata({ ...copyBase, pages: copy.fastPages, pageRules: PAGE_BILLING_RULES_VERSION }),
+        }] : []),
+        ...(copy.ocrPages > 0 ? [{
+          id: `copy-ocr:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.ocrPage,
+          amount: copy.ocrPages, unit: "page", costCents: copyOcrCredits, metadata: unitChargeMetadata({ ...copyBase, pages: copy.ocrPages, readBy: "copy" }),
+        }] : []),
+        ...(copy.richPages > 0 ? [{
+          id: `copy-rich:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.richPage,
+          amount: copy.richPages, unit: "page", costCents: copyRichCredits, metadata: unitChargeMetadata({ ...copyBase, pages: copy.richPages, readBy: "copy" }),
+        }] : []),
+        ...(copy.mediaPages > 0 ? [{
+          id: `copy-media:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.mediaMinutes,
+          amount: copy.mediaPages, unit: "page", costCents: copyMediaCredits, metadata: unitChargeMetadata({ ...copyBase, pages: copy.mediaPages }),
         }] : []),
       ] });
       const inserted = usage.cost(await Promise.all(usage.statements.map((statement) => statement.execute())));
@@ -241,6 +296,46 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
   if (transaction) transaction.afterCommit.push(commit);
   else commit();
   return charges;
+}
+
+/** A document that is not a content-deduplicated copy: no pointer and no recorded copy billing facts. */
+function notCopySql(client: Sql<Record<string, unknown>>) {
+  return client`(d.deduped_from_document_id is null and d.copy_ocr_pages is null and d.copy_rich_pages is null and d.copy_media_pages is null)`;
+}
+
+type CopyChargeRow = { document_id: string; pages: number; ocr_pages: number; rich_pages: number; media_pages: number; media: boolean; legacy: boolean };
+
+/**
+ * The run's content-deduplicated copies that bill at completion (dedupCopiesBill), with what each bills. A copy is a row
+ * with a pointer or with recorded copy facts (its original may have been deleted since: the pointer is then null, the facts
+ * stay). Recorded facts win; only a copy without them (made before migration 20261126T0240) reads its original through the
+ * pointer, the same organization's document holding the same bytes, and bills its measured count Fast. Only copies that
+ * complete bill: not failed, cancelled or PII-blocked, not superseded, and no failed stage (completeRunDocumentStatements).
+ * A measured count is required (billing_pages, or a counted page_count); a media copy bills its recorded media pages.
+ */
+function copyChargeRows(client: Sql<Record<string, unknown>>, runId: string) {
+  return client<CopyChargeRow[]>`
+    select d.id as document_id,
+      coalesce(d.mime_type, '') like 'audio/%' or coalesce(d.mime_type, '') like 'video/%' as media,
+      (d.copy_ocr_pages is null and d.copy_rich_pages is null and d.copy_media_pages is null) as legacy,
+      greatest(0, case
+        when d.copy_ocr_pages is not null or d.copy_rich_pages is not null or d.copy_media_pages is not null then
+          case when d.billing_pages is not null then d.billing_pages when d.page_count_source = 'counted' then d.page_count else 0 end
+        when owner.billing_pages is not null then owner.billing_pages
+        when owner.page_count_source = 'counted' then owner.page_count
+        else 0 end)::int as pages,
+      greatest(0, coalesce(d.copy_ocr_pages, 0))::int as ocr_pages,
+      greatest(0, coalesce(d.copy_rich_pages, 0))::int as rich_pages,
+      greatest(0, coalesce(d.copy_media_pages, 0))::int as media_pages
+    from documents d
+    left join documents owner on d.copy_ocr_pages is null and d.copy_rich_pages is null and d.copy_media_pages is null
+      and owner.id = d.deduped_from_document_id and owner.org_id = d.org_id and owner.source_sha256 = d.source_sha256
+    where ${dedupCopiesBill()} and d.run_id = ${runId}
+      and not ${notCopySql(client)}
+      and d.superseded_at is null and d.status not in ('failed', 'cancelled', 'pii_blocked')
+      and not exists (select 1 from document_run_stage_states f where f.document_id = d.id and f.run_id = d.run_id and f.status = 'failed')
+      and (${!deferredProfilesEnabled()} or d.indexing_mode = 'full')
+  `;
 }
 
 /**

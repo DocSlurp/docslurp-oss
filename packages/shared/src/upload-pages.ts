@@ -31,29 +31,33 @@ export const UNMEASURED_TEXT_MIN_BYTES_PER_PAGE = 720;
 export type WorkerCountedFormat = "office-word" | "office-other" | "office-excel" | "office-pptx" | "epub";
 export const WORKER_COUNTED_FORMATS: readonly WorkerCountedFormat[] = ["office-word", "office-other", "office-excel", "office-pptx", "epub"];
 /**
- * Bytes of source per page for each of those formats, as `[min, typical, max]`: `min` is the densest file (the most pages: the
- * high end of a quote), `typical` prices the middle, `max` is an image-heavy file (the fewest pages: the low end). They are
- * quoted, never billed: the worker measures the real count after conversion.
+ * Bytes of source per page for each of those formats, as `[min, typical, max]`: `min` prices the high end of a quote made
+ * from the size alone, `typical` the middle, `max` is an image-heavy file (the fewest pages: the low end). They are quoted,
+ * never billed: the worker measures the real count after conversion.
  *
- * `min` is set from what dense ordinary files of each format measure (DocSlurp/app issue 601): these are compressed packages,
- * and text that repeats (a clause template, a generated status table, a column of sequential ids) compresses far below a page
- * of prose (1 to 7 KB). Files built of such content measured 150 to 350 bytes a page for Word and EPUB, about 450 for a sheet
- * of ids and 700 to 950 for one-line slides, so the high end sits below those. A file of one fragment repeated can compress
- * further still; its quote reads the profile's uncompressed body size (WORKER_COUNTED_BODY_BYTES_PER_PAGE) instead.
+ * `min` is what an ordinary dense file of the format holds (a page of a .docx is 1 to 7 KB compressed; a sheet page is
+ * 3,500 characters of CSV, about 1 KB compressed; a slide a few KB). It is not a ceiling: these are compressed packages, and
+ * text that repeats (a clause template, a generated status table, a column of sequential ids) compresses far below a page of
+ * prose (files built of such content measured 150 to 350 bytes a page for Word and EPUB, DocSlurp/app issue 601), and one
+ * fragment repeated compresses further still. No divisor of the compressed size bounds such a file without quoting every
+ * ordinary report at the worker's page cap, so the size alone gives an ordinary range and the quote says it is not a
+ * ceiling (quoteHighIsCeiling). A ceiling needs the uncompressed body size, which only a client's file profile measures
+ * (WORKER_COUNTED_BODY_BYTES_PER_PAGE): the API never opens the package (customer files are parsed only in the parser VM).
  */
 export const UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE: Readonly<Record<WorkerCountedFormat, { min: number; typical: number; max: number }>> = {
-  "office-word": { min: 128, typical: 12 * 1024, max: 150 * 1024 },
-  "office-other": { min: 128, typical: 24 * 1024, max: 300 * 1024 },
-  "office-excel": { min: 256, typical: 4 * 1024, max: 300 * 1024 },
-  "office-pptx": { min: 512, typical: 40 * 1024, max: 300 * 1024 },
-  epub: { min: 128, typical: 6 * 1024, max: 300 * 1024 },
+  "office-word": { min: 1_024, typical: 12 * 1024, max: 150 * 1024 },
+  "office-other": { min: 2_048, typical: 24 * 1024, max: 300 * 1024 },
+  "office-excel": { min: 512, typical: 4 * 1024, max: 300 * 1024 },
+  "office-pptx": { min: 2_048, typical: 40 * 1024, max: 300 * 1024 },
+  epub: { min: 1_024, typical: 6 * 1024, max: 300 * 1024 },
 };
 
 /**
  * Uncompressed body bytes (a file profile's `office.bodyBytes`: Word's document part, the slide or worksheet parts, EPUB's
  * XHTML) per page at the densest: every character of text is at least a byte of body, and the shortest line the text rule can
  * count (60 to a page) is a few bytes of markup (`<p>x</p>`, `<w:br/>x`). A bound on what the worker can measure from that
- * body, whatever it compresses to. Text a sheet takes from its shared strings is not in the worksheet parts and is not covered.
+ * body, whatever it compresses to. Not for sheets: a cell's text can come from the shared strings part, which is not in the
+ * worksheet parts, and many cells can repeat one long shared string, so no part size bounds a sheet's text.
  */
 export const WORKER_COUNTED_BODY_BYTES_PER_PAGE = 400;
 
@@ -261,6 +265,23 @@ export function profilePageEquivalentRange(file: ProfiledFile, allowance = DEFAU
   return { low, high: Math.max(low, high) };
 }
 
+/**
+ * Whether a quote's high end for `file` is a ceiling on what the worker can measure. False only for a Word, slide, sheet or
+ * EPUB file whose pages nobody counted and that has no file profile body size (an API, MCP, URL or connector upload sends no
+ * profile), and for every uncounted sheet (shared strings, WORKER_COUNTED_BODY_BYTES_PER_PAGE): its high end assumes ordinary
+ * density, and repetitive content can measure more pages (never more than WORKER_COUNTED_MAX_PAGES). The estimate counts
+ * these files and says so (CostEstimate.unboundedFiles, quoteUpload).
+ */
+export function quoteHighIsCeiling(file: {
+  name: string; type?: string | null; pages?: number; measured?: { pages: number }; profile?: { office?: { bodyBytes: number } };
+}): boolean {
+  if (file.pages !== undefined || file.measured !== undefined) return true;
+  const counted = workerCountedFormat(file);
+  if (!counted) return true;
+  if (counted === "office-excel") return false;
+  return Number(file.profile?.office?.bodyBytes) > 0;
+}
+
 /** Pages of a file over the range its size allows when the client has not counted them; one value when they are known. */
 export function quoteFilePageRange(file: {
   name: string;
@@ -286,9 +307,10 @@ export function quoteFilePageRange(file: {
       : [UNMEASURED_MAX_BYTES_PER_PAGE, UNMEASURED_MIN_BYTES_PER_PAGE];
   let high = Math.max(central, Math.round(Math.ceil(file.size / highDivisor)));
   if (counted) {
-    // The body's uncompressed size bounds what conversion can measure however well the package compressed; the profile can
-    // only widen the size's bound (a package that understates its sizes quotes no lower). Never above the worker's cap.
-    const bodyBytes = Math.max(0, Number(file.profile?.office?.bodyBytes) || 0);
+    // With a profile, the body's uncompressed size bounds what conversion can measure however well the package compressed;
+    // it can only widen the size's range (a package that understates its sizes quotes no lower). Without one the size's range
+    // is ordinary, not a ceiling (quoteHighIsCeiling). Never above the worker's cap.
+    const bodyBytes = counted === "office-excel" ? 0 : Math.max(0, Number(file.profile?.office?.bodyBytes) || 0);
     high = Math.max(high, Math.ceil(bodyBytes / WORKER_COUNTED_BODY_BYTES_PER_PAGE));
     high = Math.max(central, Math.min(high, WORKER_COUNTED_MAX_PAGES));
   }
