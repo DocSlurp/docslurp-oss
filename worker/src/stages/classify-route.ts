@@ -831,7 +831,7 @@ export function pageLacksNativeText(page: Pick<AdaptivePageRoutingEntry, "ocrDec
  * the selection.
  *
  * v1 (runs started before evidence routing): a routing decision from page evidence decides alone; otherwise
- * vision-rescue routes (a degraded text layer, never words) and sparse table pages. v2 (evidence routing): exactly the pages whose own
+ * vision-rescue routes (a text layer degraded by its characters' measures, never by what its words say) and sparse table pages. v2 (evidence routing): exactly the pages whose own
  * evidence authorized a read (scans, raster pages, drawn content, an unreadable text layer); blank pages never,
  * and no text route adds or removes a page.
  */

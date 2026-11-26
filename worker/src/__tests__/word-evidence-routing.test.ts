@@ -3,10 +3,12 @@ import { buildAdaptiveRoutingDecisionSurface, classifyAdaptivePage, selectLegacy
 import type { PageImageEvidence } from "../lib/page-image-evidence.js";
 
 /**
- * Words on a page are document-supplied content: they never send a page to a vision read (and so never bill it Rich), and
- * never keep a page that needs one away from it. Only measured facts about the page decide: its text layer (words, a
- * garbled or unreadable layer), its images (count and coverage) and drawn content. Both routing versions are held to it:
- * evidence routing (v3, every run started since it) and v1 (a run without a routing pin).
+ * What the words on a page say is document-supplied content: a page that names a photo, a chart or a figure, or claims to be
+ * plain text, is never sent to a vision read for it (and so never billed Rich for it), and a claim never keeps a scan from one.
+ * Evidence routing (v3, every run started since it) decides from measured facts about the page alone: its text layer (words,
+ * a garbled or unreadable layer), its images (count and coverage) and drawn content. v1 (a run without a routing pin) lost its
+ * keyword triggers too, but still routes on measures of its extracted text (replacement characters, symbol noise, short-token
+ * pages, sparse tables) besides page evidence.
  */
 const VERSIONS = [
   { name: "evidence routing (v3)", routingV2: true },
@@ -51,7 +53,7 @@ function selected(result: ReturnType<typeof surface>, routingV2: boolean): numbe
 const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
 
 for (const { name, routingV2 } of VERSIONS) {
-  describe(`words never route a page to vision: ${name}`, () => {
+  describe(`what words say never routes a page to vision: ${name}`, () => {
     it("keeps born-digital prose about photos, images, diagrams and charts on the text path", () => {
       for (const text of WORDY_PROSE) {
         const page = classifyAdaptivePage(1, text, { routingV2 });
@@ -99,6 +101,28 @@ for (const { name, routingV2 } of VERSIONS) {
     });
   });
 }
+
+describe("v1 without keyword triggers", () => {
+  // The cost of dropping v1's keyword triggers, documented: a page with a small image (a logo, a thumbnail chart) whose only
+  // route to a read was its chart words now stays on the text path. Its image is too small for page evidence to authorize a
+  // read, so nothing reads it; v3 decides the same from the evidence. A page whose image covers it still reads.
+  const caption = SHORT_CHART_WORDS[0]!;
+  const smallImage: PageImageEvidence = { pageNumber: 1, wordCount: words(caption), imageCount: 1, imageCoverage: 0.08, largestImageCoverage: 0.08,
+    textLayer: { verdict: "ok", reasons: [], source: "text-layer" } };
+
+  it("keeps a page with a small image whose read came only from its words on the text path", () => {
+    for (const routingV2 of [false, true]) {
+      expect(selected(surface([{ text: caption, evidence: smallImage }], routingV2), routingV2), `routingV2=${routingV2}`).toEqual([]);
+    }
+  });
+
+  it("still reads the same words beside an image that covers the page", () => {
+    const covering = { ...smallImage, imageCoverage: 0.9, largestImageCoverage: 0.9 };
+    for (const routingV2 of [false, true]) {
+      expect(selected(surface([{ text: caption, evidence: covering }], routingV2), routingV2), `routingV2=${routingV2}`).toEqual([1]);
+    }
+  });
+});
 
 describe("broken text encodings still reach vision", () => {
   it("evidence routing reads a page whose text layer is measured as garbled", () => {
