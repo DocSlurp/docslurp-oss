@@ -3,6 +3,10 @@ import { assertNoAutomaticSelectionDenied } from "./automatic-model-selection.js
 import { lookupPrivateModelRoute, parsePrivateModelUri, PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
 import { hostedModelsAllowed } from "./private-model-mode.js";
 import { embeddingSpaceUri, type ModelCallConfig } from "./model-provenance.js";
+import { isLoopbackModelBaseUrl } from "./model-endpoints.js";
+
+// Endpoint admission lives in model-endpoints.ts; these names stay importable from here for existing callers.
+export { assertTenantModelEndpointAllowed, isLoopbackModelBaseUrl } from "./model-endpoints.js";
 
 export const supportedEmbeddingModels = [
   "text-embedding-3-small",
@@ -1654,23 +1658,4 @@ export function resolveVisionRoute(config: VisionConfig): VisionExecutionConfig 
     remoteFallbackModelUri: config.remoteFallbackModelUri,
     benchmarkProfile: config.benchmarkProfile,
   };
-}
-
-/** True when `value` is a URL on a loopback host (`localhost`, `127.0.0.1`, `[::1]`). */
-export function isLoopbackModelBaseUrl(value: string): boolean {
-  try {
-    const host = new URL(value).hostname.toLowerCase();
-    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
-  } catch {
-    return false;
-  }
-}
-
-/** Server-side admission for tenant-selected loopback services; opt in only on trusted single-tenant hosts. */
-export function assertTenantModelEndpointAllowed(modelUri: string): void {
-  const provider = parseLlmModelUri(modelUri).provider;
-  if (["ollama", "vllm", "lmstudio"].includes(provider)
-      && process.env.DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS !== "true") {
-    throw new Error("Tenant-selected local model endpoints are disabled");
-  }
 }
