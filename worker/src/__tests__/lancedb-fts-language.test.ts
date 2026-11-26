@@ -6,6 +6,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import {
   CHUNK_TEXT_FTS_INDEX_NAME,
+  chunkTextFtsIndexHasPositions,
   chunkTextFtsIndexName,
   chunkTextFtsLanguage,
   ensureChunkTextFtsIndex,
@@ -54,6 +55,12 @@ describe("chunk-text FTS analyzer", () => {
     expect(await find("Muller")).toEqual(["de"]);
     expect(await find("Gebühren")).toEqual(["de"]);
     expect(await find("subscription")).toEqual(["en"]);
+    // The rebuilt index stores positions: a quoted phrase matches the words in order, not anywhere.
+    expect(await find('"subscription plan"')).toEqual(["en"]);
+    expect(await find('"plan subscription"')).toEqual([]);
+    expect(chunkTextFtsIndexHasPositions(indices.find((index) => index.columns.includes("text"))?.name)).toBe(true);
+    expect(chunkTextFtsIndexHasPositions("text_fts_icu_v1")).toBe(false);
+    expect(chunkTextFtsIndexHasPositions("text_idx")).toBe(false);
     table.close();
     db.close();
   });
@@ -61,8 +68,8 @@ describe("chunk-text FTS analyzer", () => {
   it("names the index after its analyzer so a language change rebuilds it", () => {
     expect(chunkTextFtsIndexName({})).toBe(CHUNK_TEXT_FTS_INDEX_NAME);
     expect(chunkTextFtsIndexName({ LANCEDB_FTS_LANGUAGE: "auto" })).toBe(CHUNK_TEXT_FTS_INDEX_NAME);
-    expect(chunkTextFtsIndexName({ LANCEDB_FTS_LANGUAGE: "German" })).toBe("text_fts_german_v1");
-    expect(chunkTextFtsIndexName({ LANCEDB_FTS_LANGUAGE: " Portuguese (BR)! " })).toBe("text_fts_portuguese_br_v1");
+    expect(chunkTextFtsIndexName({ LANCEDB_FTS_LANGUAGE: "German" })).toBe("text_fts_german_v2");
+    expect(chunkTextFtsIndexName({ LANCEDB_FTS_LANGUAGE: " Portuguese (BR)! " })).toBe("text_fts_portuguese_br_v2");
     const icu = [{ name: CHUNK_TEXT_FTS_INDEX_NAME, indexType: "FTS", columns: ["text"] }];
     expect(hasCurrentChunkTextFtsIndex(icu, {})).toBe(true);
     expect(hasCurrentChunkTextFtsIndex(icu, { LANCEDB_FTS_LANGUAGE: "German" })).toBe(false);

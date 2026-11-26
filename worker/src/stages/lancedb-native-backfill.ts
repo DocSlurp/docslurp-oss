@@ -32,7 +32,7 @@ import { encodeLanceChunkHydration, lancePageNumberValue } from "@docslurp/share
 import type postgres from "postgres";
 
 import { connectLanceDb } from "./lancedb-connection.js";
-import { chunkTextFtsIndex, chunkTextFtsIndexName, hasChunkTextFtsIndex } from "./lancedb-maintenance.js";
+import { ensureChunkTextFtsIndex, hasCurrentChunkTextFtsIndex } from "./lancedb-maintenance.js";
 import { ensureLanceHydrationColumns, isRetryableLanceCommitError } from "./lancedb-writer.js";
 
 export interface LanceNativeBackfillScope {
@@ -195,18 +195,14 @@ async function backfillTable(args: {
         log(`[backfill] documents=${Math.min(offset + batchDocs, documentIds.length)}/${documentIds.length} chunk_rows=${result.chunkRows} elapsed_s=${Math.round((performance.now() - started) / 1000)}`);
       }
       const indices = await table.listIndices();
-      result.ftsPresent = hasChunkTextFtsIndex(indices);
+      // "Present" means the current index (analyzer and version): an older one is rebuilt here, built under the new
+      // name first so search keeps the old index until the new one exists.
+      result.ftsPresent = hasCurrentChunkTextFtsIndex(indices);
       if (!skipFts && !dryRun && !result.ftsPresent) {
-        const ftsStarted = performance.now();
-        try {
-          await withRetry(() => table.createIndex("text", { config: chunkTextFtsIndex(), name: chunkTextFtsIndexName(), replace: false }));
-          result.ftsBuilt = true;
-          log(`[backfill] fts index built in ${Math.round(performance.now() - ftsStarted)} ms`);
-        } catch (error) {
-          // Worker maintenance (LANCEDB_FTS_INDEX) built it concurrently.
-          if (!/already exists/i.test(error instanceof Error ? error.message : String(error))) throw error;
-          log("[backfill] fts index built concurrently by another writer");
-        }
+        const built = await ensureChunkTextFtsIndex(table, indices, { key: `backfill:${args.uri}#${args.table}` });
+        if (built.error && !/already exists/i.test(built.error)) throw new Error(`fts index build failed: ${built.error}`);
+        result.ftsBuilt = built.rebuilt;
+        log(built.rebuilt ? `[backfill] fts index built in ${built.ms} ms` : "[backfill] fts index built concurrently by another writer");
         result.ftsPresent = true;
       } else {
         log(`[backfill] fts index ${result.ftsPresent ? "present" : "skipped"}`);

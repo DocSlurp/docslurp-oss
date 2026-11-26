@@ -279,7 +279,19 @@ export function lanceDbFtsIndexEnabled(env: NodeJS.ProcessEnv = process.env): bo
  * Name of the chunk-text FTS index for the language-neutral (ICU) analyzer. An index under any other name was built
  * with another analyzer and is replaced by maintenance, once the current one exists.
  */
-export const CHUNK_TEXT_FTS_INDEX_NAME = "text_fts_icu_v1";
+export const CHUNK_TEXT_FTS_INDEX_NAME = "text_fts_icu_v2";
+
+/**
+ * Version suffix of the current chunk-text index. v1 had no token positions, so it could not answer a quoted phrase;
+ * v2 stores them. A reader can tell which one a table has from the index name (`chunkTextFtsIndexHasPositions`).
+ */
+export const CHUNK_TEXT_FTS_INDEX_VERSION = 2;
+
+/** True when an index of this name stores token positions (v2 and later), so phrase queries may be sent to it. */
+export function chunkTextFtsIndexHasPositions(name: string | null | undefined): boolean {
+  const match = /^text_fts_.+_v(\d+)$/.exec(name ?? "");
+  return match !== null && Number(match[1]) >= 2;
+}
 
 /**
  * LANCEDB_FTS_LANGUAGE selects the analyzer of the chunk-text index. Unset (or
@@ -297,24 +309,24 @@ export function chunkTextFtsLanguage(env: NodeJS.ProcessEnv = process.env): stri
 }
 
 /**
- * The current index's name, which carries its analyzer: `text_fts_icu_v1` for the language-neutral one,
- * `text_fts_<language>_v1` for a named language. Changing LANCEDB_FTS_LANGUAGE therefore changes the name, and
+ * The current index's name, which carries its analyzer: `text_fts_icu_v2` for the language-neutral one,
+ * `text_fts_<language>_v2` for a named language. Changing LANCEDB_FTS_LANGUAGE therefore changes the name, and
  * maintenance rebuilds under the new name instead of keeping an index built with the old analyzer.
  */
 export function chunkTextFtsIndexName(env: NodeJS.ProcessEnv = process.env): string {
   const language = chunkTextFtsLanguage(env);
   if (!language) return CHUNK_TEXT_FTS_INDEX_NAME;
   const slug = language.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 32);
-  return `text_fts_${slug || "language"}_v1`;
+  return `text_fts_${slug || "language"}_v${CHUNK_TEXT_FTS_INDEX_VERSION}`;
 }
 
-/** The chunk-text FTS index: no positions (no phrase queries). */
+/** The chunk-text FTS index, with token positions so quoted phrases are answered from it. */
 export function chunkTextFtsIndex(env: NodeJS.ProcessEnv = process.env): Index {
   const language = chunkTextFtsLanguage(env);
   if (language) {
-    return Index.fts({ withPosition: false, baseTokenizer: "simple", language, stem: true, removeStopWords: true, lowercase: true, asciiFolding: true });
+    return Index.fts({ withPosition: true, baseTokenizer: "simple", language, stem: true, removeStopWords: true, lowercase: true, asciiFolding: true });
   }
-  return Index.fts({ withPosition: false, baseTokenizer: "icu", stem: false, removeStopWords: false, lowercase: true, asciiFolding: true });
+  return Index.fts({ withPosition: true, baseTokenizer: "icu", stem: false, removeStopWords: false, lowercase: true, asciiFolding: true });
 }
 
 type IndexInfo = { name?: string; indexType?: string; columns: string[] };
