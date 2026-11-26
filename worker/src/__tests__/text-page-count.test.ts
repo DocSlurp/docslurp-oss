@@ -172,6 +172,23 @@ const utf16 = (text: string) => new Uint8Array(Buffer.concat([Buffer.from([0xff,
 const evidenceOf = (content: Uint8Array) => { const counter = new TextEvidenceCounter(); counter.update(content); return counter.result(); };
 
 describe("the host's bounds on the guest's text count", () => {
+  it("refuses a guest that under-counts non-Latin UTF-8 (council round 2)", () => {
+    const cyrillic = new TextEncoder().encode("Привет мир ".repeat(40_000));
+    const evidence = evidenceOf(cyrillic);
+    const real = textPageCount(decodeTextBytes(cyrillic, undefined));
+    const bounds = textPagesBounds(evidence, { encoding: "utf-8", markup: false });
+    expect(real).toBeGreaterThanOrEqual(bounds.min);
+    expect(bounds.min).toBeGreaterThan(10);
+    expect(() => validateTextPagesInspection({ text: { bytes: evidence.bytes, pages: 1 } }, evidence, "utf-8")).toThrow(/out of range/);
+  });
+
+  it("accepts a UTF-8 file with stray NUL bytes the sniff did not classify (council round 2)", () => {
+    const bytes = new TextEncoder().encode("row\n".repeat(30_000) + "\0" + "tail");
+    const evidence = evidenceOf(bytes);
+    const real = textPageCount(decodeTextBytes(bytes, undefined));
+    expect(validateTextPagesInspection({ text: { bytes: evidence.bytes, pages: real } }, evidence, null)?.pages).toBe(real);
+  });
+
   const latin1 = (text: string) => new Uint8Array(Buffer.from(text, "latin1"));
   const utf8 = (text: string) => new TextEncoder().encode(text);
   const soundCases: Array<[string, Uint8Array, "utf-8" | "utf-8-bom" | "utf-16le" | "utf-16be" | "8-bit", boolean]> = [

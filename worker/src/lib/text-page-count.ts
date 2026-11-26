@@ -200,13 +200,26 @@ export function hostEncodingClass(evidence: HostTextEvidence, claimed: FileEncod
  */
 export function textPagesBounds(evidence: HostTextEvidence, options: { encoding: FileEncoding | null; markup: boolean }): { min: number; max: number } {
   const wide = hostEncodingClass(evidence, options.encoding) === "utf-16";
+  // No claim and NUL bytes: the guest may have decoded either way, so accept the union of both classes' bounds (a stray
+  // NUL in a UTF-8 file is not a reason to fail it).
+  if (wide && options.encoding === null && evidence.bom === null) {
+    const a = boundsForClass(evidence, true, options.markup);
+    const b = boundsForClass(evidence, false, options.markup);
+    return { min: Math.min(a.min, b.min), max: Math.max(a.max, b.max) };
+  }
+  return boundsForClass(evidence, wide, options.markup);
+}
+
+function boundsForClass(evidence: HostTextEvidence, wide: boolean, markup: boolean): { min: number; max: number } {
   const span = evidence.firstContent < 0 ? 0 : evidence.lastContent - evidence.firstContent + 1;
   const maxChars = wide ? Math.max(evidence.bytes / 2, evidence.bytes * 1.5 - evidence.nul) : span;
   const feeds = wide ? Math.min(evidence.newlines, evidence.nul) : evidence.newlines;
-  const maxLines = feeds + 1 + (options.markup ? evidence.lt : 0);
+  const maxLines = feeds + 1 + (markup ? evidence.lt : 0);
   const max = Math.max(1, Math.ceil(maxLines / TEXT_PAGE_LINES), Math.ceil(maxChars / TEXT_PAGE_CHARS));
-  if (options.markup) return { min: 1, max };
-  const minChars = wide ? evidence.printableAscii / 2 : evidence.printableAscii;
+  if (markup) return { min: 1, max };
+  // At least one character per four high bytes for an ASCII-compatible decoding (UTF-8 spends at most four bytes on a
+  // character; a legacy or invalid byte is one), so non-Latin text cannot be answered as a handful of pages.
+  const minChars = wide ? evidence.printableAscii / 2 : evidence.printableAscii + evidence.high / 4;
   const minLines = wide ? 1 : evidence.newlines + 1;
   const min = Math.max(1, Math.ceil(minLines / TEXT_PAGE_LINES), Math.ceil(minChars / TEXT_PAGE_CHARS));
   return { min: Math.min(min, max), max };

@@ -8,7 +8,7 @@ import { open } from "node:fs/promises";
  * reads goes through here.
  */
 export async function readGuestResultFile(file: string, limit: number, refuse: (message: string) => Error = (message) => new Error(message)): Promise<Buffer> {
-  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => { throw refuse("guest result missing"); });
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => { throw refuse("guest result missing"); });
   try {
     const info = await handle.stat();
     if (!info.isFile()) throw refuse("guest result is not a regular file");
