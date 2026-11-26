@@ -151,12 +151,16 @@ export function pagesFromTextInspection(text: TextPagesInspection | null | undef
   return format === "html" ? text.markupPages ?? null : text.pages;
 }
 
-/** Record a measured text page count as the document's `counted` count; the page basis authorizes pages above intake's. */
-export async function recordTextPages(state: WorkflowState, document: Document, pages: number, bytes: number, via: string): Promise<{ pages: number; estimate: number }> {
+/**
+ * Record a measured text page count as the document's `counted` count. From quarantine the count is only persisted: the
+ * spend decision is format-detect's, which authorizes every document on every attempt, so an unfunded run pauses where a
+ * retry is nearly free instead of repeating quarantine's download, VM inspection and malware scan for every text file.
+ * From format-detect the page basis authorizes it at once (and format-detect again after).
+ */
+export async function recordTextPages(state: WorkflowState, document: Document, pages: number, bytes: number, via: "quarantine" | "format-detect"): Promise<{ pages: number; estimate: number }> {
   const estimate = Math.max(1, Math.trunc(document.pageCount) || 1);
   console.log(`[text-pages] document=${document.id} measured=${pages} estimate=${estimate} bytes=${bytes} via=${via}`);
-  // The page basis records the count (and authorizes a raise); format-detect authorizes it again on every attempt.
-  await state.pageBasis.record(document, { kind: "page-count", pages });
+  await state.pageBasis.record(document, { kind: "page-count", pages }, { deferAuthorization: via === "quarantine" });
   return { pages, estimate };
 }
 

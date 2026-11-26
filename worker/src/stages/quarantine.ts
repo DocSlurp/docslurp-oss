@@ -208,7 +208,8 @@ export class QuarantineStage implements Stage {
               assertAcceptedQuarantine(artifact, artifactUri);
 
               // A text file intake only estimated (from its size): record the inspection's count now, on the verified type,
-              // before any later stage uses it or anything bills. The page basis authorizes pages above intake's.
+              // before any later stage uses it or anything bills. Persisted only: format-detect makes the spend decision (pauses an
+              // unfunded run) on every attempt, so a resume never repeats this download, inspection and scan.
               const { format } = detectDocumentFormat(document);
               let textPages: { pages: number; estimate: number } | null = null;
               if (textRequest && needsTextPageCount(document, format)) {
