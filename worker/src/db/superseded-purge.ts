@@ -48,6 +48,8 @@ const DERIVED_TABLES = [
   "page_stage_states",
   "page_work_tasks",
   "pii_detections",
+  // Operator-only PII findings (detector confidence) of the superseded version.
+  "pii_page_findings",
   "search_index_staleness",
   "vector_indexes",
   // Deferred indexing: a superseded version is a tombstone, not a delete, so these do not cascade away.

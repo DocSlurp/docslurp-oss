@@ -141,7 +141,8 @@ describe("piiPolicy flag_for_review", () => {
     for (const [key, value] of before) expect(storage.objects.get(key)).toBe(value);
     expect(document.status).not.toBe(PII_BLOCKED_DOCUMENT_STATUS);
     expect(indexableDocuments(state)).toEqual([document]);
-    expect(piiArtifact(storage, prefix, documentId)).toMatchObject({ reviewRequired: true, matchCount: 2 });
+    expect(piiArtifact(storage, prefix, documentId)).toMatchObject({ reviewRequired: true });
+    expect(piiArtifact(storage, prefix, documentId)).not.toHaveProperty("matchCount");
     // Fingerprints only; the raw values never reach the audit trail.
     expect(JSON.stringify(sink.detections)).not.toContain(SSN);
     expect(JSON.stringify(piiArtifact(storage, prefix, documentId))).not.toContain(EMAIL);
@@ -415,7 +416,9 @@ describe("piiPolicy detections carry honest offsets", () => {
     expect(match?.charOffset).toBe(text.indexOf("123"));
     expect(match?.byteOffset).toBe(Buffer.byteLength(text.slice(0, text.indexOf("123"))));
     // The stage artifact is fetchable by the document's users: category, page and source only, no offsets or fingerprint.
-    expect(piiArtifact(storage, prefix, documentId).matches[0]).toEqual({ patternType: "ssn", pageNumber: null, source: "source-text" });
+    expect(piiArtifact(storage, prefix, documentId).pages).toEqual([{ pageNumber: null, categories: ["ssn"], sources: ["source-text"] }]);
+    // No count of matches is tenant-visible: not in the artifact, not in the stage stats.
+    expect(JSON.stringify(piiArtifact(storage, prefix, documentId))).not.toContain("matchCount");
   });
 });
 

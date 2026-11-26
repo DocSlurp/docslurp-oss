@@ -92,10 +92,12 @@ describe("PII-blocked documents in the run lifecycle", () => {
     );
     expect(documents.rows.map((row) => [row.id, row.status])).toEqual([["d-block", "pii_blocked"], ["d-ok", "completed"]]);
     expect(documents.rows[0]?.metadata.pii).toMatchObject({
-      blocked: true, action: "block_indexing", matchCount: 1, patternTypes: ["ssn"],
+      blocked: true, action: "block_indexing", patternTypes: ["ssn"],
       reason: "PII policy blocked indexing: 1 match (ssn)",
       withheldArtifactUris: ["s3://b/k1"],
     });
+    // Categories only: no count of matches reaches tenant-visible metadata.
+    expect(documents.rows[0]?.metadata.pii).not.toHaveProperty("matchCount");
     const run = await db.query<{ status: string }>(`select status from project_runs where id = 'run-1'`);
     expect(run.rows[0]?.status).toBe("completed");
     const detections = await db.query<{ pattern_type: string; page_number: number; matched_prefix: string }>(

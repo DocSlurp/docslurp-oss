@@ -18,10 +18,11 @@ import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import { findingsStatement, PiiFindingsUnavailableError } from "../lib/pii-deferred-outcome.js";
 import type { Document, ProjectRun } from "../models.js";
 import { locateMatches, planPiiWithholding, withholdPagesThenRedact } from "../lib/pii-page-withholding.js";
-import { documentPiiWithholding, indexableDocuments, isPageWithheldInRun } from "../pipeline/pii-gate.js";
+import { indexableDocuments, isPiiBlockedDocument } from "../pipeline/pii-gate.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { extractTextForEmbedding } from "../stages/embedding-runtime.js";
 import { PiiDetectStage, type PiiDetectionSink, type PiiDocumentOutcome } from "../stages/pii-detect.js";
+import { withoutPlaceholderChunks } from "../stages/embed.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 
@@ -114,9 +115,10 @@ describe("block_indexing withholds the page, not the document", () => {
     expect(f.document.status).not.toBe(PII_BLOCKED_DOCUMENT_STATUS);
     expect(outcome(f)).toMatchObject({ scope: "pages", withheldPages: [2], blocked: false, pageCount: 3 });
     expect(indexableDocuments(f.state)).toEqual([f.document]);
-    expect(isPageWithheldInRun(f.state, f.document, 2)).toBe(true);
-    expect(isPageWithheldInRun(f.state, f.document, 1)).toBe(false);
-    expect(isPageWithheldInRun(f.state, f.document, null)).toBe(true);
+    const recorded = piiWithholding({ status: f.document.status, metadata: { pii: { scope: outcome(f).scope, withheldPages: outcome(f).withheldPages } } });
+    expect(isPageWithheld(recorded, 2)).toBe(true);
+    expect(isPageWithheld(recorded, 1)).toBe(false);
+    expect(isPageWithheld(recorded, null)).toBe(true);
 
     const markdown = f.storage.objects.get(f.markdownKey)!;
     expect(markdown.split("\f")).toEqual(["Intro page.", piiWithheldPageText(2, ["ssn"]), "Closing page."]);
@@ -245,7 +247,7 @@ describe("block_document keeps whole-document blocking as an explicit choice", (
     await f.stage.run(f.state);
     expect(outcome(f)).toMatchObject({ scope: "document", blocked: true, withheldPageTypes: {} });
     expect(f.document.status).toBe(PII_BLOCKED_DOCUMENT_STATUS);
-    expect(documentPiiWithholding(f.state, f.document).scope).toBe("document");
+    expect(isPiiBlockedDocument(f.state, f.document)).toBe(true);
     // Operator findings name the page the match was on; tenants see the document-level categories only.
     expect(outcome(f).findings).toEqual([{ pageNumber: 2, patternType: "ssn", detector: "rule", validation: "structure", confidence: null }]);
   });
@@ -505,5 +507,35 @@ describe("rollout safety (M6)", () => {
     // Any other statement error is passed through unchanged.
     const other = new Error("boom");
     expect(await findingsStatement(() => Promise.reject(other)).catch((caught: unknown) => caught)).toBe(other);
+  });
+});
+
+describe("carried pages keep their exact categories", () => {
+  it("ids that share a label come back as recorded, not as the label's first id", () => {
+    const text = `one\f${piiWithheldPageText(2, ["aws-access-key"])}\fthree`;
+    const findings = { pageCount: 3, canonical: null, html: null, contract: null, fallback: null, markdown: { text, matches: [] } };
+    const before = planPiiWithholding("flag_for_review", findings, false);
+    expect(before.scope === "pages" && before.pageTypes.get(2)).not.toEqual(["aws-access-key"]);
+    const after = planPiiWithholding("flag_for_review", { ...findings, previousPageTypes: new Map([[2, ["aws-access-key" as const]]]) }, false);
+    expect(after.scope === "pages" && after.pageTypes.get(2)).toEqual(["aws-access-key"]);
+    // A previous record that names different labels is not trusted over the placeholder.
+    const mismatch = planPiiWithholding("flag_for_review", { ...findings, previousPageTypes: new Map([[2, ["ssn" as const]]]) }, false);
+    expect(mismatch.scope === "pages" && mismatch.pageTypes.get(2)).not.toEqual(["ssn"]);
+  });
+});
+
+describe("placeholder-only chunks are never indexed", () => {
+  it("drops chunks that are only placeholders and keeps the clean part of a mixed chunk", () => {
+    const chunk = (text: string, pageNumbers: number[]) => ({ text, pageNumber: pageNumbers[0] ?? null, pageNumbers });
+    const out = withoutPlaceholderChunks([
+      chunk(piiWithheldPageText(2, ["credit-card"]), [2]),
+      chunk(`Totals for March.\n\n${piiWithheldPageText(3, ["credit-card"])}`, [1, 3]),
+      chunk(PII_WITHHELD_SECTION_TEXT, []),
+      chunk("Clean page.", [4]),
+    ]);
+    expect(out).toEqual([
+      { text: "Totals for March.", pageNumber: 1, pageNumbers: [1] },
+      { text: "Clean page.", pageNumber: 4, pageNumbers: [4] },
+    ]);
   });
 });

@@ -18,7 +18,9 @@
 -- Tenant scope: org_id and project_id are NOT NULL and tied to the document's own (id, project_id, org_id) by a composite
 -- foreign key, so a row can never name another organization's document.
 --
--- Safe on a live database: a new, empty table; nothing existing is rewritten, locked for long or reshaped.
+-- Safe on a live database: a new, empty table; nothing existing is rewritten or reshaped. The composite foreign key takes
+-- a brief SHARE ROW EXCLUSIVE lock on documents (it blocks writes to documents, not reads, while the constraint is
+-- added to the empty table), bounded by the lock timeout below; the migration is retried if it cannot get the lock.
 SET LOCAL lock_timeout = '5s';
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS pii_page_findings (

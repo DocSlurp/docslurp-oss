@@ -4,7 +4,7 @@ import { recordDocumentMilestone } from "../pipeline/run-milestones.js";
 import { createHash } from "node:crypto";
 
 import { RunPolicyError } from "../lib/document-failure.js";
-import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, embeddingRequestConfig, resolveAllowedPipelineTextModel, pipelineVersionFeatures } from "@docslurp/shared";
+import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, embeddingRequestConfig, resolveAllowedPipelineTextModel, pipelineVersionFeatures, withoutPiiPlaceholders } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
@@ -288,6 +288,9 @@ export class EmbedStage implements Stage {
                   sourceKind: document.mimeType.startsWith("image/") ? "image" : null
                 })
               : await fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap, chunkMaxTokens, signal), signal, { cached: tableCells?.cached });
+            // Withheld pages and sections are placeholders in the text: a chunk of placeholders only is not indexed, and a
+            // chunk spanning a clean and a withheld page keeps its clean text and drops the withheld page.
+            chunkDrafts = withoutPlaceholderChunks(chunkDrafts);
             contentHash = hashContent(
               JSON.stringify({
                 documentTitle: document.filename,
@@ -1220,4 +1223,17 @@ async function fallbackChunkDrafts(
     evidenceType: "raw",
     chunkIndex: index
   }));
+}
+
+/** Chunks with PII placeholders removed (see `withoutPiiPlaceholders`); chunks left empty are dropped. */
+export function withoutPlaceholderChunks<T extends { text: string; pageNumber: number | null; pageNumbers: number[] }>(chunks: T[]): T[] {
+  return chunks.flatMap((chunk) => {
+    const cleaned = withoutPiiPlaceholders(chunk.text);
+    if (!cleaned.changed) return [chunk];
+    if (!cleaned.text) return [];
+    const withheld = new Set(cleaned.withheldPages);
+    const pageNumbers = chunk.pageNumbers.filter((page) => !withheld.has(page));
+    // A section placeholder has no page: such a chunk keeps its pages (the section is gone from its text).
+    return [{ ...chunk, text: cleaned.text, pageNumbers, pageNumber: chunk.pageNumber !== null && withheld.has(chunk.pageNumber) ? pageNumbers[0] ?? null : chunk.pageNumber }];
+  });
 }

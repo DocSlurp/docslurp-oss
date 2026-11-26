@@ -18,6 +18,7 @@ import {
   PII_BLOCKED_DOCUMENT_STATUS,
   PII_DETECTOR_VALIDATION,
   piiCategoryIds,
+  piiWithholding,
   type PiiMatch,
   type PiiPolicy,
   type PiiPatternType,
@@ -46,16 +47,16 @@ import { withdrawSummaryTreeForPii } from "../summary-tree/state-store.js";
 export interface PiiDetectionArtifact {
   documentId: string;
   policy: PiiPolicy;
-  matchCount: number;
   /**
-   * The category, page and text source of each match. This artifact is a stage artifact the document's own users can
-   * fetch, so it holds no fingerprint (an unsalted hash of a short value such as an SSN can be brute-forced) and no
-   * offset or length: those stay in pii_detections, which no tenant route reads.
+   * The kinds of PII found per page (null: no page) and the text sources they were found in. This artifact is a stage
+   * artifact the document's own users can fetch, so it holds no fingerprint (an unsalted hash of a short value such as an
+   * SSN can be brute-forced), no offset or length and no count of matches: those stay in pii_detections, which no tenant
+   * route reads.
    */
-  matches: Array<{
-    patternType: string;
+  pages: Array<{
     pageNumber: number | null;
-    source: PiiTextSource;
+    categories: PiiPatternType[];
+    sources: PiiTextSource[];
   }>;
   sourcesScanned: PiiTextSource[];
   action: string;
@@ -80,6 +81,8 @@ export interface PiiDetectionSink {
    * match or come from a withheld page, and rebuild its search text (pii-document-map.ts). Optional for test sinks.
    */
   scrubTitlesAndMap?(documentId: string, withheld: WithheldPagesForMap, matches: (text: string) => boolean): Promise<void>;
+  /** The kinds of PII the document's current outcome records per withheld page (carried pages keep their exact ids). */
+  previousPageTypes?(documentId: string): Promise<Map<number, PiiPatternType[]>>;
   close(): Promise<void>;
 }
 
@@ -230,7 +233,6 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
             pageCount: outcome.pageCount,
             action: outcome.action,
             runId: outcome.runId,
-            matchCount: outcome.matchCount,
             patternTypes: outcome.patternTypes,
             ...(outcome.scope === "pages" && Object.keys(outcome.withheldPageTypes).length > 0 ? { withheldPageTypes: outcome.withheldPageTypes } : {}),
             blocked: outcome.blocked,
@@ -301,6 +303,11 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
         where id = ${documentId}
       `;
     },
+    async previousPageTypes(documentId) {
+      const [row] = await db<Array<{ status: string | null; metadata: unknown }>>`select status, metadata from documents where id = ${documentId}`;
+      const recorded = row ? piiWithholding(row) : null;
+      return recorded?.scope === "pages" && recorded.pageTypes ? new Map([...recorded.pageTypes].map(([page, types]) => [page, [...types]])) : new Map();
+    },
     async scrubTitlesAndMap(documentId, withheld, matches) {
       // One read of the document's titles and map (primary keys); a write only when something changed.
       const [row] = await db<Array<{ title: string | null; title_source: string | null; map_title: string | null; nodes: unknown; terms: unknown; has_map: boolean }>>`
@@ -336,6 +343,8 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
 
 type TextArtifact = { slot: string; key: string; text: string; contentType: string };
 type JsonArtifact = { slot: string; key: string; value: unknown };
+
+const PII_PLACEHOLDER_MARKER = "withheld by the project's privacy policy";
 
 export class PiiDetectStage implements Stage {
   readonly name = "pii-detect";
@@ -499,6 +508,10 @@ export class PiiDetectStage implements Stage {
       fallback: fallbackResult ? { text: fallbackText, matches: fallbackResult.matches } : null,
       html: htmlResult ? { matches: htmlResult.matches } : null,
       contract: contractResult ? { matches: contractResult.matches } : null,
+      // Read only when the text carries a placeholder (a rescan of rewritten text): one primary-key select.
+      previousPageTypes: [markdown?.text, fallbackText].some((text) => text?.includes(PII_PLACEHOLDER_MARKER))
+        ? await this.sink.previousPageTypes?.(document.id)
+        : undefined,
     }, anyMatch);
     // Pages hit, for redaction and review: per-page artifacts of the other pages stay servable.
     const located = anyMatch && document.pageCount > 1
@@ -637,7 +650,7 @@ export class PiiDetectStage implements Stage {
         : [];
     const reason = blocked
       ? policy.action === "block_document" || planReason === "every-page-withheld"
-        ? `PII policy blocked indexing: ${matchCount} match${matchCount === 1 ? "" : "es"} (${patternTypes.join(", ")})`
+        ? `PII policy blocked indexing (${patternTypes.join(", ")})`
         : `PII policy blocked indexing: a match could not be placed on a page (${planReason})`
       : plan.scope === "pages"
         ? `PII policy withheld ${withheldPageList.length} page${withheldPageList.length === 1 ? "" : "s"}`
@@ -673,8 +686,7 @@ export class PiiDetectStage implements Stage {
     const artifact: PiiDetectionArtifact = {
       documentId: document.id,
       policy,
-      matchCount: anyMatch ? matchCount : 0,
-      matches: primary.map((m) => ({ patternType: m.patternType, pageNumber: m.pageNumber, source: m.source })),
+      pages: categoriesByPage(primary),
       sourcesScanned,
       action: policy.action,
       blocked,
@@ -690,7 +702,6 @@ export class PiiDetectStage implements Stage {
     return {
       artifactUri: this.storage.uri(artifactKey),
       stats: {
-        matchCount: artifact.matchCount,
         patternTypes,
         sourcesScanned,
         blocked,
@@ -777,6 +788,20 @@ export class PiiDetectStage implements Stage {
   async close(): Promise<void> {
     await this.sink.close();
   }
+}
+
+/** Categories and sources per page (null: no page), sorted: what the tenant-fetchable artifact lists instead of matches. */
+function categoriesByPage(matches: ReadonlyArray<PiiMatch & { source: PiiTextSource }>): PiiDetectionArtifact["pages"] {
+  const byPage = new Map<number | null, { categories: Set<PiiPatternType>; sources: Set<PiiTextSource> }>();
+  for (const match of matches) {
+    const entry = byPage.get(match.pageNumber) ?? { categories: new Set(), sources: new Set() };
+    entry.categories.add(match.patternType);
+    entry.sources.add(match.source);
+    byPage.set(match.pageNumber, entry);
+  }
+  return [...byPage]
+    .sort(([a], [b]) => (a ?? 0) - (b ?? 0))
+    .map(([pageNumber, entry]) => ({ pageNumber, categories: piiCategoryIds([...entry.categories]), sources: [...entry.sources].sort() }));
 }
 
 /** The redacted canonical document with every value the Markdown matched also redacted in the blocks holding it. */

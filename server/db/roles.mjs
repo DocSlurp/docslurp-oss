@@ -281,7 +281,9 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
     }
   }
   if (has(roles.app)) {
-    for (const table of ["compute_fleets", "compute_allocation_reservations", "compute_job_fleets", "compute_job_tickets"]) {
+    // pii_page_findings is operator-only (detector confidence): the API role reads and writes none of it, after the
+    // schema-wide grant above. Rows still go with their document through the foreign-key cascade (run as the owner).
+    for (const table of ["compute_fleets", "compute_allocation_reservations", "compute_job_fleets", "compute_job_tickets", "pii_page_findings"]) {
       if (relations.includes(table)) statements.push(`revoke all on public.${quoteIdent(table)} from ${quoteIdent(roles.app)}`);
     }
   }

@@ -1627,7 +1627,9 @@ export class ExtractMarkdownStage implements Stage {
     // Every page is a scan and none could be read: the document has no text, so it fails rather than publishing nothing.
     if (failed.length > 0 && failed.length === pageCount) throw new Error(`OCR failed for every page (${pageCount}) of a scanned document`);
     if (read.length === 0) return null;
-    const text = pages.join("\f");
+    // A form feed inside one page's OCR text would read as a page break and shift every later page's attribution (PII
+    // page withholding, citations): each page's own form feeds become newlines before the pages are joined.
+    const text = pages.map(withoutPageBreaks).join("\f");
     const key = `${args.textKey}.ocr.md`;
     await this.storage.putBytes(key, Buffer.from(text, "utf8"), "text/markdown; charset=utf-8");
     console.log(`[ocr] document=${document.id} scanned pages read=${read.length}/${empty.length}`);
@@ -2114,7 +2116,7 @@ export class ExtractMarkdownStage implements Stage {
     if (owner && renditions < result.pages.length) {
       console.warn(`[ocr] document=${context.documentId} renditions=${renditions}/${result.pages.length}: pages without one get no page-image vectors`);
     }
-    const markdown = result.pages.map((page) => page.text).join("\f");
+    const markdown = result.pages.map((page) => withoutPageBreaks(page.text)).join("\f");
     // An uploaded image's frames also count their decoded area (a giant scan is several standard pages to read).
     if (owner) await recordExtractedPageEquivalents(state, owner, "image", markdown, result.pages);
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-extract-ocr-"));
@@ -4027,4 +4029,9 @@ async function settle<T>(
       reason,
     };
   }
+}
+
+/** One page's text with any form feed (the page-break character) replaced, so joining pages keeps the page count. */
+export function withoutPageBreaks(text: string): string {
+  return text.includes("\f") ? text.replace(/\f/g, "\n") : text;
 }

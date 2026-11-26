@@ -1,4 +1,5 @@
 import {
+  describePiiCategories,
   isPageWithheld,
   isPiiWithheldPlaceholder,
   pageOffsets,
@@ -61,6 +62,11 @@ export type PiiScanFindings = {
   fallback: { text: string; matches: PiiMatch[] } | null;
   html: { matches: PiiMatch[] } | null;
   contract: { matches: PiiMatch[] } | null;
+  /**
+   * The kinds of PII the previous outcome recorded per withheld page. A carried placeholder names labels, and several
+   * ids share a label ("an API key"), so a carried page keeps these exact ids when they describe the same labels.
+   */
+  previousPageTypes?: ReadonlyMap<number, readonly PiiPatternType[]>;
 };
 
 export type CanonicalBlockLike = {
@@ -153,7 +159,10 @@ export function locateMatches(findings: PiiScanFindings): Located {
 export function carriedWithheldPages(findings: PiiScanFindings): Map<number, PiiPatternType[]> {
   const carried = new Map<number, PiiPatternType[]>();
   const carry = (page: number, text: string) => {
-    carried.set(page, piiCategoryIds([...(carried.get(page) ?? []), ...(piiPlaceholderTypes(text) ?? [])]));
+    const read = piiPlaceholderTypes(text) ?? [];
+    const previous = findings.previousPageTypes?.get(page) ?? [];
+    const sameLabels = previous.length > 0 && describePiiCategories(previous) === describePiiCategories(read);
+    carried.set(page, piiCategoryIds([...(carried.get(page) ?? []), ...(sameLabels ? previous : read)]));
   };
   const { pageCount } = findings;
   for (const entry of [findings.markdown, findings.fallback]) {

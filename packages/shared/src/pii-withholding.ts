@@ -111,6 +111,23 @@ const WITHHELD_PAGE_TEXT = /^\[Page [1-9][0-9]{0,8} withheld by the project's pr
 const LABEL_IDS = new Map<string, PiiPatternType>();
 for (const id of piiPatternTypeSchema.options) if (!LABEL_IDS.has(PII_CATEGORY_LABELS[id])) LABEL_IDS.set(PII_CATEGORY_LABELS[id], id);
 
+const WITHHELD_PAGE_TEXT_ANYWHERE = /\[Page ([1-9][0-9]{0,8}) withheld by the project's privacy policy(?:: contains [a-zA-Z' ,]{1,600})?\]/g;
+
+/**
+ * A retrieval unit's text without the withheld placeholders, and the pages whose placeholder it held. A unit that is only
+ * placeholders comes back empty: it is never indexed, so a query for a PII category cannot fill results with them. A
+ * unit spanning a clean and a withheld page keeps its clean text and loses the withheld page.
+ */
+export function withoutPiiPlaceholders(text: string): { text: string; withheldPages: number[]; changed: boolean } {
+  if (!text.includes("withheld by the project's privacy policy")) return { text, withheldPages: [], changed: false };
+  const withheldPages: number[] = [];
+  const stripped = text
+    .replace(WITHHELD_PAGE_TEXT_ANYWHERE, (_match, page: string) => { withheldPages.push(Number(page)); return ""; })
+    .split(PII_WITHHELD_SECTION_TEXT).join("");
+  const out = stripped.replace(/\n{3,}/g, "\n\n").trim();
+  return { text: out, withheldPages, changed: out !== text };
+}
+
 /** True when a page's whole text is the withheld placeholder (a rescan of rewritten text keeps it withheld). */
 export function isPiiWithheldPlaceholder(text: string): boolean {
   const trimmed = text.trim();
