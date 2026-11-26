@@ -1,8 +1,18 @@
-import { imageAnchorsToAltText } from "@docslurp/shared";
+import {
+  imageAnchorsToAltText,
+  runReadLoop,
+  stratifiedRounds,
+  type ReadBudget,
+  type ReadPorts,
+  type ReadSource,
+  type ReadStoppedBy,
+  type ReadTask,
+  type Slice,
+  type SliceRef,
+} from "@docslurp/shared";
 
-import type { ReadBudget, ReadPorts, ReadSource, ReadStoppedBy, ReadTask, Slice, SliceRef, SliceStrategy } from "../lib/read-loop-contract.js";
+import { estimateTokens } from "../lib/unicode-text.js";
 import { pageByteRange, pageOffsetsKey, PAGE_OFFSETS_MAX_BYTES, parsePageOffsets, type PageOffsetIndex } from "../lib/page-offsets.js";
-import { runReadLoop, stratifiedRounds } from "../lib/read-loop.js";
 import { stripSummaryControlCharacters } from "../summary-tree/summary.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
 import { keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
@@ -238,6 +248,8 @@ export interface ScanOutcome {
   stoppedBy: ReadStoppedBy;
   pagesRead: number;
   pagesTotal: number;
+  /** Pages read by later steps, beyond the evidence pages, in page order. */
+  extraPages: number[];
   /** Provider cost, tokens of every attempt, for the caller's totals. */
   costCents: number;
   inputTokens: number;
@@ -265,9 +277,9 @@ async function callStep(args: { call: ScanModelCall; prompt: { system: string; p
   throw new Error("unreachable");
 }
 
-export function scanBudget(args: { remainingCostCents: number; wallMs: number }): ReadBudget {
+export function scanBudget(args: { wallMs: number }): ReadBudget {
   return {
-    maxSteps: SCAN_MAX_MODEL_CALLS - 1,
+    maxSteps: SCAN_MAX_MODEL_CALLS,
     maxUnitsPerStep: SCAN_PAGES_PER_STEP,
     maxSliceTokens: 1_200,
     maxStepTokens: 3_000,
@@ -276,23 +288,21 @@ export function scanBudget(args: { remainingCostCents: number; wallMs: number })
     maxSearches: 0,
     maxModelDirectedShare: 0.5,
     maxWallMs: args.wallMs,
-    maxCostCents: args.remainingCostCents,
+    maxCostCents: MAX_COST_CENTS,
     concurrency: 4,
   };
 }
 
 const MAX_COST_CENTS = 2;
 
-/** The default plan with the pages round 1 already read taken out. */
-export function skippingPages(inner: SliceStrategy, skip: ReadonlySet<number>): SliceStrategy {
-  return (ctx) => inner({ ...ctx, seen: new Set([...ctx.seen, ...skip]) });
-}
+/** The task's starting state: never a real result (its summary is empty), so the first step can never look stable. */
+const EMPTY_STATE: ScanState = { docType: "other", topics: [], summary: "" };
 
 /**
- * Run the scan. Round 1 reads exactly the evidence text the single-call summary reads today, outside the engine (the
- * engine cannot seed units as already read); the loop then continues from that state with one call fewer, never
- * touching the evidence pages by its default plan. Returns null when round 1 fails (the caller uses the single call);
- * any later failure keeps round 1's state.
+ * Run the scan as one loop. The first step is seeded with the evidence text the single-call summary reads today (as one
+ * slice and every evidence page marked seen, so the plan never repeats them); later steps read ten further pages each.
+ * Replies from the first step are honoured like any other. Returns null when the first step fails (the caller uses the
+ * single call); a later failure keeps the latest good state.
  */
 export async function runSummaryScan(args: {
   call: ScanModelCall;
@@ -309,11 +319,17 @@ export async function runSummaryScan(args: {
 }): Promise<ScanOutcome | null> {
   const total = args.source.pagesTotal;
   const evidence = new Set(args.evidencePages);
-  let steps = 0;
+  const firstPage = Math.min(...args.evidencePages);
+  const wallMs = args.wallMs - WALL_RESERVE_MS;
+  if (!Number.isFinite(firstPage) || evidence.size === 0 || wallMs <= 0) return null;
+
   let cost = 0;
   let inTokens = 0;
   let outTokens = 0;
-  let pagesRead = evidence.size;
+  // Pages shown so far, for the prompt's progress line: the evidence plus every page a later step started with.
+  let shown = evidence.size;
+  let firstStepOk = false;
+  let firstStepFailed = false;
   const attempt = (step: number) => (result: ScanModelResult, n: number) => {
     cost += result.costCents ?? 0;
     inTokens += result.inputTokens;
@@ -321,45 +337,40 @@ export async function runSummaryScan(args: {
     args.onAttempt(result, { step, attempt: n });
   };
 
-  // Round 1.
-  let first: ScanState;
-  steps = 1;
-  try {
-    const prompt = buildScanPrompt({ fileName: args.fileName, state: null, evidenceText: args.evidenceText, pagesRead, pagesTotal: total });
-    first = (await callStep({ call: args.call, prompt, signal: args.signal, onAttempt: attempt(1) })).reply.state;
-  } catch {
-    return null;
-  }
-  const outcome = (state: ScanState, stoppedBy: ReadStoppedBy): ScanOutcome => ({
-    state, steps, stoppedBy, pagesRead, pagesTotal: total, costCents: cost, inputTokens: inTokens, outputTokens: outTokens,
-  });
-
-  const remainingCost = MAX_COST_CENTS - cost;
-  const wallMs = args.wallMs - WALL_RESERVE_MS;
-  if (remainingCost <= 0) return outcome(first, "cost");
-  if (wallMs <= 0) return outcome(first, "wall-clock");
-
   const task: ReadTask<ScanState> = {
     id: "document-labels@1",
-    init: first,
+    init: EMPTY_STATE,
     coverage: "representative",
     allowedActions: ALLOWED_ACTIONS,
-    // Round 1 is outside the engine: the first engine step is the second call. Two calls are needed for any comparison.
-    minSteps: Math.max(1, (total > SCAN_LARGE_DOCUMENT_PAGES ? 2 : 1) - 1),
-    done: (previous, next) => labelsStable(previous, next),
+    minSteps: total > SCAN_LARGE_DOCUMENT_PAGES ? 2 : 1,
+    // Stable needs two real states: the empty starting state is never one of them.
+    done: (previous, next) => previous.summary !== "" && labelsStable(previous, next),
     async step({ state, slices, step, signal }) {
-      steps++;
-      pagesRead += slices.length;
-      const pages = slices.map((slice) => ({ page: slice.ref.start, text: slice.text }));
-      const prompt = buildScanPrompt({ fileName: args.fileName, state, pages, pagesRead, pagesTotal: total });
-      const result = await callStep({ call: args.call, prompt, signal, onAttempt: attempt(step + 1) });
-      return { reply: result.reply, costCents: result.costCents, inputTokens: result.inputTokens };
+      let prompt: ReturnType<typeof buildScanPrompt>;
+      if (step === 1) {
+        // The seeded batch: the evidence text exactly as the single-call summary reads it, with no carried state.
+        prompt = buildScanPrompt({ fileName: args.fileName, state: null, evidenceText: args.evidenceText, pagesRead: shown, pagesTotal: total });
+      } else {
+        shown += slices.length;
+        const pages = slices.map((slice) => ({ page: slice.ref.start, text: slice.text }));
+        prompt = buildScanPrompt({ fileName: args.fileName, state, pages, pagesRead: shown, pagesTotal: total });
+      }
+      try {
+        const result = await callStep({ call: args.call, prompt, signal, onAttempt: attempt(step) });
+        if (step === 1) firstStepOk = true;
+        return { reply: result.reply, costCents: result.costCents, inputTokens: result.inputTokens };
+      } catch (error) {
+        if (step === 1) firstStepFailed = true;
+        throw error;
+      }
     },
   };
   const source: ReadSource = { unit: "page", first: 1, last: total };
   const ports: ReadPorts = {
+    estimateTokens,
     read: (refs, signal) => args.source.read(refs, signal),
-    shouldStop: args.shouldStop,
+    // A failed first step ends the scan at once: the caller falls back to the single call instead of paying for more.
+    shouldStop: () => firstStepFailed || (args.shouldStop?.() ?? false),
     signal: args.signal,
     ...(args.now ? { now: args.now } : {}),
   };
@@ -367,16 +378,27 @@ export async function runSummaryScan(args: {
     const result = await runReadLoop({
       task,
       source,
-      strategy: skippingPages(stratifiedRounds(SCAN_PAGES_PER_STEP), evidence),
-      budget: scanBudget({ remainingCostCents: remainingCost, wallMs }),
+      strategy: stratifiedRounds(SCAN_PAGES_PER_STEP),
+      budget: scanBudget({ wallMs }),
       ports,
+      seed: {
+        seen: [...evidence],
+        // One slice holds the whole evidence text. Its ref is the first evidence page so relative proposals anchor there.
+        batch: [{ ref: { unit: "page", start: firstPage, end: firstPage }, status: "ok", text: args.evidenceText }],
+      },
     });
-    // Pages of a failed step were counted when it started; report only what a successful step read.
-    pagesRead = evidence.size + result.coverage.unitsRead;
-    return outcome(result.state, result.stoppedBy);
+    if (!firstStepOk) return null;
+    // The engine counts the seeded batch as one page read. It is an evidence page, so drop that one unit and add the
+    // evidence pages themselves; what remains is the pages later steps read.
+    const extraPages: number[] = [];
+    for (const [from, to] of result.coverage.ranges) for (let page = from; page <= to; page++) if (!evidence.has(page)) extraPages.push(page);
+    return {
+      state: result.state, steps: result.usage.steps, stoppedBy: result.stoppedBy,
+      pagesRead: evidence.size + extraPages.length, pagesTotal: total, extraPages,
+      costCents: cost, inputTokens: inTokens, outputTokens: outTokens,
+    };
   } catch {
-    pagesRead = evidence.size;
-    return outcome(first, "errors");
+    return null;
   }
 }
 

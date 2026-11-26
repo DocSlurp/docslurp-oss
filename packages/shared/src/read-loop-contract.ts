@@ -131,7 +131,26 @@ export interface ReadBudget {
   concurrency: number;
 }
 
+/**
+ * Where a loop starts when its caller already holds text or already chose what to read first: a pipeline stage that has
+ * sampled pages, or a chat tool starting from search hits. Set by the caller, so it is trusted and not charged as
+ * model actions. Still clamped to the source.
+ */
+export interface ReadSeed {
+  /** Units read elsewhere. Never planned and not counted as read by this loop. */
+  seen?: readonly number[];
+  /**
+   * Text the caller already holds. It is the first step's batch: no port read, no clipping. Its units count as seen and,
+   * after a successful step, as read; its estimated tokens count against the token budgets. Wins over `refs`.
+   */
+  batch?: ReadonlyArray<Extract<Slice, { status: "ok" }>>;
+  /** The first wave, when there is no `batch`: at most `maxUnitsPerStep` units, the strategy fills any room left. */
+  refs?: readonly SliceRef[];
+}
+
 export interface ReadPorts {
+  /** Token estimate used to clip slices and enforce the token budgets. Should over-count rather than under-count. */
+  estimateTokens(text: string): number;
   /** Read extracted text for these refs. Scoping to the caller's organization and document is the port's job. */
   read(refs: SliceRef[], signal: AbortSignal): Promise<Slice[]>;
   /** Keyword search inside the same source. Absent: search proposals are dropped. */

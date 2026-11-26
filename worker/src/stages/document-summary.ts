@@ -83,7 +83,7 @@ export class DocumentSummaryStage implements Stage {
               return { message: "Document summary skipped: no bounded extracted text available", stats: { summarySkipped: "source-unavailable" } };
             }
             const selected = selectSummaryInput(extracted.text, extracted.sampled);
-            const sourceStats = { sourceBytes: extracted.sourceBytes, readBytes: extracted.readBytes,
+            const baseStats = { sourceBytes: extracted.sourceBytes, readBytes: extracted.readBytes,
               inputCharacters: selected.text.length, inputBytes: Buffer.byteLength(selected.text), sampled: selected.sampled,
               coverage: extracted.coverage ?? { totalPages: document.pageCount || null, pages: [], pageReferences: "unavailable" } };
             // Adaptive labels (DOCSLURP_SUMMARY_SCAN): null unless the flag is on and the document qualifies.
@@ -91,6 +91,12 @@ export class DocumentSummaryStage implements Stage {
               ? await this.scanSummary({ state, document, extracted, selected, model, signal: summarySignal,
                   wallMs: SUMMARY_DEADLINE_MS - (Date.now() - summaryStartedAt) })
               : null;
+            // A scan that read more pages than the evidence reports them: the artifact coverage and the notice below follow
+            // what was read, not the evidence sample. Pages the scan read are listed as clipped (its slices are capped).
+            const sourceStats = scan && scan.extraPages.length > 0
+              ? { ...baseStats, coverage: { ...baseStats.coverage,
+                  pages: [...baseStats.coverage.pages, ...scan.extraPages.map((pageNumber) => ({ pageNumber, clipped: true }))] } }
+              : baseStats;
             const {
               text: generatedSummary,
               finishReason,
@@ -112,15 +118,17 @@ export class DocumentSummaryStage implements Stage {
               costPer1kOutputTokens: this.config.costPer1kOutputTokens,
             });
 
-            // Account for generation even if embedding or persistence fails later (the scan recorded each of its calls).
-            if (!scan) state.usageLedger.record({
+            // Account for generation even if embedding or persistence fails later. This is the document's one
+            // `summary-generation` unit on every path. The scan already recorded the tokens and cost of each of its
+            // calls (amount 0), so on that path this row carries none, and nothing is counted twice or lost.
+            state.usageLedger.record({
               ...textUsageLabels(model),
               metric: "summary-generation",
               amount: 1,
               unit: "document",
-              costCents: summaryCostCents,
-              inputTokens: summaryInputTokens,
-              outputTokens: summaryOutputTokens,
+              costCents: scan ? 0 : summaryCostCents,
+              inputTokens: scan ? 0 : summaryInputTokens,
+              outputTokens: scan ? 0 : summaryOutputTokens,
               metadata: { ...costMetadata, documentId: document.id, ...sourceStats },
             });
 
@@ -131,7 +139,7 @@ export class DocumentSummaryStage implements Stage {
             // Price card: one summary per document per run (provider tokens above bill 0).
             chargeDocumentFeature(state, document, "documentSummary");
             // Coverage is a product guarantee, not an instruction the model may ignore.
-            const coverage = extracted.coverage;
+            const coverage = sourceStats.coverage;
             const notice = selected.sampled
               ? coverage?.pageReferences === "verified"
                 ? `Sampled document overview (${coverage.pages.length} of ${coverage.totalPages} pages; excerpts may be clipped). `
@@ -262,15 +270,14 @@ export class DocumentSummaryStage implements Stage {
           costCents: costCents ?? calculateAiUsageCostCents({ inputTokens, outputTokens,
             costPer1kInputTokens: this.config.costPer1kInputTokens, costPer1kOutputTokens: this.config.costPer1kOutputTokens }) };
       };
-      let recorded = 0;
       const outcome = await runSummaryScan({
         call,
         onAttempt: (result, info) => {
           state.usageLedger.record({
             ...textUsageLabels(model),
             metric: "summary-generation",
-            // One summary per document: the first attempt carries the unit, later calls only their tokens and cost.
-            amount: recorded++ === 0 ? 1 : 0,
+            // Tokens and cost only: the stage records the document's one unit itself, exactly once.
+            amount: 0,
             unit: "document",
             costCents: result.costCents ?? 0,
             inputTokens: result.inputTokens,
@@ -287,7 +294,7 @@ export class DocumentSummaryStage implements Stage {
         wallMs: args.wallMs,
       });
       if (!outcome) {
-        console.warn(`[document-summary] summary_scan_round1_failed document=${document.id}`);
+        console.warn(`[document-summary] summary_scan_first_step_failed document=${document.id}`);
         return null;
       }
       console.info(`[document-summary] summary_scan document=${document.id} steps=${outcome.steps} stopped_by=${outcome.stoppedBy} pages_read=${outcome.pagesRead} pages_total=${outcome.pagesTotal}`);

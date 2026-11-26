@@ -248,11 +248,64 @@ describe("DocumentSummaryStage with DOCSLURP_SUMMARY_SCAN", () => {
     expect(stored.scan.pagesRead).toBe(20);
     expect(stored.summary).toContain("Summary of a contract.");
     expect(generate.mock.calls[0]![0].operation).toBe("document-summary");
-    // Round 1 reads exactly the evidence text; usage is recorded for every call, one document unit in all.
+    // The first step reads exactly the evidence text; every call's tokens are recorded (amount 0) and the stage adds the
+    // document's one unit exactly once, carrying no tokens or cost of its own.
     expect(generate.mock.calls[0]![0].prompt).toContain("EVIDENCE 299");
     expect(generate.mock.calls[1]![0].prompt).not.toContain("EVIDENCE");
-    expect(record.mock.calls.filter(([e]) => e.metric === "summary-generation")).toHaveLength(2);
-    expect(record.mock.calls.filter(([e]) => e.metric === "summary-generation").reduce((sum, [e]) => sum + e.amount, 0)).toBe(1);
+    const rows = record.mock.calls.map(([e]) => e).filter((e) => e.metric === "summary-generation");
+    expect(rows).toHaveLength(3);
+    expect(rows.filter((e) => e.amount === 1)).toHaveLength(1);
+    expect(rows.filter((e) => e.amount === 0)).toHaveLength(2);
+    expect(rows.find((e) => e.amount === 1)).toMatchObject({ inputTokens: 0, outputTokens: 0, costCents: 0 });
+    expect(rows.reduce((sum, e) => sum + e.inputTokens, 0)).toBe(200);
+    expect(rows.reduce((sum, e) => sum + e.costCents, 0)).toBeCloseTo(0.02);
+  });
+
+  it("honours the first reply's proposals: an exact page it asks for is in the second call", async () => {
+    modelReplies([
+      reply("contract", ["a"], [{ do: "read", unit: "page", at: 77 }]),
+      reply("contract", ["a"]),
+    ]);
+    const { run } = setup();
+    await run();
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate.mock.calls[1]![0].prompt).toContain("[Page 77]");
+    expect(generate.mock.calls[1]![0].prompt).toContain("Content of page 77.");
+  });
+
+  it("anchors a relative proposal of the first reply on the evidence's first page", async () => {
+    modelReplies([
+      reply("contract", ["a"], [{ do: "read", unit: "page", relative: "next", span: 2 }]),
+      reply("contract", ["a"]),
+    ]);
+    const { run } = setup();
+    await run();
+    // The evidence's first page is 1; the slice is anchored there, so the pages after it are 2 and 3 (already seen), and
+    // the proposal is refused rather than rereading evidence. The second call still reads fresh pages.
+    expect(generate.mock.calls[1]![0].prompt).not.toContain("EVIDENCE");
+    expect(generate.mock.calls[1]![0].prompt).not.toMatch(/\[Page (1|2|3|50|100|150|200|250|299|300)\]/);
+  });
+
+  it("reports the pages the scan read in the notice and the stored coverage", async () => {
+    modelReplies([reply("contract", ["a"], [{ do: "read", unit: "page", at: 77 }]), reply("contract", ["a"])]);
+    const { run, putJson } = setup();
+    await run();
+    const stored = artifact(putJson);
+    expect(stored.scan.pagesRead).toBe(20);
+    expect(stored.summary).toContain("Sampled document overview (20 of 300 pages;");
+    expect(stored.sourceSelection.coverage.totalPages).toBe(300);
+    expect(stored.sourceSelection.coverage.pages).toHaveLength(20);
+    expect(stored.sourceSelection.coverage.pages.map((p: { pageNumber: number }) => p.pageNumber)).toContain(77);
+  });
+
+  it("records the document's one usage unit once when the scan's first step fails and the single call answers", async () => {
+    modelReplies(["not json", "A plain one-paragraph summary."]);
+    const { run } = setup();
+    await run();
+    const rows = record.mock.calls.map(([e]) => e).filter((e) => e.metric === "summary-generation");
+    expect(rows.reduce((sum, e) => sum + e.amount, 0)).toBe(1);
+    expect(rows.reduce((sum, e) => sum + e.inputTokens, 0)).toBe(200);
+    expect(rows.find((e) => e.amount === 1)).toMatchObject({ inputTokens: 100, outputTokens: 50 });
   });
 
   it("takes more rounds when later pages change the type", async () => {

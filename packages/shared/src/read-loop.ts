@@ -5,7 +5,6 @@
  * it bounds, and nothing a model writes can change a budget, the source or the allowed actions.
  */
 
-import { runBounded } from "./bounded-concurrency.js";
 import {
   NEXT_ACTIONS_MAX,
   NODE_ID_MAX_CHARS,
@@ -17,6 +16,7 @@ import {
   type ReadBudget,
   type ReadPorts,
   type ReadResult,
+  type ReadSeed,
   type ReadSource,
   type ReadStoppedBy,
   type ReadTask,
@@ -25,9 +25,32 @@ import {
   type SliceRef,
   type SliceStrategy,
 } from "./read-loop-contract.js";
-import { estimateTokens } from "./unicode-text.js";
 
 type OkSlice = Extract<Slice, { status: "ok" }>;
+
+/**
+ * Run `task(0..count-1)` with at most `concurrency` in flight and return the results in index order. Every job is
+ * settled: a rejected job never cancels or starves its siblings, and its slot holds `undefined`. Callers that need to
+ * tell failure apart catch inside the job.
+ */
+async function settleBounded<T>(count: number, concurrency: number, task: (index: number) => Promise<T>): Promise<Array<T | undefined>> {
+  const results: Array<T | undefined> = new Array(count).fill(undefined);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next++;
+      if (index >= count) return;
+      try {
+        results[index] = await task(index);
+      } catch {
+        results[index] = undefined;
+      }
+    }
+  };
+  const workers = Math.max(1, Math.min(Math.floor(concurrency) || 1, count));
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return results;
+}
 
 const isInt = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value);
 const isUnit = (value: unknown): value is ReadUnit => value === "page" || value === "chunk";
@@ -182,7 +205,7 @@ function validateInputs(source: ReadSource, budget: ReadBudget): void {
 }
 
 /** Clip text to at most `max` estimated tokens on a word boundary. */
-function clipToTokens(text: string, max: number): { text: string; tokens: number } {
+function clipToTokens(text: string, max: number, estimateTokens: (text: string) => number): { text: string; tokens: number } {
   const full = estimateTokens(text);
   if (full <= max) return { text, tokens: full };
   let lo = 0;
@@ -230,6 +253,8 @@ export async function runReadLoop<S>(args: {
   strategy: SliceStrategy;
   budget: ReadBudget;
   ports: ReadPorts;
+  /** Where the loop starts, when the caller already holds text or chose the first reads. Never throws on a bad seed. */
+  seed?: ReadSeed;
 }): Promise<ReadResult<S>> {
   const { task, source, strategy, budget, ports } = args;
   validateInputs(source, budget);
@@ -241,6 +266,16 @@ export async function runReadLoop<S>(args: {
   const minSteps = task.minSteps ?? 1;
   const allowed = new Set<ActionKind>(task.allowedActions);
   const inSource = (u: number) => u >= source.first && u <= source.last;
+  // A broken estimator must not break the loop: fall back to one token per four characters, rounded up.
+  const estimate = (text: string): number => {
+    try {
+      const n = ports.estimateTokens(text);
+      if (Number.isFinite(n) && n >= 0) return n;
+    } catch {
+      // fall through
+    }
+    return Math.ceil(text.length / 4);
+  };
 
   const seen = new Set<number>();
   const readUnits = new Set<number>();
@@ -259,6 +294,40 @@ export async function runReadLoop<S>(args: {
   let costCents = 0;
   let proposalsDropped = 0;
   let wave = 0;
+
+  // The seed is trusted but still validated: a bad value is ignored, never an error.
+  const seedInput: ReadSeed | undefined = args.seed && typeof args.seed === "object" ? args.seed : undefined;
+  if (Array.isArray(seedInput?.seen)) for (const u of seedInput.seen) if (isInt(u) && inSource(u)) seen.add(u);
+  const goodRef = (ref: unknown): ref is SliceRef => {
+    const r = ref as SliceRef | null;
+    return !!r && typeof r === "object" && r.unit === source.unit && isInt(r.start) && isInt(r.end) && r.start <= r.end;
+  };
+  /** Units a slice covers inside the source. */
+  const unitsInSource = (ref: SliceRef): number[] => {
+    const out: number[] = [];
+    for (let u = Math.max(ref.start, source.first); u <= Math.min(ref.end, source.last); u++) out.push(u);
+    return out;
+  };
+  let seedBatch: { slices: OkSlice[]; units: number[]; tokens: number } | null = null;
+  if (Array.isArray(seedInput?.batch)) {
+    const slices: OkSlice[] = [];
+    const unitSet = new Set<number>();
+    for (const slice of seedInput.batch) {
+      if (!slice || typeof slice !== "object" || slice.status !== "ok" || typeof slice.text !== "string" || !goodRef(slice.ref)) continue;
+      const inside = unitsInSource(slice.ref);
+      if (inside.length === 0) continue;
+      slices.push(slice);
+      for (const u of inside) unitSet.add(u);
+    }
+    if (slices.length > 0) {
+      slices.sort((a, b) => a.ref.start - b.ref.start);
+      const units = [...unitSet].sort((a, b) => a - b);
+      seedBatch = { slices, units, tokens: slices.reduce((sum, slice) => sum + estimate(slice.text), 0) };
+    }
+  }
+  const seedRefs: SliceRef[] = !seedBatch && Array.isArray(seedInput?.refs) ? seedInput.refs.filter(goodRef) : [];
+
+  let seedRefsPending = seedRefs.length > 0;
 
   // One controller for the run: the outer signal and the wall-clock budget both abort it.
   const ctl = new AbortController();
@@ -366,7 +435,7 @@ export async function runReadLoop<S>(args: {
       }
     }
     // One failing search never loses the others: each job catches its own error.
-    const hits = await runBounded(searchJobs.length, concurrency, async (i) => {
+    const hits = await settleBounded(searchJobs.length, concurrency, async (i) => {
       try {
         const found = await ports.search!(searchJobs[i]!, ctl.signal);
         return Array.isArray(found) ? found.slice(0, MAX_HITS_SCANNED) : null;
@@ -412,90 +481,106 @@ export async function runReadLoop<S>(args: {
       if (costCents >= budget.maxCostCents) return finish("cost");
       if (now() - startedAt >= budget.maxWallMs) return finish("wall-clock");
 
-      // 2. Plan the wave: model proposals first, then the strategy fills the rest.
-      wave++;
-      const seenBefore = seen.size;
-      const taken = new Set<number>();
-      const pieces: SliceRef[] = (await planModel(taken)).map((run) => ({ unit: source.unit, start: run[0]!, end: run[run.length - 1]! }));
-      const left = room - taken.size;
-      if (left > 0) {
-        let planned: SliceRef[] = [];
-        try {
-          planned = strategy({ source, seen: new Set([...seen, ...taken]), wave, room: left });
-        } catch {
-          planned = [];
-        }
-        let budgetLeft = left;
-        for (const ref of Array.isArray(planned) ? planned : []) {
-          if (!validRef(ref) || budgetLeft <= 0) continue;
-          const units = collect([ref], taken, budgetLeft);
-          for (const u of units) taken.add(u);
-          budgetLeft -= units.length;
-          for (const run of runsOf(units)) pieces.push({ unit: source.unit, start: run[0]!, end: run[run.length - 1]! });
-        }
-      }
-      if (taken.size === 0) return finish("exhausted");
-      for (const u of taken) seen.add(u);
-
-      // 4. Read the wave in up to `concurrency` parallel calls.
-      const groupCount = Math.min(concurrency, pieces.length);
-      const groups: SliceRef[][] = Array.from({ length: groupCount }, () => []);
-      pieces.forEach((piece, i) => groups[i % groupCount]!.push(piece));
-      const outcomes = await runBounded(groups.length, concurrency, async (g) => {
-        try {
-          const out = await ports.read(groups[g]!, ctl.signal);
-          return Array.isArray(out) ? out : null;
-        } catch {
-          return null;
-        }
-      });
-      const oks: OkSlice[] = [];
-      groups.forEach((group, g) => {
-        const requested = new Set<number>();
-        for (const ref of group) for (let u = ref.start; u <= ref.end; u++) requested.add(u);
-        const covered = new Set<number>();
-        for (const slice of outcomes[g] ?? []) {
-          if (!slice || !validRef(slice.ref)) continue;
-          const { start, end } = slice.ref;
-          if (slice.status === "ok") {
-            if (typeof slice.text !== "string" || start < source.first || end > source.last) continue;
-            let inside = true;
-            for (let u = start; u <= end && inside; u++) inside = requested.has(u) && !covered.has(u);
-            if (!inside) continue;
-            for (let u = start; u <= end; u++) covered.add(u);
-            oks.push(slice);
-          } else if (slice.status === "withheld" || slice.status === "missing") {
-            for (let u = Math.max(start, source.first); u <= Math.min(end, source.last); u++) {
-              if (!requested.has(u) || covered.has(u)) continue;
-              covered.add(u);
-              (slice.status === "withheld" ? withheld : missing).add(u);
-            }
+      let batch: OkSlice[];
+      let batchTokens = 0;
+      let batchUnits: number[] = [];
+      if (seedBatch) {
+        // The caller's own text is the first step: nothing is read or clipped, and it is never dropped for its size.
+        ({ slices: batch, tokens: batchTokens, units: batchUnits } = seedBatch);
+        seedBatch = null;
+        for (const u of batchUnits) seen.add(u);
+      } else {
+        // 2. Plan the wave: the seed's refs (first wave only) and the model's proposals first, then the strategy fills the rest.
+        wave++;
+        const seenBefore = seen.size;
+        const taken = new Set<number>();
+        const pieces: SliceRef[] = (await planModel(taken)).map((run) => ({ unit: source.unit, start: run[0]!, end: run[run.length - 1]! }));
+        if (seedRefsPending) {
+          // The caller's chosen first reads: trusted, so neither charged as actions nor held to the model-directed share.
+          seedRefsPending = false;
+          for (const run of runsOf(collect(seedRefs, taken, room))) {
+            for (const u of run) taken.add(u);
+            pieces.push({ unit: source.unit, start: run[0]!, end: run[run.length - 1]! });
           }
         }
-        for (const u of requested) if (!covered.has(u)) missing.add(u);
-      });
-
-      // 5. Fit: clip each slice, then admit in unit order while the batch fits.
-      oks.sort((a, b) => a.ref.start - b.ref.start);
-      const remainingInput = budget.maxInputTokens - inputTokens;
-      const batch: OkSlice[] = [];
-      let batchTokens = 0;
-      for (const slice of oks) {
-        const clipped = clipToTokens(slice.text, budget.maxSliceTokens);
-        const fits = batchTokens + clipped.tokens <= budget.maxStepTokens && batchTokens + clipped.tokens <= remainingInput;
-        if ((fits || (batch.length === 0 && remainingInput > 0))) {
-          batch.push({ ref: slice.ref, status: "ok", text: clipped.text });
-          batchTokens += clipped.tokens;
-        } else {
-          for (let u = slice.ref.start; u <= slice.ref.end; u++) seen.delete(u);
+        const left = room - taken.size;
+        if (left > 0) {
+          let planned: SliceRef[] = [];
+          try {
+            planned = strategy({ source, seen: new Set([...seen, ...taken]), wave, room: left });
+          } catch {
+            planned = [];
+          }
+          let budgetLeft = left;
+          for (const ref of Array.isArray(planned) ? planned : []) {
+            if (!validRef(ref) || budgetLeft <= 0) continue;
+            const units = collect([ref], taken, budgetLeft);
+            for (const u of units) taken.add(u);
+            budgetLeft -= units.length;
+            for (const run of runsOf(units)) pieces.push({ unit: source.unit, start: run[0]!, end: run[run.length - 1]! });
+          }
         }
+        if (taken.size === 0) return finish("exhausted");
+        for (const u of taken) seen.add(u);
+
+        // 4. Read the wave in up to `concurrency` parallel calls.
+        const groupCount = Math.min(concurrency, pieces.length);
+        const groups: SliceRef[][] = Array.from({ length: groupCount }, () => []);
+        pieces.forEach((piece, i) => groups[i % groupCount]!.push(piece));
+        const outcomes = await settleBounded(groups.length, concurrency, async (g) => {
+          try {
+            const out = await ports.read(groups[g]!, ctl.signal);
+            return Array.isArray(out) ? out : null;
+          } catch {
+            return null;
+          }
+        });
+        const oks: OkSlice[] = [];
+        groups.forEach((group, g) => {
+          const requested = new Set<number>();
+          for (const ref of group) for (let u = ref.start; u <= ref.end; u++) requested.add(u);
+          const covered = new Set<number>();
+          for (const slice of outcomes[g] ?? []) {
+            if (!slice || !validRef(slice.ref)) continue;
+            const { start, end } = slice.ref;
+            if (slice.status === "ok") {
+              if (typeof slice.text !== "string" || start < source.first || end > source.last) continue;
+              let inside = true;
+              for (let u = start; u <= end && inside; u++) inside = requested.has(u) && !covered.has(u);
+              if (!inside) continue;
+              for (let u = start; u <= end; u++) covered.add(u);
+              oks.push(slice);
+            } else if (slice.status === "withheld" || slice.status === "missing") {
+              for (let u = Math.max(start, source.first); u <= Math.min(end, source.last); u++) {
+                if (!requested.has(u) || covered.has(u)) continue;
+                covered.add(u);
+                (slice.status === "withheld" ? withheld : missing).add(u);
+              }
+            }
+          }
+          for (const u of requested) if (!covered.has(u)) missing.add(u);
+        });
+
+        // 5. Fit: clip each slice, then admit in unit order while the batch fits.
+        oks.sort((a, b) => a.ref.start - b.ref.start);
+        const remainingInput = budget.maxInputTokens - inputTokens;
+        batch = [];
+        for (const slice of oks) {
+          const clipped = clipToTokens(slice.text, budget.maxSliceTokens, estimate);
+          const fits = batchTokens + clipped.tokens <= budget.maxStepTokens && batchTokens + clipped.tokens <= remainingInput;
+          if ((fits || (batch.length === 0 && remainingInput > 0))) {
+            batch.push({ ref: slice.ref, status: "ok", text: clipped.text });
+            batchTokens += clipped.tokens;
+          } else {
+            for (let u = slice.ref.start; u <= slice.ref.end; u++) seen.delete(u);
+          }
+        }
+        if (batch.length === 0) {
+          if (seen.size <= seenBefore) return finish("exhausted");
+          continue;
+        }
+        for (const slice of batch) for (let u = slice.ref.start; u <= slice.ref.end; u++) batchUnits.push(u);
       }
-      if (batch.length === 0) {
-        if (seen.size <= seenBefore) return finish("exhausted");
-        continue;
-      }
-      const batchUnits: number[] = [];
-      for (const slice of batch) for (let u = slice.ref.start; u <= slice.ref.end; u++) batchUnits.push(u);
 
       // 6. Step.
       if (ports.signal?.aborted) return finish("aborted");

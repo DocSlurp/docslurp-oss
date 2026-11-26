@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { NEXT_ACTIONS_MAX, SEARCH_EXPAND_MAX, SEARCH_TERMS_MAX, SEARCH_TERM_MAX_CHARS } from "./read-loop-contract.js";
-import type { ReadBudget, ReadPorts, ReadSource, ReadTask, Slice, SliceRef, SliceStrategy } from "./read-loop-contract.js";
+import type { ReadBudget, ReadPorts, ReadSeed, ReadSource, ReadTask, Slice, SliceRef, SliceStrategy } from "./read-loop-contract.js";
 import { actionKind, parseNextActions, runReadLoop, sequentialWindows, stratifiedRounds } from "./read-loop.js";
-import { estimateTokens } from "./unicode-text.js";
+
+// A coarse estimator is enough for the engine tests: about one token per four characters, rounded up.
+const estimateTokens = (text: string): number => (text ? Math.ceil(text.length / 4) : 0);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const pageSource = (last: number): ReadSource => ({ unit: "page", first: 1, last });
@@ -59,6 +61,7 @@ function harness(opts: {
     },
   };
   const ports: ReadPorts = {
+    estimateTokens,
     async read(refs) {
       reads.push(refs);
       if (opts.slices) return opts.slices(refs);
@@ -75,8 +78,8 @@ function harness(opts: {
   return { batches, reads, task, ports };
 }
 
-const run = (h: Harness, last: number, budget: Partial<ReadBudget> = {}, strategy: SliceStrategy = sequentialWindows(2)) =>
-  runReadLoop({ task: h.task, source: pageSource(last), strategy, budget: { ...BUDGET, ...budget }, ports: h.ports });
+const run = (h: Harness, last: number, budget: Partial<ReadBudget> = {}, strategy: SliceStrategy = sequentialWindows(2), seed?: ReadSeed) =>
+  runReadLoop({ task: h.task, source: pageSource(last), strategy, budget: { ...BUDGET, ...budget }, ports: h.ports, ...(seed ? { seed } : {}) });
 
 describe("parseNextActions", () => {
   it("handles non-arrays", () => {
@@ -725,5 +728,199 @@ describe("concurrency", () => {
     const result = await run(h, 6, { maxUnitsPerStep: 6, concurrency: 3 }, sequentialWindows(1));
     expect(result.coverage.ranges).toEqual([[1, 2], [4, 5]]);
     expect(result.coverage.missing).toBe(2);
+  });
+});
+
+describe("runReadLoop seed", () => {
+  const okSlice = (start: number, end = start, text = `held ${start}`): Slice => ({ ref: { unit: "page", start, end }, status: "ok", text });
+  const ok = (start: number, end = start, text?: string) => okSlice(start, end, text) as Extract<Slice, { status: "ok" }>;
+  const flat = (batches: number[][]) => batches.flat();
+
+  it("never reads seeded seen units and does not count them as read", async () => {
+    const h = harness({});
+    const result = await run(h, 10, {}, sequentialWindows(2), { seen: [1, 2, 3] });
+    expect(flat(h.batches).sort((a, b) => a - b)).toEqual([4, 5, 6, 7, 8, 9, 10]);
+    expect(h.reads.flat().every((r) => r.start >= 4)).toBe(true);
+    expect(result.coverage.unitsRead).toBe(7);
+    expect(result.coverage.ranges).toEqual([[4, 10]]);
+    expect(result.stoppedBy).toBe("exhausted");
+  });
+
+  it("ignores seeded seen values outside the source or not integers", async () => {
+    const h = harness({});
+    const result = await run(h, 6, {}, sequentialWindows(2), { seen: [0, 99, 1.5, Number.NaN, "x" as never, -3] });
+    expect(result.coverage.unitsRead).toBe(6);
+    expect(result.coverage.ranges).toEqual([[1, 6]]);
+  });
+
+  it("exhausts before any step when the seed already covers the source", async () => {
+    const h = harness({});
+    const result = await run(h, 3, {}, sequentialWindows(2), { seen: [1, 2, 3], batch: [ok(1)] });
+    expect(result.stoppedBy).toBe("exhausted");
+    expect(h.batches).toEqual([]);
+  });
+
+  it("runs the seeded batch as the first step with no read call and no clipping", async () => {
+    const long = "word ".repeat(2000);
+    const h = harness({});
+    const result = await run(h, 10, { maxSliceTokens: 10 }, sequentialWindows(2), { batch: [ok(9, 9, long)] });
+    expect(h.batches[0]).toEqual([9]);
+    expect(h.reads.flat().every((r) => r.start !== 9)).toBe(true);
+    let seenText = "";
+    const probe = harness({});
+    const orig = probe.task.step;
+    probe.task.step = async (a) => { seenText ||= a.slices[0]!.text; return orig(a); };
+    await run(probe, 10, { maxSliceTokens: 10 }, sequentialWindows(2), { batch: [ok(9, 9, long)] });
+    expect(seenText).toBe(long);
+    expect(result.coverage.unitsRead).toBe(10);
+    expect(result.coverage.ranges).toEqual([[1, 10]]);
+  });
+
+  it("makes no read call for a batch step even when the batch is the whole run", async () => {
+    const h = harness({});
+    const result = await run(h, 2, {}, sequentialWindows(2), { batch: [ok(1, 2)] });
+    expect(h.reads).toEqual([]);
+    expect(h.batches).toEqual([[1]]);
+    expect(result.stoppedBy).toBe("exhausted");
+    expect(result.usage.steps).toBe(1);
+  });
+
+  it("counts the batch's estimated tokens against the input budget and never drops it for maxStepTokens", async () => {
+    const text = "word ".repeat(100);
+    const per = estimateTokens(text);
+    const h = harness({});
+    const result = await run(h, 10, { maxStepTokens: 1 }, sequentialWindows(2), { batch: [ok(5, 5, text)] });
+    expect(h.batches[0]).toEqual([5]);
+    expect(result.usage.inputTokens).toBeGreaterThanOrEqual(per);
+
+    const capped = harness({});
+    const stopped = await run(capped, 10, { maxInputTokens: per }, sequentialWindows(2), { batch: [ok(5, 5, text)] });
+    expect(capped.batches).toEqual([[5]]);
+    expect(stopped.stoppedBy).toBe("input-tokens");
+    expect(capped.reads).toEqual([]);
+  });
+
+  it("lets the reply to the batch step direct the next wave with an exact read", async () => {
+    const h = harness({ replies: [[{ do: "read", unit: "page", at: 9 }]] });
+    await run(h, 10, {}, sequentialWindows(2), { batch: [ok(5)] });
+    expect(h.batches[1]).toContain(9);
+    expect(h.reads[0]!.some((r) => r.start <= 9 && r.end >= 9)).toBe(true);
+  });
+
+  it("anchors relative reads on the batch's lowest and highest unit", async () => {
+    const next = harness({ replies: [[{ do: "read", unit: "page", relative: "next", span: 2 }]] });
+    await run(next, 20, {}, sequentialWindows(2), { batch: [ok(10), ok(5, 6)] });
+    expect(next.batches[1]).toEqual(expect.arrayContaining([11, 12]));
+    expect(next.batches[1]).not.toContain(7);
+    const prev = harness({ replies: [[{ do: "read", unit: "page", relative: "prev", span: 2 }]] });
+    await run(prev, 20, {}, sequentialWindows(2), { batch: [ok(10), ok(5, 6)] });
+    expect(prev.batches[1]).toEqual(expect.arrayContaining([3, 4]));
+  });
+
+  it("counts a failed batch step's units as failed and continues with the normal plan", async () => {
+    const h = harness({ failSteps: [1] });
+    const result = await run(h, 10, {}, sequentialWindows(2), { batch: [ok(9, 10)] });
+    expect(h.batches[0]).toEqual([9]);
+    expect(h.batches[1]).toEqual([1, 2, 3, 4]);
+    expect(result.coverage.failed).toBe(2);
+    expect(result.coverage.ranges).toEqual([[1, 8]]);
+    expect(result.usage.failedSteps).toBe(1);
+    expect(h.batches.flat().filter((u) => u === 9 || u === 10)).toEqual([9]);
+  });
+
+  it("stops with errors when the batch step and the next step both fail", async () => {
+    const h = harness({ failSteps: [1, 2] });
+    const result = await run(h, 10, {}, sequentialWindows(2), { batch: [ok(9)] });
+    expect(result.stoppedBy).toBe("errors");
+  });
+
+  it("runs every normal stop check before the batch", async () => {
+    const stopped = harness({ ports: { shouldStop: () => true } });
+    const result = await run(stopped, 10, {}, sequentialWindows(2), { batch: [ok(1)] });
+    expect(result.stoppedBy).toBe("cost");
+    expect(stopped.batches).toEqual([]);
+    const none = harness({});
+    expect((await run(none, 10, { maxSteps: 0 }, sequentialWindows(2), { batch: [ok(1)] })).stoppedBy).toBe("steps");
+    expect(none.batches).toEqual([]);
+  });
+
+  it("with maxSteps 1 runs only the seeded batch step", async () => {
+    const h = harness({ replies: [[{ do: "read", unit: "page", at: 9 }]] });
+    const result = await run(h, 10, { maxSteps: 1 }, sequentialWindows(2), { batch: [ok(3)] });
+    expect(result.stoppedBy).toBe("steps");
+    expect(h.batches).toEqual([[3]]);
+    expect(h.reads).toEqual([]);
+  });
+
+  it("treats an empty batch as none", async () => {
+    const h = harness({});
+    await run(h, 10, {}, sequentialWindows(2), { batch: [], refs: [{ unit: "page", start: 7, end: 8 }] });
+    expect(h.batches[0]).toEqual([1, 2, 7, 8]);
+  });
+
+  it("uses the batch and ignores refs when both are given", async () => {
+    const h = harness({});
+    await run(h, 10, { maxSteps: 1 }, sequentialWindows(2), { batch: [ok(3)], refs: [{ unit: "page", start: 7, end: 8 }] });
+    expect(h.batches).toEqual([[3]]);
+    expect(h.reads).toEqual([]);
+  });
+
+  it("makes the first wave the seeded refs, with the strategy filling the remaining room", async () => {
+    const h = harness({});
+    await run(h, 10, { maxSteps: 1 }, sequentialWindows(2), { refs: [{ unit: "page", start: 7, end: 8 }] });
+    expect(h.batches[0]).toEqual([1, 2, 7, 8]);
+    expect(h.reads.flat()).toHaveLength(2);
+  });
+
+  it("clamps seeded refs to the source, drops seen units and caps them at maxUnitsPerStep", async () => {
+    const h = harness({});
+    await run(h, 10, { maxSteps: 1 }, sequentialWindows(2), { seen: [6], refs: [{ unit: "page", start: -5, end: 3 }, { unit: "page", start: 5, end: 99 }] });
+    expect(h.batches[0]).toEqual([1, 2, 3, 5]);
+    const full = harness({});
+    await run(full, 10, { maxSteps: 1 }, () => { throw new Error("strategy must not be needed"); }, { refs: [{ unit: "page", start: 1, end: 10 }] });
+    expect(full.batches[0]).toEqual([1, 2, 3, 4]);
+  });
+
+  it("does not charge seeded refs as actions and does not limit them by the model-directed share", async () => {
+    const h = harness({});
+    const result = await run(h, 10, { maxSteps: 1, maxActions: 0, maxModelDirectedShare: 0 }, () => [], { refs: [{ unit: "page", start: 5, end: 8 }] });
+    expect(h.batches[0]).toEqual([5, 6, 7, 8]);
+    expect(result.usage.actions).toBe(0);
+    expect(result.coverage.proposalsDropped).toBe(0);
+  });
+
+  it("uses seeded refs for the first wave only", async () => {
+    const h = harness({});
+    await run(h, 12, { maxSteps: 2 }, sequentialWindows(2), { refs: [{ unit: "page", start: 11, end: 12 }] });
+    expect(h.batches[0]).toEqual([1, 2, 11, 12]);
+    expect(h.batches[1]).toEqual([3, 4, 5, 6]);
+  });
+
+  it("ignores a bad seed instead of throwing", async () => {
+    const bad = {
+      seen: "nope",
+      batch: [
+        { ref: { unit: "chunk", start: 1, end: 1 }, status: "ok", text: "wrong unit" },
+        { ref: { unit: "page", start: 1.5, end: 2 }, status: "ok", text: "fractional" },
+        { ref: { unit: "page", start: 3, end: 1 }, status: "ok", text: "inverted" },
+        { ref: { unit: "page", start: 50, end: 60 }, status: "ok", text: "outside" },
+        { ref: { unit: "page", start: 2, end: 2 }, status: "withheld" },
+        { ref: { unit: "page", start: 2, end: 2 }, status: "ok", text: 5 },
+        null,
+      ],
+      refs: [{ unit: "chunk", start: 1, end: 2 }, { unit: "page", start: 2.5, end: 3 }, null],
+    } as unknown as ReadSeed;
+    const h = harness({});
+    const result = await run(h, 6, {}, sequentialWindows(2), bad);
+    expect(result.coverage.unitsRead).toBe(6);
+    expect(h.batches[0]).toEqual([1, 2, 3, 4]);
+    await expect(run(harness({}), 4, {}, sequentialWindows(2), 7 as never)).resolves.toMatchObject({ stoppedBy: "exhausted" });
+  });
+
+  it("clamps a batch slice that overhangs the source to its in-source units", async () => {
+    const h = harness({});
+    const result = await run(h, 5, { maxSteps: 1 }, sequentialWindows(2), { batch: [ok(4, 9)] });
+    expect(result.coverage.ranges).toEqual([[4, 5]]);
+    expect(result.coverage.unitsRead).toBe(2);
   });
 });
