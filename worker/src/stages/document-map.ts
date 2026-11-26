@@ -9,7 +9,7 @@ import {
   ladderAllowsOffPlanReads,
   qualityAllowsPageReading,
   resolveAllowedPipelineTextModel,
-  type MaterializationPolicy, switchDisabled } from "@docslurp/shared";
+  type MaterializationPolicy, type PiiPatternType, switchDisabled } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { calibrateSegments, intToRoman, parseLabel, readPrintedPageNumber, resolvePrintedPage, segmentsFromPageLabels, type LabelSegment } from "../deferred/page-labels.js";
@@ -24,6 +24,10 @@ import { textModelApiKey } from "../lib/text-model-route.js";
 import type { Document } from "../models.js";
 import { runDocumentStage, runDocuments, isCostCapExceeded } from "../pipeline/checkpoints.js";
 import { resolvePolicy } from "./pii-detect.js";
+import { recordDeferredPiiMatch } from "../lib/pii-deferred-outcome.js";
+import { piiPolicyWithholds } from "@docslurp/shared";
+import { mapSearchText, scrubDocumentMap } from "../lib/pii-document-map.js";
+import { loadDocumentPiiWithholding } from "../pipeline/pii-gate.js";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { embedPageImages, withinCostCap, type PageEmbedDeps } from "./page-embed.js";
@@ -349,7 +353,8 @@ export class DocumentMapStage implements Stage {
     // Page-image embedding costs per page, so it runs only on explicit opt-in (`visualPages.coarseFallback`).
     // Under Fast, embedPageImages refuses (stoppedBy "quality-fast"): nothing is rendered, embedded or charged.
     // An Auto ladder limit keeps page-image embeddings off (ladderAllowsOffPlanReads): they read pages outside its plan.
-    if (!bornDigital && coverage < COVERAGE_THRESHOLD && state.run.pipeline.visualPages?.coarseFallback === true && ladderAllowsOffPlanReads(state.run.pipeline).pageEmbeddings) {
+    // Under a withholding or redaction policy, page images of pages no scan has read are never embedded.
+    if (!bornDigital && coverage < COVERAGE_THRESHOLD && !piiPolicyWithholds(resolvePolicy(state.run.pipeline)) && state.run.pipeline.visualPages?.coarseFallback === true && ladderAllowsOffPlanReads(state.run.pipeline).pageEmbeddings) {
       const embedder = this.deps.pageEmbedder !== undefined
         ? this.deps.pageEmbedder
         : resolvePageImageEmbedder({ route: state.run.pipeline.visualPages?.route ?? "auto", privacyMode: state.run.pipeline.privacyMode });
@@ -503,17 +508,42 @@ export class DocumentMapStage implements Stage {
     // The coarse layer is searchable, so it obeys the project PII policy exactly like materialized pages.
     const policy = resolvePolicy(state.run.pipeline);
     const blockedPages: number[] = [];
-    if (policy.enabled && policy.patterns.length > 0) {
-      const scan = createPiiTextScanner(policy.patterns, policy.allowlistPatterns);
+    /** Pages the rough text matched, with the kinds of PII found (recorded on the document like an ingest scan's). */
+    const matchedPages = new Map<number, PiiPatternType[]>();
+    let searchText = mapSearchText(built.nodes, built.terms);
+    const policyWithholds = piiPolicyWithholds(policy);
+    const scannedPages = new Set<number>();
+    const scanText = policy.enabled && policy.patterns.length > 0 ? createPiiTextScanner(policy.patterns, policy.allowlistPatterns) : null;
+    if (scanText) {
+      const scan = scanText;
+      // A page counts as scanned only when its text layer has the born-digital minimum of text: a near-empty layer
+      // (a scanned page with a stray glyph) says nothing about what its image shows, so that page waits for a read.
+      for (const [pageNumber, text] of coarseRows) if (text.replace(/\s/g, "").length >= BORN_DIGITAL_MIN_CHARS) scannedPages.add(pageNumber);
       coarseRows = coarseRows.flatMap(([pageNumber, text]): Array<[number, string]> => {
         const scanned = scan(text, pageNumber);
         if (scanned.matches.length === 0) return [[pageNumber, text]];
-        if (policy.action === "block_indexing") { blockedPages.push(pageNumber); return []; }
+        matchedPages.set(pageNumber, [...new Set(scanned.matches.map((match) => match.patternType))]);
+        // Page-scoped withholding drops the page; `block_document` drops it too (and blocks the document below).
+        if (policy.action === "block_indexing" || policy.action === "block_document") { blockedPages.push(pageNumber); return []; }
         return [[pageNumber, policy.action === "redact_artifacts" ? scanned.redacted : text]];
       });
+      // The map's titles and terms are shown in lists and search and drive the deferred locator: anything that matches,
+      // or that came from a page withheld now or by an earlier outcome, is dropped (pii-document-map.ts).
+      if (policy.action !== "flag_for_review") {
+        const recorded = await loadDocumentPiiWithholding(sql as never, document.id);
+        const withheld = recorded.scope === "document" || (policy.action === "block_document" && blockedPages.length > 0)
+          ? "all" as const
+          : new Set([...(recorded.scope === "pages" ? recorded.pages : []), ...blockedPages]);
+        const scrubbed = scrubDocumentMap(built, withheld, (text) => scan(text).matches.length > 0);
+        if (scrubbed.changed) {
+          built.nodes = scrubbed.nodes;
+          built.terms = scrubbed.terms;
+          built.title = scrubbed.title;
+          searchText = scrubbed.searchText;
+        }
+      }
     }
 
-    const searchText = [...built.nodes.map((n) => n.title), ...built.terms.map((t) => t.term)].join(" \n");
     const decisions = built.siphon?.decisions ?? [];
     await sql.begin(async (tx) => {
       const q = tx as unknown as Sql;
@@ -570,6 +600,19 @@ export class DocumentMapStage implements Stage {
           update document_page_states set read_text = null
           where document_id = ${document.id} and page_number = any(${blockedPages}::int[]) and read_text is not null
         `;
+      }
+      // Deferred modes run no pii-detect: the match is the document's outcome (pages, types, findings, the source and
+      // non-page artifacts withheld), merged with any earlier one, so every serve-side reader sees it. A full-index run's
+      // pii-detect replaces it with the whole-text scan.
+      // Under a withholding or redaction policy the outcome also records which pages this scan read (the rough text of
+      // the coarse pages): every other page's pixels and text, and the source file, are withheld until a later read
+      // scans them (materialize-pages.ts). A new run starts a new scan.
+      if (policyWithholds || matchedPages.size > 0) {
+        await recordDeferredPiiMatch(q as never, document.id, {
+          pages: matchedPages, action: policy.action, runId: state.run.id, pageCount, sourceUri: this.storage.uri(document.sourceKey),
+          ...(policyWithholds ? { scan: { pages: scannedPages, reset: true } } : {}),
+          ...(scanText ? { matches: (text: string) => scanText(text).matches.length > 0 } : {}),
+        });
       }
 
       if (built.title) {

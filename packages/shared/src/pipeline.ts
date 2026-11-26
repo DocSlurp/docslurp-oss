@@ -584,7 +584,7 @@ const pipelineFeaturesObjectSchema = z
             "private-key",
           ]),
         action: z
-          .enum(["flag_for_review", "redact_artifacts", "block_indexing"])
+          .enum(["flag_for_review", "redact_artifacts", "block_indexing", "block_document"])
           .default("flag_for_review"),
         allowlistPatterns: z.array(z.string()).default([]),
       })
@@ -1645,11 +1645,15 @@ export const stageDataFlow: Record<PipelineRunStage, StageDataFlow> = {
   },
   "pii-detect": {
     consumes: [...extractedText, "html"],
-    // Redaction rewrites the extracted text in place.
+    // Redaction and page/section withholding rewrite the extracted text in place, so every stage that reads it
+    // (summary, propositions, structured fields, page text) re-runs instead of reusing what was built from the
+    // unwithheld text. Redaction also rewrites the HTML rendering.
     produces: (features) =>
       features.piiPolicy.action === "redact_artifacts"
         ? ["pii-decision", ...extractedText, "html"]
-        : ["pii-decision"],
+        : features.piiPolicy.action === "block_indexing"
+          ? ["pii-decision", ...extractedText]
+          : ["pii-decision"],
     alwaysRerun: "PII policy decisions gate indexing of each document and are not copied",
   },
   "document-summary": { consumes: ["markdown"], requires: [["markdown"]], produces: ["summary"] },
