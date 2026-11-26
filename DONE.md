@@ -1,3 +1,11 @@
+## Parser commands refuse a non-VM session per command (2026-11-25)
+
+DocSlurp/app issue 599 listed the Poppler raster and text consumers as still running on the worker host. They do not: since #419 every non-development worker starts only with the remote VM provider, and every consumer runs Poppler and Doppler through `CommandRunner`. The check lived only at startup, though, so a session opened through a caller's own `openSession` was trusted as given.
+
+- `CommandRunner.launch` applies the startup allowlist (`assertSandboxPolicy`) to every session outside development and starts commands only through the remote `run()`, never a session's `spawn`. Anything else is refused before spawning and logged as `[parser-sandbox] status=refused ... reason=no-vm-boundary`. Development and self-hosted development keep local bubblewrap, landlock and `none`.
+- `worker/src/__tests__/raster-consumers-vm-only.test.ts`: in production, each consumer's plans (pdfinfo, pdftotext, pdftohtml, pdfimages, pdfseparate, pdftoppm, raster-cache sizes and ranges), `runLocalArtifactCommand` and `PdfRasterCache.renderSelectedPages` are refused on host sessions (bubblewrap, landlock, none, a local session named after the VM provider, an unaudited remote one, one without network isolation) for a crafted PDF and a 3 GiB one, and reach the VM's `run()` otherwise.
+- Cost: about 3 µs of CPU per command (measured, 1,000,000 iterations), against a VM round trip per command.
+
 ## Runs report searchable pages, a final page total and worker pickup (2026-11-25)
 
 `pagesProcessed` counts page checkpoints of the extraction stages, so it reaches `pagesTotal` before routing, page reading and indexing run; clients that divided the two showed 100% long before a run could be searched.
