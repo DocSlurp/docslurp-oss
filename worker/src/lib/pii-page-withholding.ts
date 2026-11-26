@@ -293,7 +293,7 @@ function blockStrings(block: CanonicalBlockLike): string[] {
 
 /** Distinct matched values a document's locator searches; matches of further values are unmapped (fail closed). */
 const MAX_LOCATED_VALUES = 2_000;
-/** Characters the locator may scan per document (about four haystacks per value): caps values for very large texts. */
+/** Characters the locator may scan per document, counted as it scans (every haystack pass). */
 const LOCATOR_CHAR_BUDGET = 1_000_000_000;
 
 /** Occurrences of `needle` in `haystack` (overlapping), by native indexOf. */
@@ -364,17 +364,29 @@ export function mapTextMatchesToCanonical(
   // other): one native indexOf scan per distinct value and haystack, cached per value. The normalized texts are built
   // once per document. At most MAX_LOCATED_VALUES distinct values (and a character budget) are searched; matches of the
   // remaining values are unmapped, so the caller fails closed instead of spending unbounded CPU.
-  const findCache = new Map<string, number[]>();
-  const findIn = (entry: PageIndex, value: string, loose: string): number[] => {
+  // The search spends a real character budget: every haystack scan subtracts the characters it covers (heading paths and
+  // metadata included, since they are part of the block strings). Once the budget is spent, every remaining match is
+  // unmapped with no page (null), so the caller withholds the whole document.
+  let budget = LOCATOR_CHAR_BUDGET;
+  const spend = (chars: number): boolean => {
+    if (budget < chars) { budget = -1; return false; }
+    budget -= chars;
+    return true;
+  };
+  const findCache = new Map<string, number[] | null>();
+  /** Blocks of one page index holding the value (exact or loose); null when the budget ran out. */
+  const findIn = (entry: PageIndex, value: string, loose: string): number[] | null => {
     const key = `${entry.key}\u0000${value}`;
-    const cached = findCache.get(key);
-    if (cached) return cached;
+    if (findCache.has(key)) return findCache.get(key)!;
     const found = new Set<number>();
-    for (const [haystack, needle, starts] of [[entry.exact, value, entry.exactStarts], [entry.loose, loose, entry.looseStarts]] as const) {
-      if (!needle) continue;
-      for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) found.add(entry.blocks[blockAt(starts, at)]!);
+    let out: number[] | null = null;
+    if (spend(entry.exact.length + (loose ? entry.loose.length : 0))) {
+      for (const [haystack, needle, starts] of [[entry.exact, value, entry.exactStarts], [entry.loose, loose, entry.looseStarts]] as const) {
+        if (!needle) continue;
+        for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) found.add(entry.blocks[blockAt(starts, at)]!);
+      }
+      out = [...found];
     }
-    const out = [...found];
     findCache.set(key, out);
     return out;
   };
@@ -382,44 +394,79 @@ export function mapTextMatchesToCanonical(
   const unmapped: Array<number[] | null> = [];
   const textLoose = alnum(text);
   const blockLoose = blocks.map((block) => (typeof block.text === "string" ? alnum(block.text) : "")).join("\u0000");
-  const counts = new Map<string, { text: number; blocks: number }>();
+  const counts = new Map<string, { text: number; blocks: number } | null>();
   /** Occurrences of a normalized value in the whole text and in the blocks' own text (never heading paths or metadata). */
   const countsOf = (needle: string) => {
-    let entry = counts.get(needle);
-    if (!entry) {
-      entry = { text: indexOfCount(textLoose, needle), blocks: indexOfCount(blockLoose, needle) };
-      counts.set(needle, entry);
-    }
+    if (counts.has(needle)) return counts.get(needle)!;
+    const entry = spend(textLoose.length + blockLoose.length)
+      ? { text: indexOfCount(textLoose, needle), blocks: indexOfCount(blockLoose, needle) }
+      : null;
+    counts.set(needle, entry);
     return entry;
   };
-  // Distinct values searched, in document order, up to the cap: about four haystacks of the text's size per value.
-  const valueBudget = Math.max(1, Math.min(MAX_LOCATED_VALUES, Math.floor(LOCATOR_CHAR_BUDGET / Math.max(1, 4 * text.length))));
-  const searched = new Set<string>();
-  for (const match of matches) {
-    const value = text.slice(match.charOffset, match.charOffset + match.length);
-    const loose = alnum(value);
-    const pages = offsets ? pagesOfMatch(offsets, match.charOffset, match.length) : null;
-    if (!searched.has(value) && searched.size >= valueBudget) {
-      unmapped.push(pages ?? (pageCount <= 1 ? [1] : null));
-      continue;
-    }
-    searched.add(value);
-    const candidates = pages ? [...pages.map((page) => byPage.get(page)), byPage.get(null)] : [...byPage.values()];
-    let found = candidates.flatMap((entry) => (entry ? findIn(entry, value, loose) : []));
+  /** One resolution per distinct value and page set: the blocks holding it, and whether its own occurrence was found. */
+  type Resolution = { found: number[]; located: boolean } | "over-budget";
+  const resolved = new Map<string, Resolution>();
+  const resolve = (value: string, loose: string, pages: number[] | null): Resolution => {
+    const key = `${pages ? pages.join(",") : "*"}\u0000${value}`;
+    const cached = resolved.get(key);
+    if (cached) return cached;
+    const collect = (entries: Array<PageIndex | undefined>): number[] | null => {
+      const out = new Set<number>();
+      for (const entry of entries) {
+        if (!entry) continue;
+        const hits = findIn(entry, value, loose);
+        if (hits === null) return null;
+        for (const hit of hits) out.add(hit);
+      }
+      return [...out];
+    };
+    let found = collect(pages ? [...pages.map((page) => byPage.get(page)), byPage.get(null)] : [...byPage.values()]);
     // Paged text whose page disagrees with the blocks' page: look everywhere rather than miss the value.
-    if (found.length === 0 && pages) found = [...byPage.values()].flatMap((entry) => findIn(entry, value, loose));
+    if (found !== null && found.length === 0 && pages) found = collect([...byPage.values()]);
     // A value can also sit inside an unrelated string (an order number), or repeat in heading paths and metadata of
     // every block under a heading, so a hit there does not show that the match's own occurrence was found. Every
     // occurrence in the text (ignoring spacing and punctuation) needs one in the blocks' own text; fewer, and the match
-    // is unmapped (the caller fails closed). Hits elsewhere are still replaced.
-    const located = loose.length > 0 && countsOf(loose).text <= countsOf(loose).blocks;
-    if (found.length === 0 || !located) {
-      unmapped.push(pages ?? (pageCount <= 1 ? [1] : null));
-      if (found.length === 0) continue;
+    // is unmapped (the caller fails closed). Hits elsewhere are still replaced. A value with no letters or digits is
+    // never located.
+    const count = loose ? countsOf(loose) : { text: 1, blocks: 0 };
+    const result: Resolution = found === null || count === null ? "over-budget" : { found, located: count.text <= count.blocks };
+    resolved.set(key, result);
+    return result;
+  };
+  const added = new Set<string>();
+  const walked = new Set<string>();
+  const searched = new Set<string>();
+  for (const match of matches) {
+    const value = text.slice(match.charOffset, match.charOffset + match.length);
+    const pages = offsets ? pagesOfMatch(offsets, match.charOffset, match.length) : null;
+    // Over the cap of distinct values, or out of budget: unmapped with no page, so the whole document is withheld.
+    if (budget < 0 || (!searched.has(value) && searched.size >= MAX_LOCATED_VALUES)) {
+      unmapped.push(null);
+      continue;
     }
-    for (const index of new Set(found)) {
-      blockIndexes.set(index, (blockIndexes.get(index) ?? new Set<PiiPatternType>()).add(match.patternType));
-      values.set(index, [...(values.get(index) ?? []), { value, type: match.patternType }]);
+    searched.add(value);
+    const result = resolve(value, alnum(value), pages);
+    if (result === "over-budget") {
+      unmapped.push(null);
+      continue;
+    }
+    if (result.found.length === 0 || !result.located) unmapped.push(pages ?? (pageCount <= 1 ? [1] : null));
+    // The found blocks are walked once per (resolution, type), however many matches share it; each (block, value, type)
+    // is recorded once. Per-match work is the page lookup and the unmapped decision.
+    const walk = `${pages ? pages.join(",") : "*"}\u0000${match.patternType}\u0000${value}`;
+    if (walked.has(walk)) continue;
+    walked.add(walk);
+    for (const index of result.found) {
+      const pair = `${index}\u0000${match.patternType}\u0000${value}`;
+      if (added.has(pair)) continue;
+      added.add(pair);
+      const types = blockIndexes.get(index) ?? new Set<PiiPatternType>();
+      types.add(match.patternType);
+      blockIndexes.set(index, types);
+      const list = values.get(index) ?? [];
+      list.push({ value, type: match.patternType });
+      values.set(index, list);
     }
   }
   return { blockIndexes, values, unmapped };

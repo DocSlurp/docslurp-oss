@@ -647,6 +647,24 @@ describe("the canonical locator (M9, structural keys)", () => {
     expect(mapTextMatchesToCanonical(blocks, text, matches, 1).unmapped).toHaveLength(500);
   });
 
+  it("paged: over-cap matches are unmapped with no page, so block_indexing withholds the whole document", async () => {
+    const { mapTextMatchesToCanonical } = await import("../lib/pii-page-withholding.js");
+    const values = Array.from({ length: 2_001 }, (_, i) => `X${String(1_000_000 + i)}`);
+    // Two pages; the last value's Markdown occurrence is on page 2, its block on page 1 (never searched: over the cap).
+    const blocks = [...values.slice(0, 2_000).map((value) => ({ ...block(`Passport ${value}`), pageNumber: 1 })), { ...block(`Passport ${values[2_000]}`), pageNumber: 1 }, { ...block("Page two"), pageNumber: 2 }];
+    const text = `${values.slice(0, 2_000).map((value) => `Passport ${value}`).join("\n\n")}\fPage two Passport ${values[2_000]}`;
+    const matches = values.map((value) => ({ patternType: "passport" as const, charOffset: text.lastIndexOf(value), length: value.length }) as never);
+    const mapped = mapTextMatchesToCanonical(blocks, text, matches, 2);
+    expect(mapped.unmapped).toEqual([null]);
+    const plan = planPiiWithholding("block_indexing", {
+      pageCount: 2,
+      canonical: { matches: [], changedPages: [], blocks, mapped },
+      markdown: { text, matches },
+      fallback: null, html: null, contract: null,
+    } as never, true);
+    expect(plan.scope).toBe("document");
+  });
+
   it("exact and re-spaced hits are both found", async () => {
     const { mapTextMatchesToCanonical } = await import("../lib/pii-page-withholding.js");
     const text = "Passport number\n\nX1234567 and again X 1234 567";

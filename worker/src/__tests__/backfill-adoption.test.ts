@@ -172,6 +172,16 @@ describe("backfill completion when the source changed mid-run", () => {
     expect(src!.pii).toEqual({ scope: "pages", withheldPages: [3], withheldPageCount: 1, pageCount: 5, scanPending: true, scannedPages: [1, 2, 3] });
   });
 
+  it("scan progress is not carried when the temp ran under a different PII policy than the source", async () => {
+    await seedPair("ppol");
+    await db.exec(`update project_runs set pipeline = '{"indexingMode":"visual","stageSubset":["page-embed"],"piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing"}}' where id = 'bf-ppol';
+      update documents set metadata = '{"pii": {"scope": "none", "pageCount": 5, "scanPending": true, "scannedPages": [2]}}' where id = 'src-ppol';
+      update documents set metadata = '{"pii": {"scope": "none", "pageCount": 5, "scanPending": true, "scannedPages": [1, 2, 3, 4, 5, 9]}}' where id = 'tmp-ppol'`);
+    await completeRun("bf-ppol");
+    const [src] = await rows<{ pii: Record<string, unknown> }>(`select metadata->'pii' as pii from documents where id = 'src-ppol'`);
+    expect(src!.pii).toEqual({ scope: "none", pageCount: 5, scanPending: true, scannedPages: [2] });
+  });
+
   it("a source with withheld pages and no scan tracking keeps its outcome exactly", async () => {
     await seedPair("pkeep");
     const outcome = { scope: "pages", withheldPages: [2], withheldPageCount: 1, redacted: true, redactedPages: [1] };
@@ -240,5 +250,13 @@ describe("backfill adoption guards", () => {
     expect(pages.map((p) => p.page_number)).toEqual([1]);
     const states = await rows<{ page_number: number; state: string }>(`select page_number, state from document_page_states where document_id = 'src-pii' order by page_number`);
     expect(states.map((p) => p.state)).toEqual(["indexed", "blocked-pii", "unseen"]);
+  });
+});
+
+describe("carriedScan", () => {
+  it("ignores scanned pages outside 1..pageCount when deciding completion", async () => {
+    const { carriedScan } = await import("../deferred/backfill-adoption.js");
+    expect(carriedScan({ scope: "none", pageCount: 5, scanPending: true, scannedPages: [1, 2] }, { scannedPages: [3, 4, 9, 10] }))
+      .toEqual({ scope: "none", pageCount: 5, scanPending: true, scannedPages: [1, 2, 3, 4] });
   });
 });
