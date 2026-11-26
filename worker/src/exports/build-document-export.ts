@@ -481,9 +481,11 @@ function cell(value: string): string {
 const documentColumns = (sql: Sql) => sql`
   d.id, d.project_id, d.run_id, d.filename, d.mime_type, d.source_key, d.status, d.extraction_mode,
   d.page_count, d.version_number, d.metadata, d.created_at::text, d.updated_at::text, d.indexing_mode,
-  -- A deleted run (run_id set null) falls back to the project's current policy.
-  coalesce((select r.pipeline->'piiPolicy' from project_runs r where r.id = d.run_id),
-    (select p.pipeline->'piiPolicy' from projects p where p.id = d.project_id)) as pii_policy,
+  -- Only a missing run row (deleted: run_id set null) falls back to the project's current policy; a run without a
+  -- policy key has none.
+  case when exists (select 1 from project_runs r where r.id = d.run_id)
+    then (select r.pipeline->'piiPolicy' from project_runs r where r.id = d.run_id)
+    else (select p.pipeline->'piiPolicy' from projects p where p.id = d.project_id) end as pii_policy,
   exists (select 1 from document_run_stage_states s where s.run_id = d.run_id and s.document_id = d.id
     and s.stage_name = 'pii-detect' and s.status = 'completed') as pii_detect_completed,
   coalesce((select array_agg(dt.tag order by dt.tag) from document_tags dt where dt.document_id = d.id), '{}') as tags,

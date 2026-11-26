@@ -638,6 +638,15 @@ describe("the canonical locator (M9, structural keys)", () => {
     }
   });
 
+  it("searches at most 2,000 distinct values per document; matches of the rest are unmapped (fail closed)", async () => {
+    const { mapTextMatchesToCanonical } = await import("../lib/pii-page-withholding.js");
+    const values = Array.from({ length: 2_500 }, (_, i) => `X${String(1_000_000 + i)}`);
+    const blocks = values.map((value) => block(`Passport ${value}`));
+    const text = blocks.map((entry) => entry.text).join("\n\n");
+    const matches = values.map((value) => at(text, value));
+    expect(mapTextMatchesToCanonical(blocks, text, matches, 1).unmapped).toHaveLength(500);
+  });
+
   it("exact and re-spaced hits are both found", async () => {
     const { mapTextMatchesToCanonical } = await import("../lib/pii-page-withholding.js");
     const text = "Passport number\n\nX1234567 and again X 1234 567";

@@ -1,4 +1,6 @@
 import { deferredProfilesEnabled, piiWithholding } from "@docslurp/shared";
+
+import { scrubTitlesAndMapForPii } from "../lib/pii-document-map.js";
 import type { Sql } from "postgres";
 
 /**
@@ -56,8 +58,16 @@ export async function adoptBackfillDocuments(
     await retire(client, other.temp_id, other.adoptable ? "completed" : null);
   }
   for (const { temp_id: temp, source_id: source, mode, source_run_id: sourceRun, carry } of pairs as Array<{ temp_id: string; source_id: string; mode: string; source_run_id: string | null; carry: ReturnType<typeof piiCarry> }>) {
-    // Lock order: the source document's row before its page rows, as a query-time materialization of it takes them.
-    await client`select 1 from documents where id = ${source} for no key update`;
+    // Lock order: the source document's row, then the temp's, before their page rows (as a query-time materialization
+    // takes them). The temp's outcome is read again under its lock, so a match recorded on it after the first read is
+    // never lost: a temp that now withheld or redacted something is retired instead of adopted.
+    const [sourceRow] = await client<{ pii: unknown }[]>`select metadata->'pii' as pii from documents where id = ${source} for no key update`;
+    const [tempRow] = await client<{ pii: unknown }[]>`select metadata->'pii' as pii from documents where id = ${temp} for no key update`;
+    if (piiCarry(tempRow?.pii) === "refuse") {
+      await retire(client, temp, "completed");
+      continue;
+    }
+    const carriedPii = carriedScan(sourceRow?.pii, tempRow?.pii);
     await client`delete from document_maps where document_id = ${source} and exists (select 1 from document_maps where document_id = ${temp})`;
     await client`update document_maps set document_id = ${source} where document_id = ${temp}`;
 
@@ -107,16 +117,16 @@ export async function adoptBackfillDocuments(
       update documents
       set indexing_mode = ${mode},
           metadata = metadata || coalesce((select jsonb_strip_nulls(jsonb_build_object('mapTitle', t.metadata -> 'mapTitle')) from documents t where t.id = ${temp}), '{}'::jsonb)
-            -- The temp's scan progress: its whole outcome onto a source without one, else only its scan fields.
-            || ${carry === "carry" ? client`(select case
-                when coalesce(jsonb_typeof(src.metadata -> 'pii'), '') <> 'object' then jsonb_build_object('pii', t.metadata -> 'pii')
-                else jsonb_build_object('pii', (src.metadata -> 'pii') - 'scanPending' - 'scannedPages' - 'scanComplete'
-                  || jsonb_strip_nulls(jsonb_build_object('scanPending', t.metadata -> 'pii' -> 'scanPending',
-                    'scannedPages', t.metadata -> 'pii' -> 'scannedPages', 'scanComplete', t.metadata -> 'pii' -> 'scanComplete')))
-              end from documents t, documents src where t.id = ${temp} and src.id = ${source})` : client`'{}'::jsonb`},
+            || ${carriedPii ? client`jsonb_build_object('pii', ${client.json(carriedPii as never)}::jsonb)` : client`'{}'::jsonb`},
           updated_at = now()
       where id = ${source}
     `;
+    // Titles and the map moved onto the source were built from the temp's pass: drop what came from a page the source
+    // itself withholds (the source's own outcome governs it).
+    const withheld = piiWithholding({ metadata: { pii: sourceRow?.pii ?? null } });
+    if (withheld.scope === "document" || withheld.scope === "pages") {
+      await scrubTitlesAndMapForPii(client as never, source, withheld.scope === "document" ? "all" : new Set(withheld.pages), () => false);
+    }
     await retire(client, temp, "completed");
   }
   return rows.map((row) => row.temp_id);
@@ -141,4 +151,26 @@ export function piiCarry(tempPii: unknown): "none" | "carry" | "refuse" {
   if (tempPii === null || tempPii === undefined) return "none";
   const temp = piiWithholding({ metadata: { pii: tempPii } });
   return temp.scope === "none" && (tempPii as { redacted?: unknown }).redacted !== true && (temp.redactedPages?.size ?? 0) === 0 ? "carry" : "refuse";
+}
+
+/**
+ * The source's outcome with the temp's scan progress, or null to leave the source's outcome untouched. Scan fields are
+ * carried only when the source already tracks a deferred scan (`scanPending` or `scanComplete`): scanned pages are
+ * unioned, a source `scanComplete` stays, and the source's withheld pages, redaction and block are never touched. A source
+ * with no outcome (ingested before the policy, whose own runs record no scan) is adopted with no outcome, as before.
+ */
+export function carriedScan(sourcePii: unknown, tempPii: unknown): Record<string, unknown> | null {
+  if (!sourcePii || typeof sourcePii !== "object" || Array.isArray(sourcePii)) return null;
+  const source = sourcePii as Record<string, unknown>;
+  if (source.scanComplete === true) return null;
+  if (source.scanPending !== true) return null;
+  const temp = tempPii && typeof tempPii === "object" ? tempPii as Record<string, unknown> : {};
+  const pages = (value: unknown) => (Array.isArray(value) ? value.filter((page): page is number => Number.isSafeInteger(page) && page >= 1) : []);
+  const scanned = [...new Set([...pages(source.scannedPages), ...pages(temp.scannedPages)])].sort((a, b) => a - b);
+  const pageCount = Number(source.pageCount);
+  if (temp.scanComplete === true || (Number.isSafeInteger(pageCount) && pageCount > 0 && scanned.length >= pageCount)) {
+    const { scanPending: _pending, scannedPages: _scanned, ...rest } = source;
+    return { ...rest, scanComplete: true };
+  }
+  return { ...source, scanPending: true, scannedPages: scanned };
 }
