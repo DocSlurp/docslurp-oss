@@ -39,6 +39,7 @@ import { closeSandboxQuietly, latchedTeardownError, noteSandboxInfrastructureErr
 import { quarantineScanSnapshotEnabled, SCANNER_CONFIG_FILE } from "../sandbox/providers/modal/scanner.js";
 import { admitCommandSource } from "../sandbox/source-quarantine.js";
 import { assertTeardownBreakerClosed } from "../sandbox/teardown-breaker.js";
+import { assertSandboxPolicy } from "../sandbox/policy.js";
 import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
 import { SandboxPolicyError, SandboxRunError, type SandboxCommand, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
 import {
@@ -1936,7 +1937,11 @@ export class CommandRunner {
     });
     const { session, release } = await this.acquireSession();
     try {
-      if (session.spawn) {
+      // Every parser command (Poppler, Doppler, pandoc, image tasks, guest scripts) starts here, so the VM-only floor is
+      // enforced per command, not only when the process's provider was chosen at startup.
+      const vmOnly = vmOnlyParsing();
+      if (vmOnly) assertVmSession(session, plan);
+      if (session.spawn && !vmOnly) {
         assertProcessTeardown(session);
         assertUnixSocketFilter(session, command);
         const child = session.spawn(command);
@@ -2449,6 +2454,28 @@ async function stopRefusedChild(plan: CommandPlan, child: ChildProcess, containe
   const error = new CommandTeardownError(`${label} (refused, uncontained) teardown could not be verified: ${detail}`, { cause: refusal });
   recordUnverifiedTeardown(error, `label=${label} pid=${child.pid} containment=none`, { attribution: commandAttribution() });
   throw error;
+}
+
+/**
+ * Outside development a command runs only in a session of the audited remote VM provider (the same allowlist startup applies,
+ * sandbox/policy.ts), and only through its `run`: a local session (bubblewrap, landlock, none, or any session a caller opened
+ * with its own `openSession`) would start the parser on this host, beside the worker's secrets. Refused before anything is
+ * spawned or staged, and logged; never a fallback to the host.
+ */
+function assertVmSession(session: SandboxSession, plan: CommandPlan): void {
+  let refusal: unknown = null;
+  try {
+    assertSandboxPolicy({ providerId: session.providerId, isolation: session.isolation, env: process.env });
+    if (!session.run) throw new SandboxPolicyError(`parser sandbox provider '${session.providerId}' offers no remote run; refusing to start a parser on the worker host`);
+  } catch (error) {
+    refusal = error;
+  }
+  if (refusal === null) return;
+  console.error(
+    `[parser-sandbox] status=refused provider=${session.providerId} location=${session.isolation.location} reason=no-vm-boundary ` +
+      `binary=${JSON.stringify(path.basename(plan.binary))} detail=${JSON.stringify(refusal instanceof Error ? refusal.message : String(refusal))}`,
+  );
+  throw refusal instanceof SandboxPolicyError ? refusal : new SandboxPolicyError(refusal instanceof Error ? refusal.message : String(refusal));
 }
 
 function assertProcessTeardown(session: SandboxSession): void {
