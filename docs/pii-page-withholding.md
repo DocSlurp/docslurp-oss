@@ -46,6 +46,7 @@ It groups the blocked documents by verdict, using the detections recorded for ea
   - Markdown and source text are `\f`-separated, so a match's page is the page its offsets fall in. A match that crosses a page break withholds both pages.
   - HTML and extraction-contract hits with no page are placed through the same value's fingerprint on a paged source.
 - **Unpaged documents** (one page: plain text, HTML, a transcript, a one-page PDF): the unit is the Markdown section that holds the match. That is the heading-delimited section, or the paragraph when the text has no headings, plus the canonical block that holds the match.
+- **A label and its value in two blocks**: the Markdown is scanned as one string and the canonical document block by block, so a context-validated detector (passport, licence, bank account, phone) can match the Markdown ("Passport number", a blank line, the value) while no single block matches. Each Markdown match's value is located in the canonical blocks (exactly, then ignoring spacing and punctuation) and every block holding it is replaced, or redacted under `redact_artifacts`; on a paged document its page is withheld. A value no block holds fails closed to the whole document (`unattributed:text-match-not-in-canonical`).
   - For a transcript, the section is the time range it covers.
   - Everything written before the scan stays withheld.
 
@@ -75,17 +76,14 @@ Every reader asks `piiWithholding()` and `isPageWithheld()` from `@docslurp/shar
 - The withheld pages' text becomes `[Page N withheld by the project's privacy policy: contains <categories>]` in the Markdown, canonical document, extraction contract and summary evidence (`[Page N withheld by the project's privacy policy]` when no category is known).
 - Chunks, vectors, propositions, page index and summaries are built from that text, so they never hold it.
 
-**At serve time** (the API, through the same shared helpers; the hosted API is not part of this repository):
+**At serve time** an API serving these documents applies the same shared helpers. The contract it must keep:
 
-- **Search and chat** (`hybridSearch` and the whole-corpus chat context) drop hits on withheld pages, whichever index served them. MCP, the SDK and the compat search APIs all use these paths.
-- **The file proxy** (`userCanAccessArtifactUri`) refuses:
-  - URIs on the withheld list;
-  - any per-page artifact of a withheld page, by slot (`<doc>:page-N`, raster renders, `<doc>:doppler-figure:pN.M`) or by figure storage key. This covers renders and figures written after the scan.
-- **Page renders**:
-  - The server refuses a withheld page before queueing.
-  - The worker refuses it before rasterizing and again under the write lock.
-  - Page-image readiness reports a withheld page as `unavailable`.
+- **Search and chat** drop hits on withheld pages, whichever index served them, including streamed provisional hits.
+- **The file proxy** refuses URIs on the withheld list and any per-page artifact of a withheld page, by slot (`<doc>:page-N`, raster renders, `<doc>:doppler-figure:pN.M`) or by figure storage key. This covers renders and figures written after the scan.
+- **Pixels follow `isPageImageWithheld()`**: a page's image, render and figures are refused when the page is withheld, when the outcome redacted a value on it (`redactedPages`), or on every page when an outcome redacted without recording its pages. Text readers use `isPageWithheld()`: redacted text is servable, its image is not.
+- **Page renders** are refused for such a page before queueing; the worker refuses again before rasterizing and under the write lock. Page-image readiness reports the page as `unavailable`.
 - **Exports** leave out withheld pages' images and replace page text with the placeholder.
+- **Before the scan**: while a document's run has a PII policy and its scan has not completed, its source file and run artifacts are not served.
 - **Deferred materialization** refuses pages the ingest scan withheld.
 - **First-pass figures** are stored after the scan, so pii-detect never saw them:
   - Under page scope, figure slots (`<doc>:doppler-figure:pN.M`) join `withheldArtifactUris` only for withheld pages.
@@ -93,14 +91,24 @@ Every reader asks `piiWithholding()` and `isPageWithheld()` from `@docslurp/shar
   - `document.md` is the scanned Markdown slot (withheld pages already replaced). It is stored only when every withheld page is verified to be the placeholder; otherwise it is not stored.
 - **Doppler's folder** (`<root>/doppler/<doc>/images/page-NNNN/(image|figure)-MMM.<ext>`): the file proxy reads the page from the key. Under `images/`, a key it cannot parse is refused while the document withholds pages. The assets route refuses an image on a withheld page, or one that shows a file from a withheld page.
 - **Later stages and resumes**: the figure resume and the first-pass reprocess read the stored outcome (`loadDocumentPiiWithholding()`, `Store.documentPiiWithholding()`). Stages that run after pii-detect in the same run read only the rewritten text, so they need no per-page check; a document withheld whole is left out by `indexableDocuments()`. Chart export runs inside vision-extract, before the scan, so its output is scanned like any other text.
-- **Streamed search** (`/v1/search/stream`) drops provisional hits on withheld pages with the final path's filter before it sends them; if the outcomes cannot be read, the leg sends no hit bodies.
 - **Rows written before the scan**: a page-scoped outcome deletes the withheld pages' rough-text rows (`document_pages`, written by the document map from the text layer it scanned itself), clears kept model reads and marks those page states `blocked-pii`. An existing summary tree is withdrawn, as for blocking and redaction.
 - **Dedup and backfill**: a document with a PII outcome is never a dedup source, and a temporary backfill version with one is never adopted (neither copy would carry the outcome).
+- **Deferred indexing** (modes that skip pii-detect): a page whose deferred read matches (the document map's rough text, or materialization) is recorded on the document exactly as the ingest scan records a withheld page: `metadata.pii` gets the page, its categories and the withheld source and non-page artifacts, merged with any earlier outcome under the document's row lock, and findings rows are written. Every reader above answers from it. Every page withheld, or `block_document`, blocks the document (`pii_blocked`). Under `redact_artifacts` the page is redacted and recorded in `redactedPages`.
+- **Titles and the document map** are built before the scan. After it (and on a deferred match), `metadata.title`, `metadata.mapTitle`, the map's node titles and index terms are dropped when they match or come from a withheld page, and the map's `search_text` is rebuilt.
+- **Summary trees**: a page- or section-scoped document gets a tree built from its rewritten text; whole-document, redaction and other withheld outcomes still get none.
+- **Chunks of placeholders only** are not indexed; a chunk spanning a clean and a withheld page keeps its clean text and drops the withheld page.
 - **`block_document`**: the document map drops matched rough-text pages, and a match found by deferred materialization blocks the whole document (`pii_blocked`).
+
+## Rollout
+
+- An action this worker does not know (a newer API configured it) blocks the document.
+- The findings table must exist before this worker runs: a missing table fails the stage as retryable infrastructure, never the document.
+- Deploy order: the migration, then workers, then the API and UI. An older worker does not know `block_document` and would index such documents in full, so an API offers `block_document` only once the fleet runs a worker that handles it.
 
 ## Rescans
 
 - A rescan replaces the outcome.
+- A section an earlier scan replaced (the section placeholder in the text, or a canonical block marked withheld) is carried too: a rescan of an unpaged document's rewritten text stays `sections` and keeps its pre-scan artifacts withheld.
 - A page whose text is already the placeholder stays withheld under any policy, so a weaker rescan of rewritten text cannot re-expose its images. The rescan reads the page's categories back from the placeholder; a placeholder written before categories were recorded keeps the page withheld with a generic reason.
 - New hits extend the set.
 - A document re-extracted from its source with no PII lifts the withholding.
@@ -134,8 +142,8 @@ Type data is descriptive only: missing, malformed or unknown categories never ch
 processed before categories were recorded reads exactly as before, with "Page N withheld for privacy." and no
 backfill. Whole-document and section outcomes show their document-level categories (`patternTypes`).
 
-The pii-detect stage artifact, which the document's users can fetch, lists each match's category, page and source
-only. Match fingerprints, offsets and lengths stay in `pii_detections`, which no tenant route reads: an unsalted hash
+The pii-detect stage artifact, which the document's users can fetch, lists the categories and text sources per page
+only, with no count of matches (the stage stats and `metadata.pii` carry none either). Match fingerprints, offsets and lengths stay in `pii_detections`, which no tenant route reads: an unsalted hash
 of a short value such as an SSN can be brute-forced.
 
 ## Confidence (operator-only)
@@ -153,7 +161,9 @@ scan. `org_id` and `project_id` are tied to the document's own by a composite fo
 
 Confidence is never written to `documents.metadata` and no tenant response reads the table: document detail, the
 ingest report, the viewer payload, search hits, exports, MCP tools and the SDK types carry categories and page numbers
-only. Operators read it from the database. There is no admin UI for it yet.
+only. The API database role holds no privilege on it (revoked after the schema-wide grant in `server/db/roles.mjs`; the
+predeploy check flags any other grant); the worker role may select, insert and delete. Operators read it as the owner.
+There is no admin UI for it yet.
 
 ## Reporting
 
@@ -166,5 +176,9 @@ only. Operators read it from the database. There is no admin UI for it yet.
 
 - Ingest: the category per page is gathered in the same pass that places matches on pages (no extra scan). The stage
   makes one more statement per scanned document (a primary-key-prefix delete of earlier findings) and one insert when
-  something was withheld.
+  something was withheld. Locating Markdown matches in the canonical blocks is one pass building a per-page string
+  index plus one `indexOf` per match, only when the Markdown has matches. A document with a match (or carried
+  withholding) adds one primary-key read of its titles and map, and a write only when something changed; a rescan of
+  text holding a placeholder adds one primary-key read of the previous categories. A deferred match adds one locked
+  read and one update of the document row, and one findings insert, per batch with a match.
 - Read: no new query. Summaries parse a few more fields of the `metadata.pii` object the readers already load.

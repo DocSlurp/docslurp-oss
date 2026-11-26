@@ -24,20 +24,18 @@
   - Contract step for #451: drop `quarantined_sources` (0101) once no release reads it (now `org_quarantined_sources`, 0184), and its roles.mjs entry.
   - Source quarantine is per organization since #451, so one hostile file can cost one worker per uploading organization (bounded per org by the teardown breaker, not fleet-wide). Add a fleet-wide signal used for routing only (a hash listed by any org runs elsewhere in a capped lane, indistinguishable to the uploader) and an alert on distinct orgs per hash and fleet teardowns per hour (council #451 M2).
 
-- Page-scoped PII follow-ups (council on #374, 2026-11-15; none blocks page scoping):
-  - Pre-existing: run artifacts written before the scan (page images, raw vision output) are served by the file proxy until pii-detect records the withheld list; refuse a run's pre-scan artifacts while the project policy is on and that document's pii-detect has not completed. `artifactOnWithheldPage` checks slots only on the document's current run.
-  - `sections` scope has no serve-time check: a stale index row from before a rescan is not filtered. Drop hits of `sections` documents from runs older than the pii-detect run.
-  - Contract/canonical nodes are keyed by their own `pageNumber`: unmatched text of a withheld page nested under a node tagged with a clean page (a table spanning pages) stays; under `sections`, contract and canonical keep the rest of the section. Structural-key fields (`*Url`, `*Id`, `mailto:`) are never scanned (pre-existing for redaction).
-  - `artifactOnWithheldPage` expands every run's artifacts of the accessible projects per file-proxy request; fold the slot lookup into `userCanAccessArtifactUri`'s existing query.
+- Page-scoped PII follow-ups in the worker and shared package (councils on #374; none blocks page scoping):
+  - Contract and canonical nodes are keyed by their own `pageNumber`: unmatched text of a withheld page nested under a node tagged with a clean page (a table spanning pages) stays; under `sections`, contract and canonical keep the rest of the section. Structural-key fields (`*Url`, `*Id`, `mailto:`) are never scanned (pre-existing for redaction).
   - Backfill adoption retires any temporary version with a PII outcome (fail closed), so a document with one withheld page never moves to the new indexing mode; carry `metadata.pii` onto the source instead.
-  - A page-scoped outcome removes rough-text rows of `unseen`/`failed`/`parsed` pages only; chunks and vectors of pages already materialized (`indexed`) stay stored (the serve-time filter drops them) until reindex. Delete them and queue vector deletion.
-  - The streamed-hits filter (`stream-hits.ts`) reads withholdings without an org predicate; thread the search scope's org through.
+  - A page-scoped outcome removes rough-text rows of `unseen`/`failed`/`parsed` pages only; chunks and vectors of pages already materialized (`indexed`) stay stored (serve-time filters drop them) until reindex. Delete them and queue vector deletion.
   - A partial reprocess's pii-detect rewrites Markdown/canonical/contract through artifact keys copied from the source version; write to the current run's own keys.
   - `flag_for_review` with pages carried over from an earlier scan rewrites them to placeholders but does not declare `extractedText` as produced, so a partial reprocess may reuse a summary built before; declare it whenever pii-detect may withhold pages (costs summary re-runs on every flag-only reprocess).
   - Under `redact_artifacts` without withheld pages, whole-text redaction of a span that crosses a page break drops the break (pre-existing).
-  - Reasons per withheld page (2026-11-25): unpaged `sections` placeholders stay generic (the document-level categories are reported); name each section's own categories in its placeholder.
+  - Unpaged `sections` placeholders stay generic (the document-level categories are reported); name each section's own categories in its placeholder. A rescan over carried sections reports no categories.
+  - A Markdown match whose value no canonical block holds (split over two blocks, re-spaced) fails closed to the whole document; map such a value onto the blocks it overlaps by offset instead, once blocks carry their Markdown offsets.
+  - Document-map node titles are dropped by their start page; a TOC entry read from a withheld page that points at a clean page stays unless the title itself matches.
+  - A page- or section-scoped document's summary tree is rebuilt after the scan withdrew the earlier one; the withdrawal's queued cleanup can race the rebuild and remove its rows (a degraded tree, never withheld text). Fence the cleanup by build generation.
   - `pii_page_findings` has no reader yet; add an operator surface (not a tenant route) when one is needed, and a score once a detector produces one.
-  - The pii-detect checkpoint stats (shown as stage diagnostics) still carry the document-level `matchCount` and the worker's `reason`; drop them from public diagnostics or from the stats.
 
 - Offline profiler follow-ups (#431): independently calibrate font/CMap Unicode fidelity and table/chart candidate accuracy; native measurements remain encoded-glyph/geometric estimates. Real-corpus full-deep coverage, refusal diagnostics and compute calibration are complete; do not infer production OCR routing from candidate counts.
 
