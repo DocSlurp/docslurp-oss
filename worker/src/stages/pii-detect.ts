@@ -29,9 +29,12 @@ import {
   applyPlanToJson,
   applyPlanToText, withholdPagesThenRedact,
   locateMatches,
+  mapTextMatchesToCanonical,
   perPageArtifactServable,
   planPiiWithholding,
+  redactValuesInBlock,
   type CanonicalBlockLike,
+  type PiiWithholdingPlan,
 } from "../lib/pii-page-withholding.js";
 import { measureOp, pushPerfMetric } from "../lib/perf-context.js";
 import { extractTextForEmbedding } from "./embedding-runtime.js";
@@ -428,10 +431,17 @@ export class PiiDetectStage implements Stage {
       metadata: { documentId: document.id, action: policy.action },
     });
 
-    const plan = planPiiWithholding(policy.action, {
+    // The Markdown is scanned whole and the canonical document block by block: a label in one block and its value in
+    // the next match only in the Markdown. Locate each Markdown match's value in the blocks so those blocks are
+    // replaced (or redacted) too; embed, search and the canonical download read the canonical document.
+    const blocks = canonicalBlocks(canonical?.value);
+    const mapped = canonicalResult && markdown && markdownResult
+      ? mapTextMatchesToCanonical(blocks, markdown.text, markdownResult.matches, document.pageCount)
+      : undefined;
+    let plan: PiiWithholdingPlan = planPiiWithholding(policy.action, {
       pageCount: document.pageCount,
       canonical: canonicalResult
-        ? { matches: canonicalResult.matches, changedPages: canonicalResult.changedPages, blocks: canonicalBlocks(canonical?.value) }
+        ? { matches: canonicalResult.matches, changedPages: canonicalResult.changedPages, blocks, mapped }
         : null,
       markdown: markdown && markdownResult ? { text: markdown.text, matches: markdownResult.matches } : null,
       fallback: fallbackResult ? { text: fallbackText, matches: fallbackResult.matches } : null,
@@ -442,7 +452,7 @@ export class PiiDetectStage implements Stage {
     const located = anyMatch && document.pageCount > 1
       ? locateMatches({
           pageCount: document.pageCount,
-          canonical: canonicalResult ? { matches: canonicalResult.matches, changedPages: canonicalResult.changedPages, blocks: [] } : null,
+          canonical: canonicalResult ? { matches: canonicalResult.matches, changedPages: canonicalResult.changedPages, blocks, mapped } : null,
           markdown: markdown && markdownResult ? { text: markdown.text, matches: markdownResult.matches } : null,
           fallback: fallbackResult ? { text: fallbackText, matches: fallbackResult.matches } : null,
           html: htmlResult ? { matches: htmlResult.matches } : null,
@@ -450,13 +460,19 @@ export class PiiDetectStage implements Stage {
         })
       : null;
 
+    if (policy.action === "redact_artifacts" && anyMatch && mapped && mapped.unmapped.length > 0) {
+      // Redaction rewrites the canonical document value by value: a Markdown match whose value no block holds in a
+      // recognisable form cannot be shown to be gone from it. Fail closed.
+      plan = { scope: "document", reason: "unattributed:text-match-not-in-canonical" };
+    }
     const blocked = plan.scope === "document";
+    const planReason = plan.scope === "document" ? plan.reason : "";
     const withholding = plan.scope === "pages" || plan.scope === "sections";
     const redacted = policy.action === "redact_artifacts" && anyMatch && !blocked;
     const reviewRequired = policy.action === "flag_for_review" && anyMatch;
-    if (blocked && plan.reason.startsWith("unattributed")) {
+    if (blocked && planReason.startsWith("unattributed")) {
       // Fail closed: a hit that cannot be placed on a page withholds the document.
-      console.warn(`[pii] document-withheld document=${document.id} reason=${plan.reason}`);
+      console.warn(`[pii] document-withheld document=${document.id} reason=${planReason}`);
     }
     const patternTypes = [...new Set([
       ...primary.map((match) => match.patternType),
@@ -486,10 +502,11 @@ export class PiiDetectStage implements Stage {
     }
     let currentMarkdown: string | null = markdown?.text ?? null;
     if (rewrite) {
-      if (canonical && canonicalResult && (canonicalResult.changed || withholding)) {
+      const mappedBlocks = mapped?.blockIndexes ?? new Map();
+      if (canonical && canonicalResult && (canonicalResult.changed || withholding || mappedBlocks.size > 0)) {
         const next = withholding
-          ? applyPlanToCanonical(plan, canonicalResult.document, canonicalResult.changedBlockIndexes)
-          : canonicalResult.document;
+          ? applyPlanToCanonical(plan, canonicalResult.document, new Set([...canonicalResult.changedBlockIndexes, ...mappedBlocks.keys()]))
+          : redactMappedValues(canonicalResult.document, mapped);
         await this.storage.putJson(canonical.key, next);
         redactedArtifacts.push(canonical.slot);
       }
@@ -564,9 +581,9 @@ export class PiiDetectStage implements Stage {
           : piiPageFindings(new Map(), piiCategoryIds(patternTypes))
         : [];
     const reason = blocked
-      ? policy.action === "block_document" || plan.reason === "every-page-withheld"
+      ? policy.action === "block_document" || planReason === "every-page-withheld"
         ? `PII policy blocked indexing: ${matchCount} match${matchCount === 1 ? "" : "es"} (${patternTypes.join(", ")})`
-        : `PII policy blocked indexing: a match could not be placed on a page (${plan.reason})`
+        : `PII policy blocked indexing: a match could not be placed on a page (${planReason})`
       : plan.scope === "pages"
         ? `PII policy withheld ${withheldPageList.length} page${withheldPageList.length === 1 ? "" : "s"}`
         : plan.scope === "sections"
@@ -700,6 +717,18 @@ export class PiiDetectStage implements Stage {
   async close(): Promise<void> {
     await this.sink.close();
   }
+}
+
+/** The redacted canonical document with every value the Markdown matched also redacted in the blocks holding it. */
+function redactMappedValues<T extends { blocks?: unknown }>(document: T, mapped: ReturnType<typeof mapTextMatchesToCanonical> | undefined): T {
+  if (!mapped || mapped.values.size === 0 || !Array.isArray(document.blocks)) return document;
+  return {
+    ...document,
+    blocks: (document.blocks as CanonicalBlockLike[]).map((block, index) => {
+      const values = mapped.values.get(index);
+      return values ? redactValuesInBlock(block, values) : block;
+    }),
+  };
 }
 
 function canonicalBlocks(value: unknown): CanonicalBlockLike[] {

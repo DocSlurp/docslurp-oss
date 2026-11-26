@@ -16,6 +16,9 @@ import {
   type PiiWithholding,
 } from "@docslurp/shared";
 
+import { parseAtxHeading, plainHeadingText } from "./markdown-structure.js";
+import { isStructuralKey } from "./pii-redaction.js";
+
 /**
  * Page-scoped PII withholding for the worker (see packages/shared/src/pii-withholding.ts).
  *
@@ -47,7 +50,13 @@ type Located = { pages: Set<number>; unattributed: string[]; types: Map<number, 
 
 export type PiiScanFindings = {
   pageCount: number;
-  canonical: { matches: PiiMatch[]; changedPages: Array<number | null>; blocks: CanonicalBlockLike[] } | null;
+  canonical: {
+    matches: PiiMatch[];
+    changedPages: Array<number | null>;
+    blocks: CanonicalBlockLike[];
+    /** The Markdown (or source text) matches' values located in the blocks: {@link mapTextMatchesToCanonical}. */
+    mapped?: CanonicalValueMap;
+  } | null;
   markdown: { text: string; matches: PiiMatch[] } | null;
   fallback: { text: string; matches: PiiMatch[] } | null;
   html: { matches: PiiMatch[] } | null;
@@ -97,6 +106,21 @@ export function locateMatches(findings: PiiScanFindings): Located {
   for (const page of findings.canonical?.changedPages ?? []) {
     if (validPage(page, pageCount)) pages.add(page);
     else unattributed.push("canonical-block-without-page");
+  }
+  // Blocks holding a value the whole text matched (a label and its value in two blocks): their pages are withheld too.
+  const mapped = findings.canonical?.mapped;
+  if (mapped) {
+    for (const [index, kinds] of mapped.blockIndexes) {
+      const page = findings.canonical!.blocks[index]?.pageNumber;
+      if (!validPage(page, pageCount)) { unattributed.push("canonical-block-without-page"); continue; }
+      pages.add(page);
+      for (const kind of kinds) typeOn(page, kind);
+    }
+    // A value in no block is withheld only if every page it falls on has blocks to replace.
+    const blockPages = new Set(findings.canonical!.blocks.map((block) => block.pageNumber));
+    for (const found of mapped.unmapped) {
+      if (!found || !found.every((page) => blockPages.has(page))) unattributed.push("text-match-not-in-canonical");
+    }
   }
   for (const [source, entry] of [["markdown", findings.markdown], ["source-text", findings.fallback]] as const) {
     if (!entry || entry.matches.length === 0) continue;
@@ -206,10 +230,147 @@ function planSections(findings: PiiScanFindings): PiiWithholdingPlan {
   // Text the sections are cut from must hold the hit itself; a hit only elsewhere cannot be located in it.
   if (text && textMatches === 0 && otherMatches > 0) return { scope: "document", reason: "unattributed:section-not-located" };
   if (!text && !findings.canonical) return { scope: "document", reason: "unattributed:no-text" };
+  // The canonical document is rewritten block by block: a text match whose value no block holds cannot be withheld there.
+  if (findings.canonical?.mapped && findings.canonical.mapped.unmapped.length > 0) {
+    return { scope: "document", reason: "unattributed:text-match-not-in-canonical" };
+  }
   const sectionCount = text
     ? withholdTextSections(text.text, text.matches).withheldSectionCount
     : new Set((findings.canonical?.matches ?? []).map((match) => match.charOffset)).size || 1;
   return { scope: "sections", sectionCount: Math.max(1, sectionCount) };
+}
+
+/** Text-bearing strings of a canonical block: its text, heading path entries and every string in its metadata. */
+function blockStrings(block: CanonicalBlockLike): string[] {
+  const out: string[] = [];
+  const visit = (node: unknown) => {
+    if (typeof node === "string") out.push(node);
+    else if (Array.isArray(node)) node.forEach(visit);
+    else if (node && typeof node === "object") for (const child of Object.values(node as Record<string, unknown>)) visit(child);
+  };
+  visit(block.text);
+  visit(block.headingPath);
+  visit(block.metadata);
+  return out;
+}
+
+const alnum = (text: string) => text.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+
+export type CanonicalValueMap = {
+  /** Block index -> the kinds of PII whose value it holds. */
+  blockIndexes: Map<number, Set<PiiPatternType>>;
+  /** Block index -> the matched values it holds (for redaction). */
+  values: Map<number, Array<{ value: string; type: PiiPatternType }>>;
+  /** Text matches whose value is in no block: the pages the match falls on (null when unknown). */
+  unmapped: Array<number[] | null>;
+};
+
+/**
+ * Where the values matched in a whole text (Markdown or source text) sit in the canonical document.
+ *
+ * The text is scanned as one string and the canonical document block by block, so a context-validated detector (a
+ * label, a blank line, then the value) can match the text while no single block matches: the label is one block and
+ * the value the next. Each text match's value is looked up in the canonical blocks (exactly, then ignoring spacing and
+ * punctuation); every block holding it is returned so it can be replaced or redacted like a block that matched. A
+ * value found in no block is `unmapped`: the canonical document may still hold it in a form this cannot see (split
+ * over two blocks, re-spaced), so callers fail closed.
+ *
+ * Cost: one pass building a per-page string index of the blocks, then one `indexOf` per match over the blocks of the
+ * pages the match falls on (all blocks for an unpaged document, or when the value is not on its page).
+ */
+export function mapTextMatchesToCanonical(
+  blocks: readonly CanonicalBlockLike[],
+  text: string,
+  matches: readonly PiiMatch[],
+  pageCount: number,
+): CanonicalValueMap {
+  const blockIndexes = new Map<number, Set<PiiPatternType>>();
+  const values = new Map<number, Array<{ value: string; type: PiiPatternType }>>();
+  if (matches.length === 0) return { blockIndexes, values, unmapped: [] };
+  // Per page (null: no page): the blocks' strings joined with separators no value contains, exact and normalized.
+  type PageIndex = { exact: string; exactStarts: number[]; loose: string; looseStarts: number[]; blocks: number[] };
+  const byPage = new Map<number | null, PageIndex>();
+  blocks.forEach((block, index) => {
+    const page = validPage(block.pageNumber, Math.max(pageCount, 1)) ? block.pageNumber : null;
+    const entry = byPage.get(page) ?? { exact: "", exactStarts: [], loose: "", looseStarts: [], blocks: [] };
+    const strings = blockStrings(block);
+    entry.exactStarts.push(entry.exact.length);
+    entry.exact += `${strings.join("\u0000")}\u0001`;
+    entry.looseStarts.push(entry.loose.length);
+    entry.loose += `${strings.map(alnum).join("\u0000")}\u0001`;
+    entry.blocks.push(index);
+    byPage.set(page, entry);
+  });
+  const blockAt = (starts: number[], at: number) => {
+    let low = 0;
+    let high = starts.length - 1;
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      if (starts[mid]! <= at) low = mid; else high = mid - 1;
+    }
+    return low;
+  };
+  const findIn = (entry: PageIndex, value: string, loose: string): number[] => {
+    const found = new Set<number>();
+    for (const [haystack, needle, starts] of [[entry.exact, value, entry.exactStarts], [entry.loose, loose, entry.looseStarts]] as const) {
+      if (!needle) continue;
+      for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) {
+        found.add(entry.blocks[blockAt(starts, at)]!);
+      }
+      if (found.size > 0) break;
+    }
+    return [...found];
+  };
+  const offsets = pageCount > 1 ? pageOffsets(text, pageCount) : null;
+  const unmapped: Array<number[] | null> = [];
+  for (const match of matches) {
+    const value = text.slice(match.charOffset, match.charOffset + match.length);
+    const loose = alnum(value);
+    const pages = offsets ? pagesOfMatch(offsets, match.charOffset, match.length) : null;
+    const candidates = pages ? [...pages.map((page) => byPage.get(page)), byPage.get(null)] : [...byPage.values()];
+    let found = candidates.flatMap((entry) => (entry ? findIn(entry, value, loose) : []));
+    // Paged text whose page disagrees with the blocks' page: look everywhere rather than miss the value.
+    if (found.length === 0 && pages) found = [...byPage.values()].flatMap((entry) => findIn(entry, value, loose));
+    if (found.length === 0) {
+      unmapped.push(pages ?? (pageCount <= 1 ? [1] : null));
+      continue;
+    }
+    for (const index of new Set(found)) {
+      blockIndexes.set(index, (blockIndexes.get(index) ?? new Set<PiiPatternType>()).add(match.patternType));
+      values.set(index, [...(values.get(index) ?? []), { value, type: match.patternType }]);
+    }
+  }
+  return { blockIndexes, values, unmapped };
+}
+
+/**
+ * A canonical block with each listed value redacted wherever it appears (text, heading path, metadata strings). A
+ * string that holds the value only with different spacing or punctuation is replaced whole.
+ */
+export function redactValuesInBlock<T extends CanonicalBlockLike>(block: T, values: ReadonlyArray<{ value: string; type: PiiPatternType }>): T {
+  const redactString = (input: string): string => {
+    let out = input;
+    for (const { value, type } of values) {
+      if (!value) continue;
+      if (out.includes(value)) out = out.split(value).join(`[REDACTED:${type}]`);
+      else if (alnum(value) && alnum(out).includes(alnum(value))) return `[REDACTED:${type}]`;
+    }
+    return out;
+  };
+  const visit = (node: unknown): unknown => {
+    if (typeof node === "string") return redactString(node);
+    if (Array.isArray(node)) return node.map(visit);
+    if (node && typeof node === "object") {
+      return Object.fromEntries(Object.entries(node as Record<string, unknown>).map(([key, child]) => [key, isStructuralKey(key) ? child : visit(child)]));
+    }
+    return node;
+  };
+  return {
+    ...block,
+    ...(typeof block.text === "string" ? { text: redactString(block.text) } : {}),
+    ...(Array.isArray(block.headingPath) ? { headingPath: block.headingPath.map(visit) } : {}),
+    ...(block.metadata && typeof block.metadata === "object" ? { metadata: visit(block.metadata) } : {}),
+  };
 }
 
 /** Markdown or source text with the plan applied. */
@@ -280,11 +441,7 @@ export function applyPlanToCanonical<T extends { blocks?: unknown }>(
   }
   if (plan.scope !== "pages") return document;
   const withheld = new Set(plan.pages);
-  const withheldHeadings = new Set(
-    blocks
-      .filter((block) => typeof block.pageNumber === "number" && withheld.has(block.pageNumber) && block.type === "heading" && typeof block.text === "string")
-      .map((block) => (block.text as string).trim()),
-  );
+  const withheldHeadings = withheldHeadingTexts(blocks, withheld);
   const seen = new Set<number>();
   const out: CanonicalBlockLike[] = [];
   for (const block of blocks) {
@@ -295,9 +452,7 @@ export function applyPlanToCanonical<T extends { blocks?: unknown }>(
       out.push({ ...block, type: "paragraph", text: piiWithheldPageText(page, plan.pageTypes.get(page)), headingPath: [], bbox: null, metadata: { piiWithheld: true } });
       continue;
     }
-    const headingPath = Array.isArray(block.headingPath)
-      ? block.headingPath.filter((heading) => typeof heading !== "string" || !withheldHeadings.has(heading.trim()))
-      : block.headingPath;
+    const headingPath = withoutWithheldHeadings(block.headingPath, withheldHeadings);
     if (page === null) {
       out.push({ ...block, type: "paragraph", text: PII_WITHHELD_SECTION_TEXT, headingPath, metadata: { piiWithheld: true } });
       continue;
@@ -305,6 +460,31 @@ export function applyPlanToCanonical<T extends { blocks?: unknown }>(
     out.push({ ...block, headingPath });
   }
   return { ...document, blocks: out };
+}
+
+/**
+ * Plain heading text (what heading-path entries hold) of every heading block on a withheld page. A heading block's own
+ * path ends with its plain text; its raw line (`## Jane Roe: intake`) is reduced the same way as a fallback.
+ */
+export function withheldHeadingTexts(blocks: readonly CanonicalBlockLike[], withheld: ReadonlySet<number>): Set<string> {
+  const out = new Set<string>();
+  for (const block of blocks) {
+    if (typeof block.pageNumber !== "number" || !withheld.has(block.pageNumber) || block.type !== "heading") continue;
+    const own = Array.isArray(block.headingPath) ? block.headingPath.at(-1) : undefined;
+    if (typeof own === "string" && own.trim()) out.add(own.trim());
+    if (typeof block.text === "string") {
+      const parsed = parseAtxHeading(block.text.trim());
+      const plain = plainHeadingText(parsed ? parsed.text : block.text);
+      if (plain.trim()) out.add(plain.trim());
+    }
+  }
+  return out;
+}
+
+/** A heading path without the entries a withheld page's headings contributed. */
+export function withoutWithheldHeadings(headingPath: unknown, withheldHeadings: ReadonlySet<string>): unknown {
+  if (!Array.isArray(headingPath) || withheldHeadings.size === 0) return headingPath;
+  return headingPath.filter((heading) => typeof heading !== "string" || !withheldHeadings.has(heading.trim()));
 }
 
 /**

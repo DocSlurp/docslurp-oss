@@ -328,3 +328,103 @@ describe("redact_artifacts is page-scoped for images", () => {
     expect(withheld.has(uri(f, "page-3"))).toBe(false);
   });
 });
+
+describe("a label and its value in two canonical blocks (the Markdown matches across the blank line)", () => {
+  const PASSPORT = "X1234567";
+  const labelled = (documentId: string, pages: Array<Array<{ type: "heading" | "paragraph"; text: string }>>): CanonicalDocument => {
+    const doc = canonical(documentId, pages.map(() => ""));
+    let order = 0;
+    doc.blocks = pages.flatMap((blocks, pageIndex) => blocks.map((block) => ({
+      id: `b${order}`, type: block.type, order: order++, text: block.type === "heading" ? `## ${block.text}` : block.text,
+      headingPath: block.type === "heading" ? [block.text] : [], pageNumber: pageIndex + 1,
+      lineStart: null, lineEnd: null, bbox: null, metadata: block.type === "heading" ? { level: 2 } : {},
+    })));
+    return doc;
+  };
+  const setupLabelled = (action: PiiPolicy["action"], pages: Array<Array<{ type: "heading" | "paragraph"; text: string }>>, mimeType: string) => {
+    const storage = new MemoryStore();
+    const markdown = pages.map((blocks) => blocks.map((block) => (block.type === "heading" ? `## ${block.text}` : block.text)).join("\n\n")).join("\f");
+    storage.objects.set(`u1/run-1/canonical/doc-1.json`, JSON.stringify(labelled("doc-1", pages)));
+    const f = setup(action, pages.map(() => ""), { storage, markdown, patterns: ["passport"] });
+    f.document.mimeType = mimeType;
+    return f;
+  };
+  const onePage = [[{ type: "heading" as const, text: "Passport number" }, { type: "paragraph" as const, text: PASSPORT }, { type: "heading" as const, text: "Travel" }, { type: "paragraph" as const, text: "Window seat." }]];
+
+  for (const mimeType of ["text/markdown", "text/plain", "application/pdf"]) {
+    it(`one-page ${mimeType}: the value leaves the canonical document too, so embed and search never see it`, async () => {
+      const f = setupLabelled("block_indexing", onePage, mimeType);
+      await f.stage.run(f.state);
+      expect(outcome(f)).toMatchObject({ scope: "sections", blocked: false });
+      expect(f.storage.objects.get(f.markdownKey)).not.toContain(PASSPORT);
+      expect(f.storage.objects.get(f.canonicalKey)).not.toContain(PASSPORT);
+      const embedded = await extractTextForEmbedding(f.document, {} as CommandRunner, f.storage as unknown as ArtifactStore,
+        uri(f, "markdown"), undefined, uri(f, "canonical-document"));
+      expect(embedded.text).not.toContain(PASSPORT);
+      expect(embedded.text).toContain("Window seat.");
+    });
+  }
+
+  it("redact_artifacts: the value is redacted in the canonical block that holds it", async () => {
+    const f = setupLabelled("redact_artifacts", onePage, "application/pdf");
+    await f.stage.run(f.state);
+    expect(outcome(f)).toMatchObject({ redacted: true, blocked: false });
+    const doc = f.storage.json<CanonicalDocument>(f.canonicalKey);
+    expect(JSON.stringify(doc)).not.toContain(PASSPORT);
+    expect(doc.blocks[1]!.text).toBe("[REDACTED:passport]");
+    expect(doc.blocks[3]!.text).toBe("Window seat.");
+  });
+
+  it("paged redact_artifacts: the value on page 2 is redacted in its block and page 2's images are withheld", async () => {
+    const f = setupLabelled("redact_artifacts", [[{ type: "paragraph", text: "Cover." }], onePage[0]!, [{ type: "paragraph", text: "End." }]], "application/pdf");
+    await f.stage.run(f.state);
+    expect(JSON.stringify(f.storage.json<CanonicalDocument>(f.canonicalKey))).not.toContain(PASSPORT);
+    const withheld = new Set(outcome(f).withheldArtifactUris);
+    expect(withheld.has(uri(f, "page-2"))).toBe(true);
+    expect(withheld.has(uri(f, "page-1"))).toBe(false);
+  });
+
+  it("paged block_indexing: a label and value on one page withhold that page in both artifacts", async () => {
+    const f = setupLabelled("block_indexing", [[{ type: "paragraph", text: "Cover." }], onePage[0]!, [{ type: "paragraph", text: "End." }]], "application/pdf");
+    await f.stage.run(f.state);
+    expect(outcome(f)).toMatchObject({ scope: "pages", withheldPages: [2], withheldPageTypes: { "2": ["passport"] } });
+    expect(f.storage.objects.get(f.canonicalKey)).not.toContain(PASSPORT);
+  });
+
+  it("a Markdown value the canonical document does not hold in any block fails closed to the whole document", async () => {
+    const f = setupLabelled("block_indexing", onePage, "application/pdf");
+    // The canonical document renders the value split over two blocks: no block holds it.
+    const doc = labelled("doc-1", [[{ type: "heading", text: "Passport number" }, { type: "paragraph", text: "X1234" }, { type: "paragraph", text: "567" }]]);
+    f.storage.objects.set(f.canonicalKey, JSON.stringify(doc));
+    await f.stage.run(f.state);
+    expect(outcome(f)).toMatchObject({ scope: "document", blocked: true });
+    expect(outcome(f).reason).toContain("text-match-not-in-canonical");
+  });
+
+  it("redact_artifacts fails closed the same way", async () => {
+    const f = setupLabelled("redact_artifacts", onePage, "application/pdf");
+    const doc = labelled("doc-1", [[{ type: "heading", text: "Passport number" }, { type: "paragraph", text: "X1234" }, { type: "paragraph", text: "567" }]]);
+    f.storage.objects.set(f.canonicalKey, JSON.stringify(doc));
+    await f.stage.run(f.state);
+    expect(outcome(f)).toMatchObject({ scope: "document", blocked: true, redacted: false });
+  });
+});
+
+describe("headings from a withheld page leave later pages' heading paths", () => {
+  it("drops the plain heading text a withheld page's heading contributed", async () => {
+    const f = setup("block_indexing", ["Cover.", "x", "Notes continue."]);
+    const doc = canonical("doc-1", ["Cover.", "x", "Notes continue."]);
+    doc.blocks = [
+      { ...doc.blocks[0]! },
+      { ...doc.blocks[1]!, type: "heading", text: "## Jane Roe: **intake**", headingPath: ["Jane Roe: intake"], metadata: { level: 2 } },
+      { ...doc.blocks[1]!, id: "b2b", text: `SSN ${SSN}`, headingPath: ["Jane Roe: intake"] },
+      { ...doc.blocks[2]!, headingPath: ["Jane Roe: intake"] },
+    ];
+    f.storage.objects.set(f.canonicalKey, JSON.stringify(doc));
+    await f.stage.run(f.state);
+    expect(outcome(f)).toMatchObject({ scope: "pages", withheldPages: [2] });
+    const out = f.storage.json<CanonicalDocument>(f.canonicalKey);
+    expect(JSON.stringify(out)).not.toContain("Jane Roe");
+    expect(out.blocks.at(-1)!.headingPath).toEqual([]);
+  });
+});
