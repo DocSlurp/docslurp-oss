@@ -1514,7 +1514,7 @@ describe("serving contract and ownership of a building row", () => {
         },
       },
     });
-    expect(atWipe).toEqual(["building", "run:run-d1", "other-settings", "taken-over", 1]);
+    expect(atWipe).toEqual(["building", expect.stringMatching(/^run:run-d1#/), "other-settings", "taken-over", 1]);
     expect(result.status).toBe("ready");
     // The builder that lost the row is refused at its next write, so nothing of it lands after the wipe.
     await expect(writeSummaryTreeState(sql, { scope: W, documentId: "d1", runId: "run-d1", status: "partial", expectOwner: "job:j1#c1" })).rejects.toThrow(/took its tree over/);
