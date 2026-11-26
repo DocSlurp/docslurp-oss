@@ -15,6 +15,8 @@ import {
   embeddingConfigSchema,
   embeddingProfileCatalog,
   visionProfileCatalog,
+  retiredVisionProfile,
+  type VisionProfileKey,
   inferenceLaneSchema,
   vectorBackendSchema,
   visionConfigSchema,
@@ -1085,11 +1087,12 @@ export function normalizePipelineFeatures(
             defaultPipelineFeatures.embedding.lateChunkingWindow,
         }
       : fallbackEmbedding;
+  const visionProfile = retiredVisionProfile(source?.vision?.profile) ?? source?.vision?.profile;
   const visionBase =
-    source?.vision?.profile && source.vision.profile in visionProfileCatalog
+    visionProfile && Object.hasOwn(visionProfileCatalog, visionProfile)
       ? {
           ...defaultPipelineFeatures.vision,
-          ...visionProfileCatalog[source.vision.profile].config,
+          ...visionProfileCatalog[visionProfile as VisionProfileKey].config,
         }
       : defaultPipelineFeatures.vision;
 

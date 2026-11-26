@@ -1086,13 +1086,27 @@ export const DEFAULT_VISION_PROFILE = "good-fast-hosted" satisfies VisionProfile
 
 export const visionProfileKeySchema = z.enum([
   "cheapest-local",
-  "fastest-local",
-  "good-fast-local",
   "cheapest-hosted",
   "good-fast-hosted",
   "open-weights-hosted",
 ]);
 export type VisionProfileKey = z.infer<typeof visionProfileKeySchema>;
+
+/**
+ * Retired vision profiles (2026-11-26) and the nearest current profile each reads as. Stored projects and runs that
+ * name one keep working: the profile is rewritten on read, and an explicit stored `modelUri` is kept as is.
+ */
+export const RETIRED_VISION_PROFILES = {
+  "fastest-local": "cheapest-local",
+  "good-fast-local": "cheapest-local",
+} as const satisfies Record<string, VisionProfileKey>;
+
+/** The current profile a retired vision profile name maps to, or undefined for any other value. */
+export function retiredVisionProfile(profile: unknown): VisionProfileKey | undefined {
+  return typeof profile === "string" && Object.hasOwn(RETIRED_VISION_PROFILES, profile)
+    ? RETIRED_VISION_PROFILES[profile as keyof typeof RETIRED_VISION_PROFILES]
+    : undefined;
+}
 
 export const visionProfileCatalog = {
   "cheapest-local": {
@@ -1103,26 +1117,6 @@ export const visionProfileCatalog = {
       profile: "cheapest-local",
       target: "local",
       modelUri: "llm://local-cli/microsoft/Florence-2-small-ft",
-    },
-  },
-  "fastest-local": {
-    label: "Fastest local",
-    description: "Compact Qwen vision route for a local vLLM runtime.",
-    tags: ["speed", "local", "small"],
-    config: {
-      profile: "fastest-local",
-      target: "local",
-      modelUri: "llm://vllm/Qwen/Qwen2-VL-2B-Instruct",
-    },
-  },
-  "good-fast-local": {
-    label: "Good + fast local",
-    description: "Higher-fidelity local Qwen vision route with moderate resource use.",
-    tags: ["quality", "speed", "local"],
-    config: {
-      profile: "good-fast-local",
-      target: "local",
-      modelUri: "llm://vllm/Qwen/Qwen2.5-VL-3B-Instruct",
     },
   },
   "cheapest-hosted": {
@@ -1477,9 +1471,12 @@ export const defaultEmbeddingConfig: EmbeddingConfig = {
 const LEGACY_VISION_KEYS = ["maxPagesPerDocument", "forceAllPages"] as const;
 const dropLegacyVisionKeys = (value: unknown) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  if (!LEGACY_VISION_KEYS.some((key) => key in value)) return value;
-  const rest = { ...(value as Record<string, unknown>) };
+  const record = value as Record<string, unknown>;
+  const retired = retiredVisionProfile(record.profile);
+  if (!retired && !LEGACY_VISION_KEYS.some((key) => key in record)) return value;
+  const rest = { ...record };
   for (const key of LEGACY_VISION_KEYS) delete rest[key];
+  if (retired) rest.profile = retired;
   return rest;
 };
 

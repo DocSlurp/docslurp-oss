@@ -73,7 +73,7 @@ describe("a stored vision model that is no longer admitted", () => {
     expect(normalizeStoredPipelineFeatures({ vision: { model: "gpt-4.1-mini", baseUrl: "https://openrouter.ai/api/v1/" } } as never, "run r2").vision.modelUri).toBe(defaultVisionConfig.modelUri);
     // A target stored for the dropped model does not contradict the model that replaces it.
     const local = normalizeStoredPipelineFeatures({ vision: { profile: "good-fast-local", target: "hosted", modelUri: REFUSED } } as never, "run r3");
-    expect(local.vision).toMatchObject({ profile: "good-fast-local", target: "local" });
+    expect(local.vision).toMatchObject({ profile: "cheapest-local", target: "local" });
     error.mockClear();
     expect(normalizeStoredPipelineFeatures({ vision: { model: "gpt-4.1-mini", remoteFallbackModel: "nope/unknown" } } as never, "run r4").vision.remoteFallbackModelUri).toBeNull();
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/run r4.*vision\.model, vision\.remoteFallbackModel/));

@@ -267,10 +267,10 @@ describe("the run-creation rule judges only a tenant-supplied endpoint", () => {
     expect(tenantSuppliedEndpointProblem(uri("openai", "https://gateway.example/v1"))).toBe("tenant-base-url-not-allowed");
     expect(tenantSuppliedEndpointProblem("not a uri")).toBe("tenant-model-uri-invalid");
     // The call-time rule keeps refusing the profile's local server route while the flag is off.
-    expect(tenantModelEndpointProblem(visionProfileCatalog["fastest-local"].config.modelUri)).toBe("tenant-local-endpoints-disabled");
+    expect(tenantModelEndpointProblem("llm://vllm/Qwen/Qwen2-VL-2B-Instruct")).toBe("tenant-local-endpoints-disabled");
     expect(() => assertTenantModelBaseUrlAllowed("vllm", null)).toThrow(TenantModelEndpointRefusedError);
     // The save rule is the call-time rule.
-    expect(tenantPipelineEndpointProblems({ vision: { modelUri: visionProfileCatalog["fastest-local"].config.modelUri } }))
+    expect(tenantPipelineEndpointProblems({ vision: { modelUri: "llm://vllm/Qwen/Qwen2-VL-2B-Instruct" } }))
       .toEqual([{ path: "vision.modelUri", code: "tenant-local-endpoints-disabled" }]);
   });
 });
