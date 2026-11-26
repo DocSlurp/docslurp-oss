@@ -253,7 +253,7 @@ describe("materializePageRange", () => {
     }
   });
 
-  it("a deferred match on every page blocks the document (H2)", async () => {
+  it("block_document: a deferred match on one page blocks the whole document (H2)", async () => {
     try {
       const pipeline = {
         ...smartest,

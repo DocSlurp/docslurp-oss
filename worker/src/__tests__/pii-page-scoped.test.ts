@@ -583,6 +583,18 @@ describe("placeholder-only chunks are never indexed", () => {
       { text: "Clean page.", pageNumber: 4, pageNumbers: [4] },
     ]);
   });
+
+  it("a multi-page chunk left with one page is on that page, and its source trace drops the withheld page", () => {
+    const [out] = withoutPlaceholderChunks([{
+      text: `${piiWithheldPageText(2, ["ssn"])}\n\nPage three text.`, pageNumber: null, pageNumbers: [2, 3],
+      sourceTrace: { pageNumbers: [2, 3], blockIds: ["b2", "b3"] },
+    }]);
+    expect(out).toEqual({ text: "Page three text.", pageNumber: 3, pageNumbers: [3], sourceTrace: { pageNumbers: [3], blockIds: ["b2", "b3"] } });
+  });
+
+  it("a fully withheld one-section document leaves an empty chunk list (nothing to embed or index)", () => {
+    expect(withoutPlaceholderChunks([{ text: PII_WITHHELD_SECTION_TEXT, pageNumber: 1, pageNumbers: [1] }])).toEqual([]);
+  });
 });
 
 describe("the canonical locator (M9, structural keys)", () => {

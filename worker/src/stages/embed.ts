@@ -1225,15 +1225,23 @@ async function fallbackChunkDrafts(
   }));
 }
 
-/** Chunks with PII placeholders removed (see `withoutPiiPlaceholders`); chunks left empty are dropped. */
-export function withoutPlaceholderChunks<T extends { text: string; pageNumber: number | null; pageNumbers: number[] }>(chunks: T[]): T[] {
+/**
+ * Chunks with PII placeholders removed (see `withoutPiiPlaceholders`); chunks left empty are dropped. A chunk that loses
+ * a withheld page loses it from its pages and its source trace too, and one left with a single page is on that page.
+ */
+export function withoutPlaceholderChunks<T extends { text: string; pageNumber: number | null; pageNumbers: number[]; sourceTrace?: { pageNumbers?: number[] } | null }>(chunks: T[]): T[] {
   return chunks.flatMap((chunk) => {
     const cleaned = withoutPiiPlaceholders(chunk.text);
     if (!cleaned.changed) return [chunk];
     if (!cleaned.text) return [];
     const withheld = new Set(cleaned.withheldPages);
-    const pageNumbers = chunk.pageNumbers.filter((page) => !withheld.has(page));
+    if (withheld.size === 0) return [{ ...chunk, text: cleaned.text }];
     // A section placeholder has no page: such a chunk keeps its pages (the section is gone from its text).
-    return [{ ...chunk, text: cleaned.text, pageNumbers, pageNumber: chunk.pageNumber !== null && withheld.has(chunk.pageNumber) ? pageNumbers[0] ?? null : chunk.pageNumber }];
+    const pageNumbers = chunk.pageNumbers.filter((page) => !withheld.has(page));
+    const pageNumber = pageNumbers.length === 1 ? pageNumbers[0]! : chunk.pageNumber !== null && withheld.has(chunk.pageNumber) ? null : chunk.pageNumber;
+    const sourceTrace = chunk.sourceTrace && Array.isArray(chunk.sourceTrace.pageNumbers)
+      ? { ...chunk.sourceTrace, pageNumbers: chunk.sourceTrace.pageNumbers.filter((page) => !withheld.has(page)) }
+      : chunk.sourceTrace;
+    return [{ ...chunk, text: cleaned.text, pageNumbers, pageNumber, ...(sourceTrace !== undefined ? { sourceTrace } : {}) }];
   });
 }
