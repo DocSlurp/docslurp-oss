@@ -12,7 +12,7 @@ import { compilePipelinePlan, type PipelineFeatures } from "./pipeline.js";
 import { figuresEnabled } from "./doppler-figures.js";
 import { effectiveLadder, ladderShareBudget, pageReadingQuality } from "./auto-ladder.js";
 import { uploadMediaKind } from "./media-upload-estimate.js";
-import { quoteFilePageRange } from "./upload-pages.js";
+import { quoteFilePageRange, quoteHighIsCeiling } from "./upload-pages.js";
 
 /*
  * Upload quotes without a database: what `POST /v1/uploads/estimate` returns. This module holds the generic parts (page
@@ -198,7 +198,7 @@ export function quoteUpload(args: {
   const { aboveFastShare, ...profile } = estimateProfileSchema.parse(args.profile);
   const files = args.files.map(applyFileProfile);
   const speedBoost = args.speedBoost === true;
-  const quote = pricing().quoteUpload({ files, profile, speedBoost });
+  const quote = withUnboundedFiles(pricing().quoteUpload({ files, profile, speedBoost }), files);
   if (aboveFastShare === undefined || (profile.quality !== "fastest" && profile.quality !== "smartest") || !quote.estimate.credits) return quote;
   // Auto with an above-fast share (pipeline.ladder): pages beyond the share are not read, so they are not quoted Rich.
   const fast = pricing().quoteUpload({ files, profile: { ...profile, quality: "fast" }, speedBoost });
@@ -210,6 +210,25 @@ export function quoteUpload(args: {
       ...quote.estimate,
       credits,
       basis: `${quote.estimate.basis}; at most ${Math.round(aboveFastShare * 1000) / 10}% of each document's pages read by a model (pipeline.ladder)`,
+    },
+  };
+}
+
+/**
+ * Marks an upload quote whose high end is not a ceiling (quoteHighIsCeiling): Word, slide, sheet or EPUB files quoted without
+ * a file profile's body size, and sheets. Their count and a sentence go on the estimate, whichever pricing provider made it,
+ * so a caller confirming the quote is told that such files can measure more pages than the range shows.
+ */
+function withUnboundedFiles<T extends { estimate: CostEstimate }>(quote: T, files: readonly QuoteFile[]): T {
+  const unbounded = files.filter((file) => !uploadMediaKind(file) && !quoteHighIsCeiling(file)).length;
+  if (unbounded === 0) return quote;
+  return {
+    ...quote,
+    estimate: {
+      ...quote.estimate,
+      unboundedFiles: unbounded,
+      basis: `${quote.estimate.basis}; the high end is not a ceiling for ${unbounded} Word, slide, sheet or EPUB file(s) quoted `
+        + "from their size alone (no file profile, or a sheet): files of repetitive content can measure more pages",
     },
   };
 }

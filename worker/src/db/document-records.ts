@@ -1,4 +1,4 @@
-import type { DerivedDocumentTitle, FileFacts } from "@docslurp/shared";
+import { piiWithholding, type DerivedDocumentTitle, type FileFacts, type PiiWithholding } from "@docslurp/shared";
 import type { Sql } from "postgres";
 
 import { assertParseSourceRecord, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
@@ -41,6 +41,17 @@ export class PostgresDocumentRecords {
           then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) > 0 as withholds
       from documents where id = ${documentId} and run_id = ${scope.runId} and org_id = ${scope.orgId}`;
     return row?.withholds ?? true;
+  }
+
+  /**
+   * The document's recorded PII withholding (packages/shared/src/pii-withholding.ts), so a step that runs after the PII
+   * stage keeps clean pages servable. A missing document, or one outside the scope, withholds everything (fail closed).
+   */
+  async documentPiiWithholding(scope: DocumentRowScope): Promise<PiiWithholding> {
+    const [row] = await this.sql<{ status: string | null; metadata: unknown; indexing_mode: string | null }[]>`
+      select status, indexing_mode, metadata #- '{pii,withheldArtifactUris}' as metadata from documents
+      where id = ${scope.documentId} and run_id = ${scope.runId} and org_id = ${scope.orgId}`;
+    return row ? piiWithholding({ status: row.status, metadata: row.metadata, indexingMode: row.indexing_mode }) : { scope: "document", reason: "missing-document" };
   }
 
   /**

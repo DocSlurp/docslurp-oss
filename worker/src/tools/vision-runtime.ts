@@ -1,4 +1,5 @@
-import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
+import { assertTenantModelBaseUrlAllowed, canonicalModelBaseUrl, defaultLocalModelBaseUrl, modelEndpointUrl, TenantModelEndpointRefusedError, tenantModelEndpointProblem, type TenantModelEndpointRefusal } from "@docslurp/shared";
+import { platformModelKey } from "../lib/platform-model-keys.js";
 import { assertLocalCliReaderAllowed } from "../lib/vm-only-parsing.js";
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
 import { activeCapabilityPools, poolMemberAutomaticRoute, poolMemberForModel, nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache, assertAutomaticModelCallAllowed, AutomaticCallRefusedError, prepareAutomaticCallPrices, reportAutomaticCallOutcome, visionAutomaticRoute } from "@docslurp/shared";
@@ -217,7 +218,8 @@ export interface VisionExecutionResult {
   costMetadata?: Record<string, unknown>;
   baseUrl: string | null;
   fallbackUsed: boolean;
-  fallbackReason: string | null;
+  /** Why the fallback served this result, as a stable code (never the primary's error text); null without one. */
+  fallbackReason: VisionFallbackReason | null;
   /**
    * The vision capability pool member that served the page (capability-pools.ts poolMemberId), when the served model is
    * a pool member: the fallback's when `fallbackUsed`. For per-page records.
@@ -294,6 +296,19 @@ export class VisionRouteRegionError extends Error {
     super(`vision page read refused: ${detail}`);
     this.name = "VisionRouteRegionError";
   }
+}
+
+/** Stable codes for why a vision read fell back, the only fallback detail kept on tenant-visible results. */
+export type VisionFallbackReason = "routing" | "timeout" | "unavailable" | "rejected" | "route-overrun" | "error";
+
+/** The `VisionFallbackReason` for a primary read's failure. Never the error's text. */
+export function visionFallbackReasonCode(error: unknown, signal?: AbortSignal): VisionFallbackReason {
+  if (findVisionGuardStop(error)?.reason === "route-overrun") return "route-overrun";
+  const outage = visionOutageReason(error, signal);
+  if (outage) return outage;
+  if (findProviderRoutingExclusion(error)) return "routing";
+  if (findVisionOutputRejected(error)) return "rejected";
+  return "error";
 }
 
 /**
@@ -473,7 +488,10 @@ export async function executeVisionRuntime(args: {
     }
     recordPoolFailover("vision", primaryMember, fallbackMember, failoverReason);
 
-    const fallbackReason = error instanceof Error ? error.message : String(error);
+    // The reason a tenant sees is a stable code; the primary's error text (it can quote the remote's response body)
+    // goes to the worker log only.
+    const fallbackReason = visionFallbackReasonCode(error, args.signal);
+    console.warn(`[vision-fallback] reason=${fallbackReason} from=${selected.provider} detail=${JSON.stringify((error instanceof Error ? error.message : String(error)).slice(0, 500))}`);
     // The primary's requests may have been billed (a rejected output, a stream cut off): kept for the caller to
     // record on the primary's own route, whatever the fallback does.
     const servedPrimary = findVisionServedRoute(error);
@@ -540,6 +558,9 @@ function servedRoute(
 function routeBaseUrl(route: Pick<VisionExecutionConfig, "runtime" | "baseUrl" | "provider">, cfg: Pick<Config, "openAiBaseUrl">): string | null {
   if (route.runtime === "local-cli" || route.provider === PRIVATE_MODEL_PROVIDER) return route.baseUrl;
   if (route.runtime === "remote-openai") return configuredOpenAiBaseUrl(cfg);
+  // A local server route (tenant-set or its default address): from the parsed URL, `localhost` pinned to 127.0.0.1.
+  const localDefault = defaultLocalModelBaseUrl(route.provider);
+  if (localDefault) return canonicalModelBaseUrl(route.baseUrl?.trim() || localDefault);
   return effectiveVisionBaseUrl(route.baseUrl, cfg);
 }
 
@@ -764,22 +785,27 @@ function readBoolean(value: string | undefined, fallback: boolean): boolean {
 }
 
 /**
- * The key a vision request carries: the OpenRouter key only to the official OpenRouter endpoint, the DeepInfra key
- * only to DeepInfra's official OpenAI-compatible endpoint, the OpenAI key only to the configured OpenAI base URL,
- * and no key anywhere else (loopback servers, local runtimes).
+ * The key a vision request carries (`platformModelKey`, the worker's one key resolver): the OpenRouter key only to
+ * OpenRouter's base URL, the DeepInfra key only to DeepInfra's, the OpenAI key only to the configured OpenAI base URL
+ * (each matched on origin plus path: scheme, host, port and path, with no user info, query or fragment), and no key
+ * anywhere else (loopback servers, local runtimes, private routes, any other host).
  */
 export function resolveVisionApiKey(billing: VisionRouteBilling, baseUrl: string | null, cfg: Pick<Config, "openRouterApiKey" | "openAiApiKey" | "deepInfraApiKey" | "openAiBaseUrl">): string {
-  if (billing === "openrouter") {
-    return baseUrl?.replace(/\/+$/, "") === OPENROUTER_BASE_URL ? cfg.openRouterApiKey : "";
-  }
-  if (billing === "deepinfra") {
-    return baseUrl?.replace(/\/+$/, "") === DEEPINFRA_VISION_BASE_URL ? cfg.deepInfraApiKey ?? "" : "";
-  }
-  if (billing === "openai") {
-    const configured = configuredOpenAiBaseUrl(cfg).replace(/\/+$/, "");
-    return (baseUrl ?? configured).replace(/\/+$/, "") === configured ? cfg.openAiApiKey : "";
-  }
+  if (billing === "openrouter" || billing === "deepinfra") return platformModelKey(billing, baseUrl, cfg);
+  // An OpenAI route with no base URL of its own is sent to the configured OpenAI base URL (`effectiveVisionBaseUrl`).
+  if (billing === "openai") return platformModelKey("openai", baseUrl ?? configuredOpenAiBaseUrl(cfg), cfg);
   return "";
+}
+
+/** Why the resolved local server route's base URL is refused (`assertTenantModelBaseUrlAllowed`), or null. */
+function resolvedLocalRouteProblem(route: VisionExecutionConfig, cfg: Pick<Config, "openAiBaseUrl">): TenantModelEndpointRefusal | null {
+  try {
+    assertTenantModelBaseUrlAllowed(route.provider, routeBaseUrl(route, cfg));
+    return null;
+  } catch (error) {
+    if (error instanceof TenantModelEndpointRefusedError) return error.code;
+    throw error;
+  }
 }
 
 function normalizeVisionConfig(
@@ -788,14 +814,33 @@ function normalizeVisionConfig(
   outputSchema?: Record<string, unknown> | null,
 ): VisionExecutionConfig {
   // Configs are validated (visionConfigSchema); a route built some other way is checked again before use.
-  assertTenantModelEndpointAllowed(vision.modelUri);
+  // Tenant endpoint admission (model-endpoints.ts): a disabled local endpoint is refused first; a URI the catalog
+  // refuses keeps its pricing refusal; any other endpoint refusal (a non-loopback base URL) follows.
+  const endpointProblem = tenantModelEndpointProblem(vision.modelUri);
+  if (endpointProblem === "tenant-local-endpoints-disabled") throw new TenantModelEndpointRefusedError(endpointProblem);
   const problem = visionModelUriProblem(vision.modelUri);
   if (problem) throw new UnpricedVisionRouteError(vision.modelUri, `is refused: ${problem}`);
+  if (endpointProblem) throw new TenantModelEndpointRefusedError(endpointProblem);
   if (vision.remoteFallbackModelUri) {
+    // The fallback is admitted here too, before the primary's request is sent, not only at failover. A refused fallback
+    // (a stale stored setting) never fails the primary's read: it is dropped with a logged code, and the primary runs
+    // with no fallback. Nothing is ever sent to it.
+    // A fallback the catalog refuses (unpriced, Pro/Ultra) is still refused outright, as before.
     const fallbackProblem = visionModelUriProblem(vision.remoteFallbackModelUri);
-    if (fallbackProblem) throw new UnpricedVisionRouteError(vision.remoteFallbackModelUri, `is refused: ${fallbackProblem}`);
+    const fallbackRefusal = tenantModelEndpointProblem(vision.remoteFallbackModelUri)
+      ?? (fallbackProblem ? null : resolvedLocalRouteProblem(resolveVisionRoute({ ...vision, modelUri: vision.remoteFallbackModelUri, remoteFallbackModelUri: null }), cfg));
+    if (fallbackRefusal) {
+      console.warn(`[vision-fallback] dropped refused fallback code=${fallbackRefusal}`);
+      vision = { ...vision, remoteFallbackModelUri: null };
+    } else if (fallbackProblem) {
+      throw new UnpricedVisionRouteError(vision.remoteFallbackModelUri, `is refused: ${fallbackProblem}`);
+    }
   }
   const selected = resolveVisionRoute(vision);
+  // The resolved route's own destination is judged too (its port included): a local server route without a baseUrl
+  // goes to the provider's default address, which the operator's port list may leave out.
+  const resolvedProblem = resolvedLocalRouteProblem(selected, cfg);
+  if (resolvedProblem) throw new TenantModelEndpointRefusedError(resolvedProblem);
   return {
     ...selected,
     baseUrl: routeBaseUrl(selected, cfg),
@@ -1195,10 +1240,7 @@ export function openRouterMaxPrice(price: VisionMaxPrice): { prompt: number; com
 }
 
 function resolveChatCompletionsUrl(baseUrl: string | null): string {
-  // Routes reach here with their effective base URL (`routeBaseUrl`); a direct caller without one gets OpenAI's.
-  const root = (baseUrl ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, "");
-  if (root.endsWith("/chat/completions")) {
-    return root;
-  }
-  return `${root}/chat/completions`;
+  // Routes reach here with their effective base URL (`routeBaseUrl`); a direct caller without one gets OpenAI's. Built
+  // from the parsed URL (shared modelEndpointUrl), never by appending to the raw text.
+  return modelEndpointUrl(baseUrl ?? DEFAULT_OPENAI_BASE_URL, "chat/completions");
 }

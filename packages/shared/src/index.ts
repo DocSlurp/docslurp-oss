@@ -43,6 +43,7 @@ export * from "./structured.js";
 export * from "./connectors.js";
 export * from "./artifacts.js";
 export * from "./pii.js";
+export * from "./pii-withholding.js";
 export * from "./temporal-connection.js";
 export * from "./vector-namespace.js";
 export * from "./summary-tree.js";
@@ -50,6 +51,7 @@ export * from "./summary-tree-job.js";
 
 // Sub-modules created during refactor
 export * from "./embedding.js";
+export * from "./model-endpoints.js";
 export * from "./perplexity-embeddings.js";
 export * from "./deferred-indexing.js";
 export * from "./page-vectors.js";
@@ -61,6 +63,9 @@ export * from "./page-equivalents.js";
 export * from "./page-table-routing.js";
 export * from "./file-formats.js";
 export * from "./file-sniff.js";
+export * from "./read-loop-contract.js";
+export * from "./read-loop.js";
+export * from "./read-map.js";
 export * from "./page-raster-routing.js";
 export * from "./page-cost-route.js";
 export * from "./text-layer-quality.js";
