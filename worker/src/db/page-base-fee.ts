@@ -84,6 +84,17 @@ export function pinRunPageBillingRules(state: RunArtifactsState): string {
 }
 
 /**
+ * Whether the run has no page billing pin (started by a release before the per-read rule). The rule-retirement release (DocSlurp/app
+ * issue 601) bills such a run like any other, but a worker of the release before it, completing the same run in a mixed fleet,
+ * still bills pages without text bytes Rich from page-facts rows; so page facts are not written for these runs (extract-markdown
+ * recordDopplerFactsEvidence) for one more release. Delete this and its caller in the release after the retirement ships, once no
+ * worker of the earlier release can complete a run.
+ */
+export function runHasNoPageBillingPin(state: RunArtifactsState): boolean {
+  return !state.artifactLedger.read(PAGE_BILLING_RULES_SLOT);
+}
+
+/**
  * What a terminal charge decided: `fastPages` it charged now, `ocrPages` and `richPages` already charged as they were read
  * (counted, not charged here; a page upgraded from OCR to Rich counts as Rich), the share of the fee this run pays and the
  * Fast credits it charged. `fastPagesOwed` is every Fast page the run's billed documents owe, `fastPagesCharged` what earlier
@@ -151,7 +162,7 @@ export async function recordPageBaseFee(
 ): Promise<RunPageCharges> {
   const multiplier = pageBaseFeeMultiplier(compilePipelinePlan(state.run.pipeline));
   let charges: RunPageCharges = { fastPages: 0, ocrPages: 0, richPages: 0, multiplier, credits: 0 };
-  if (!state.artifactLedger.read(PAGE_BILLING_RULES_SLOT)) {
+  if (runHasNoPageBillingPin(state)) {
     console.warn(`[page-charges] run=${state.run.id} has no page billing pin: billing its recorded reads and Fast for every other page`);
   }
   const runId = state.run.id;
