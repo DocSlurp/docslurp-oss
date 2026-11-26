@@ -1187,7 +1187,7 @@ export class PostgresRunLedger implements CheckpointStore {
       if (state) {
         // After the documents settle: only those still completed bill (the run is already failed, so its lease is released).
         const pageCharges = await recordPageBaseFee(client, state, { afterCommit }, { outcome: "failed", generation: owner.executionGeneration ?? null });
-        if (pageCharges.fastPages > 0 || (pageCharges.unmeasuredDocuments ?? 0) > 0) {
+        if (pageCharges.fastPages > 0 || pageCharges.unmeasuredDocuments > 0) {
           await client`update project_runs set stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb where id = ${runId}`;
         }
       }

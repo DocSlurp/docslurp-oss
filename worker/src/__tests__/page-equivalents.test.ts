@@ -79,7 +79,8 @@ async function documentRun(pages: number, mime = "application/pdf", facts: objec
 }
 async function billedFastPages(runId: string, documentId: string): Promise<number> {
   const state = WorkflowState.create(await store.loadRun(runId), [(await loadFixtureDocument(store, documentId))!]);
-  return (await recordPageBaseFee(sql(), state)).fastPages;
+  // What the document's Fast pages come to across every charge of the run (a repeated charge adds nothing to it).
+  return (await recordPageBaseFee(sql(), state)).fastPagesOwed;
 }
 
 /** A one-page PDF with `content` as its content stream. */

@@ -103,7 +103,7 @@ export function runHasNoPageBillingPin(state: RunArtifactsState): boolean {
  */
 export type RunPageCharges = {
   fastPages: number; ocrPages: number; richPages: number; multiplier: number; credits: number;
-  fastPagesOwed?: number; fastPagesCharged?: number; unmeasuredDocuments?: number;
+  fastPagesOwed: number; fastPagesCharged: number; unmeasuredDocuments: number;
 };
 
 /** How a run's execution generation ended: its terminal transaction (run-ledger finalizeRun) calls recordPageBaseFee. */
@@ -161,7 +161,7 @@ export async function recordPageBaseFee(
   terminal: PageBaseFeeTerminal = { outcome: "completed" },
 ): Promise<RunPageCharges> {
   const multiplier = pageBaseFeeMultiplier(compilePipelinePlan(state.run.pipeline));
-  let charges: RunPageCharges = { fastPages: 0, ocrPages: 0, richPages: 0, multiplier, credits: 0 };
+  let charges: RunPageCharges = { fastPages: 0, ocrPages: 0, richPages: 0, multiplier, credits: 0, fastPagesOwed: 0, fastPagesCharged: 0, unmeasuredDocuments: 0 };
   if (runHasNoPageBillingPin(state)) {
     console.warn(`[page-charges] run=${state.run.id} has no page billing pin: billing its recorded reads and Fast for every other page`);
   }
