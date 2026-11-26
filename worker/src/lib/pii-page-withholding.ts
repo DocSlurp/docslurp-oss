@@ -600,3 +600,22 @@ export function pageScopedTextVerified(bytes: Uint8Array | null, withholding: Pi
   return offsets.every((range, index) =>
     !isPageWithheld(withholding, index + 1) || isPiiWithheldPlaceholder(text.slice(range.start, range.end)));
 }
+
+/**
+ * The extraction contract of an unpaged document under section withholding: its whole-text fields (`markdown`,
+ * `rawText`) lose the sections that hold a match, as the Markdown slot does. Each field is scanned in its original
+ * form (`original`) and its matched sections are replaced there; a field with no match keeps its redacted form, and
+ * every other field keeps `redacted` (values replaced).
+ */
+export function applySectionsToContract(original: unknown, redacted: unknown, scan: (text: string) => { matches: readonly PiiMatch[] }): unknown {
+  if (!redacted || typeof redacted !== "object" || Array.isArray(redacted)) return redacted;
+  const source = original && typeof original === "object" && !Array.isArray(original) ? original as Record<string, unknown> : {};
+  const out: Record<string, unknown> = { ...(redacted as Record<string, unknown>) };
+  for (const field of ["markdown", "rawText"] as const) {
+    const text = source[field];
+    if (typeof text !== "string") continue;
+    const matches = scan(text).matches;
+    if (matches.length > 0) out[field] = withholdTextSections(text, matches).text;
+  }
+  return out;
+}

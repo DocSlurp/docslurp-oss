@@ -28,6 +28,7 @@ import { createPiiTextScanner, isStructuralKey, redactCanonicalDocument, redactJ
 import {
   applyPlanToCanonical,
   applyPlanToJson,
+  applySectionsToContract,
   applyPlanToText, withholdPagesThenRedact,
   locateMatches,
   mapTextMatchesToCanonical,
@@ -578,7 +579,9 @@ export class PiiDetectStage implements Stage {
         redactedArtifacts.push(html.slot);
       }
       if (contract && contractResult && (contractResult.matches.length > 0 || withholding)) {
-        const next = plan.scope === "pages" ? applyPlanToJson(plan, contractResult.value, isStructuralKey) : contractResult.value;
+        const next = plan.scope === "pages"
+          ? applyPlanToJson(plan, contractResult.value, isStructuralKey)
+          : plan.scope === "sections" ? applySectionsToContract(contract.value, contractResult.value, scan) : contractResult.value;
         await this.storage.putJson(contract.key, next);
         redactedArtifacts.push(contract.slot);
       }

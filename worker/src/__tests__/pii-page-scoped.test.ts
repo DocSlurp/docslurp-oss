@@ -71,7 +71,7 @@ function canonical(documentId: string, pageTexts: string[]): CanonicalDocument {
 }
 
 /** A PDF of `pageTexts.length` pages: Markdown with `\f` page breaks, canonical blocks per page, page images and figures. */
-function setup(action: PiiPolicy["action"], pageTexts: string[], options: { markdown?: string; documentId?: string; storage?: MemoryStore; canonicalBlocks?: boolean; patterns?: PiiPolicy["patterns"] } = {}) {
+function setup(action: PiiPolicy["action"], pageTexts: string[], options: { markdown?: string; documentId?: string; storage?: MemoryStore; canonicalBlocks?: boolean; patterns?: PiiPolicy["patterns"]; contract?: unknown } = {}) {
   const storage = options.storage ?? new MemoryStore();
   const sink = new RecordingSink();
   const documentId = options.documentId ?? "doc-1";
@@ -92,6 +92,11 @@ function setup(action: PiiPolicy["action"], pageTexts: string[], options: { mark
     [`${documentId}:doppler-figures`]: storage.uri(`${prefix}/doppler-figures/${documentId}/index.json`),
   };
   if (options.canonicalBlocks !== false) artifacts[`${documentId}:canonical-document`] = storage.uri(canonicalKey);
+  if (options.contract !== undefined) {
+    const contractKey = `${prefix}/contract/${documentId}.json`;
+    storage.objects.set(contractKey, JSON.stringify(options.contract));
+    artifacts[`${documentId}:extraction-contract`] = storage.uri(contractKey);
+  }
   pageTexts.forEach((_, index) => {
     const page = index + 1;
     artifacts[`${documentId}:page-${page}`] = storage.uri(`${prefix}/pages/${documentId}/page-${page}.png`);
@@ -320,6 +325,21 @@ describe("unpaged documents withhold the section holding the match", () => {
     expect(text).not.toContain(SSN);
     // Nothing written before the scan is served: page images and figures of the one page are withheld.
     expect(new Set(outcome(f).withheldArtifactUris).has(uri(f, "page-1"))).toBe(true);
+  });
+
+  it("the extraction contract's markdown and rawText lose the withheld section too (M8)", async () => {
+    const markdown = `# Intro\nWelcome.\n\n# Payroll\nSSN ${SSN} for Jane Roe.\n\n# Benefits\nDental and vision.\n`;
+    const contract = { documentId: "doc-1", markdown, rawText: markdown.replace(/# /g, ""), images: [], charts: [], tables: [], headers: [], links: [] };
+    const f = setup("block_indexing", [markdown], { canonicalBlocks: false, contract });
+    await f.stage.run(f.state);
+    expect(outcome(f)).toMatchObject({ scope: "sections", blocked: false });
+    const written = f.storage.json<{ markdown: string; rawText: string }>(`${f.prefix}/contract/${f.documentId}.json`);
+    for (const field of [written.markdown, written.rawText]) {
+      expect(field).not.toContain("Jane Roe");
+      expect(field).not.toContain(SSN);
+      expect(field).toContain("Dental and vision.");
+      expect(field).toContain(PII_WITHHELD_SECTION_TEXT);
+    }
   });
 });
 
