@@ -296,16 +296,7 @@ export const PAGE_CHARGE_METRICS: readonly BillableUnitMetric[] = [BILLABLE_UNIT
  * Pages a run measured above what admission priced and that no charge covers yet (the database's run_measured_pages,
  * migration 0190): Fast pages of paged documents, and frames of multi-frame images not yet charged as page reads.
  */
-export interface RunMeasuredPages {
-  fastPages: number;
-  ocrFrames: number;
-  /**
-   * Of a content-deduplicated copy's pages above intake, those its original's pages billed OCR (`ocrPages`) and Rich
-   * (`richPages`), dearest first (migration 20261126T0240). A copy reads nothing, so these are owed at completion. Absent: 0.
-   */
-  ocrPages?: number;
-  richPages?: number;
-}
+export interface RunMeasuredPages { fastPages: number; ocrFrames: number }
 
 /**
  * Credits a run owes for its measured pages once they bill (Fast at completion, OCR as frames are read), times the speed
@@ -313,39 +304,11 @@ export interface RunMeasuredPages {
  * negative counts are refused (thrown), never read as nothing owed.
  */
 export function runMeasuredPagesCredits(pages: RunMeasuredPages, speedBoost: boolean | undefined = false): number {
-  const ocrPages = pages.ocrPages ?? 0;
-  const richPages = pages.richPages ?? 0;
-  for (const value of [pages.fastPages, pages.ocrFrames, ocrPages, richPages]) {
+  for (const value of [pages.fastPages, pages.ocrFrames]) {
     if (!Number.isFinite(value) || value < 0) throw new Error(`invalid measured page count ${value}`);
   }
-  const ocr = pages.ocrFrames + ocrPages;
-  const credits = (pages.fastPages > 0 ? pageCredits("fast", pages.fastPages) : 0) + (ocr > 0 ? pageCredits("ocr", ocr) : 0)
-    + (richPages > 0 ? pageCredits("rich", richPages) : 0);
+  const credits = (pages.fastPages > 0 ? pageCredits("fast", pages.fastPages) : 0) + (pages.ocrFrames > 0 ? pageCredits("ocr", pages.ocrFrames) : 0);
   return credits * speedBoostMultiplier(speedBoost);
-}
-
-const DEDUP_COPIES_ON = new Set(["", "1", "true", "on", "yes"]);
-const DEDUP_COPIES_OFF = new Set(["0", "false", "off", "no"]);
-let dedupCopiesWarned: string | null = null;
-
-/**
- * Whether content-deduplicated copies (documents.deduped_from_document_id: intake reused an earlier, completed conversion
- * of the same bytes in the same organization) bill and are spend-checked like originals: their original's measured pages,
- * at the classes those pages billed. The reuse is the platform's saving, never a discount. `DOCSLURP_BILL_DEDUP_COPIES`:
- * unset, empty, `1`, `true`, `on` or `yes` is on; `0`, `false`, `off` or `no` restores the earlier rule (copies bill nothing
- * and are left out of spend checks). Any other value is a misconfiguration: it is read as on (the documented default, so a
- * typo never makes copies free) and logged once. The worker (completion charge, spend check) and the API (spend-paused
- * resume sweep) read the same variable.
- */
-export function dedupCopiesBill(env: Record<string, string | undefined> = process.env): boolean {
-  const raw = env.DOCSLURP_BILL_DEDUP_COPIES ?? "";
-  const value = raw.trim().toLowerCase();
-  if (DEDUP_COPIES_OFF.has(value)) return false;
-  if (!DEDUP_COPIES_ON.has(value) && dedupCopiesWarned !== value) {
-    dedupCopiesWarned = value;
-    console.error(`[billing] DOCSLURP_BILL_DEDUP_COPIES=${JSON.stringify(raw.slice(0, 32))} is not a recognized value (1/0, true/false, on/off, yes/no): copies bill (the default)`);
-  }
-  return true;
 }
 
 /**

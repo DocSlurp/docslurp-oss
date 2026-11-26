@@ -10,8 +10,6 @@
  */
 import {
   PAGE_READ_METRICS,
-  dedupCopiesBill,
-  pageCredits,
   pageUpgradeCredits,
   runMeasuredPagesCredits,
   speedBoostMultiplier,
@@ -60,9 +58,8 @@ export interface PageBasisLedger {
   /**
    * The one run-wide sum every spend check weighs: Fast pages of the run's paged, non-media documents above their intake count
    * and frames of its multi-frame images no page-read charge covers, over every document except `excludeDocumentId` (whose
-   * pages the caller adds from its own state), and that document's charged pages. Failed documents never bill and are not
-   * counted; content-deduplicated copies count at their recorded classes (`ocrPages`, `richPages`) unless the copy billing
-   * flag is off. `readMetrics` are the page-read charge metrics.
+   * pages the caller adds from its own state), and that document's charged pages. Failed and deduplicated documents never bill
+   * and are not counted. `readMetrics` are the page-read charge metrics.
    */
   runMeasurements(runId: string, excludeDocumentId: string | null, readMetrics: readonly string[]): Promise<RunMeasurements>;
   /**
@@ -147,20 +144,6 @@ export interface PageBasisState {
 export function intakePagesOf(document: Pick<Document, "pageCount" | "intakePageCount">): number {
   const intake = document.intakePageCount ?? document.pageCount;
   return Math.max(1, Math.trunc(Number(intake)) || 1);
-}
-
-/**
- * Whether a document is a content-deduplicated copy: it points at the document whose conversion it reuses, or carries the
- * billing facts intake recorded from it (its original may have been deleted since, which clears the pointer).
- */
-export function isDedupCopy(document: Pick<Document, "dedupedFromDocumentId" | "copyOcrPages" | "copyRichPages" | "copyMediaPages">): boolean {
-  return Boolean(document.dedupedFromDocumentId)
-    || document.copyOcrPages != null || document.copyRichPages != null || document.copyMediaPages != null;
-}
-
-function isMediaDocument(document: Pick<Document, "mimeType">): boolean {
-  const mime = (document.mimeType ?? "").split(";")[0]!.trim().toLowerCase();
-  return mime.startsWith("audio/") || mime.startsWith("video/");
 }
 
 /**
@@ -256,44 +239,6 @@ export class PageBasis {
       throw unfunded(document, outcome.paused, owed.credits, intakePagesOf(document));
     }
     return { checkedPages: owed.pages };
-  }
-
-  /**
-   * Authorize the run's content-deduplicated copies among `documents`. A copy reads and measures nothing (intake seeded its
-   * checkpoints from its original), so no measuring stage authorizes its pages, yet the completion charge bills them
-   * (db/page-base-fee.ts). Called by the first stage of every run (format-detect), on every attempt: when a copy's pages
-   * stand above what admission priced, or it is an audio or video copy with media pages, the balance is checked once for
-   * everything the run owes that no charge covers yet (the run-wide sum, copies included at their recorded classes), the
-   * copies' media pages and the charges buffered in this activity. An unfunded run is paused (UnfundedPagesError) exactly as
-   * an original's measured pages pause it; nothing is charged here. Off with the copy billing flag (copies bill nothing).
-   */
-  async authorizeCopies(documents: readonly Document[]): Promise<{ checkedPages: number } | null> {
-    const copies = documents.filter(isDedupCopy);
-    if (copies.length === 0 || !dedupCopiesBill()) return null;
-    let mediaPages = 0;
-    let above = false;
-    for (const copy of copies) {
-      if (isMediaDocument(copy)) {
-        mediaPages += Math.max(0, Math.trunc(Number(copy.copyMediaPages)) || 0);
-        continue;
-      }
-      const measured = Math.max(Number(copy.billingPages) || 0, Math.trunc(Number(copy.pageCount)) || 0);
-      if (measured > intakePagesOf(copy)) above = true;
-    }
-    if (!above && mediaPages === 0) return null;
-    const run = this.chargeableRun();
-    const all = await this.ledger.runMeasurements(run.id, null, PAGE_READ_METRICS);
-    const credits = runMeasuredPagesCredits(all, this.speedBoost())
-      + (mediaPages > 0 ? pageCredits("rich", mediaPages) * this.boost() : 0)
-      + this.state.usageLedger.pendingBillableCents;
-    const pages = all.fastPages + all.ocrFrames + (all.ocrPages ?? 0) + (all.richPages ?? 0) + mediaPages;
-    if (!(credits > 0)) return { checkedPages: 0 };
-    const outcome = await this.checkCharge(run, credits);
-    if (outcome.paused || outcome.blocked) {
-      console.warn(`[page-auth] run=${run.id} stopped: ${copies.length} deduplicated copies; ${pages} pages above intake owe ${credits.toFixed(2)} credits more than the balance holds (paused=${outcome.paused})`);
-      throw new UnfundedPagesError(`Credits do not cover the pages of this run's deduplicated copies; run ${outcome.paused ? "paused" : "stopped"}`, outcome.paused, credits, 0);
-    }
-    return { checkedPages: pages };
   }
 
   /**
@@ -416,8 +361,8 @@ export class PageBasis {
   private async runOwed(document: Document, intake: number): Promise<{ credits: number; pages: number }> {
     const others = await this.ledger.runMeasurements(this.state.run.id, document.id, PAGE_READ_METRICS);
     const own = documentMeasuredPages(document, Math.max(0, Number(others.documentChargedPages) || 0), intake);
-    const total = { fastPages: others.fastPages + own.fastPages, ocrFrames: others.ocrFrames + own.ocrFrames, ocrPages: others.ocrPages ?? 0, richPages: others.richPages ?? 0 };
-    return { credits: runMeasuredPagesCredits(total, this.speedBoost()), pages: total.fastPages + total.ocrFrames + total.ocrPages + total.richPages };
+    const total = { fastPages: others.fastPages + own.fastPages, ocrFrames: others.ocrFrames + own.ocrFrames };
+    return { credits: runMeasuredPagesCredits(total, this.speedBoost()), pages: total.fastPages + total.ocrFrames };
   }
 
   /** What the run owes for measured pages no charge covers yet, over every document (durable, run_measured_pages). */

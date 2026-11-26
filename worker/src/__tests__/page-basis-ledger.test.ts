@@ -146,17 +146,13 @@ describe("PageBasis over Postgres", () => {
     await state.pageBasis.record(pdf, { kind: "page-count", pages: 10 });
     expect(await row("pdf")).toMatchObject({ page_count: 10, page_count_source: "counted" });
     expect(pdf).toMatchObject({ pageCount: 10, pageCountSource: "counted" });
-    // One run-wide sum: the PDF's 7 Fast pages, the TIFF's 29 uncharged frames and the deduplicated copy's 27 pages above its
-    // intake (copies bill at completion, migration 20261126T0240); the failed document and another run's are not counted, and
-    // the excluded document is left for the caller.
+    // One run-wide sum: the PDF's 7 Fast pages and the TIFF's 29 uncharged frames; the failed document, the deduplicated copy
+    // and another run's are not counted, and the excluded document is left for the caller.
     await db.exec(`update documents set page_count = 30 where id in ('tiff', 'failed', 'other-run', 'copy')`);
-    try {
-      expect(await store.pageBasisLedger.runMeasurements("run1", "none", PAGE_READ_METRICS)).toEqual({ fastPages: 34, ocrFrames: 29, ocrPages: 0, richPages: 0, documentChargedPages: 0 });
-      expect(await store.pageBasisLedger.runMeasurements("run1", "pdf", PAGE_READ_METRICS)).toEqual({ fastPages: 27, ocrFrames: 29, ocrPages: 0, richPages: 0, documentChargedPages: 0 });
-    } finally {
-      await db.exec(`update documents set page_count = 1 where id in ('tiff', 'failed', 'other-run')`);
-      await db.exec(`update documents set page_count = 3 where id = 'copy'`);
-    }
+    expect(await store.pageBasisLedger.runMeasurements("run1", "none", PAGE_READ_METRICS)).toEqual({ fastPages: 7, ocrFrames: 29, documentChargedPages: 0 });
+    expect(await store.pageBasisLedger.runMeasurements("run1", "pdf", PAGE_READ_METRICS)).toEqual({ fastPages: 0, ocrFrames: 29, documentChargedPages: 0 });
+    await db.exec(`update documents set page_count = 1 where id in ('tiff', 'failed', 'other-run')`);
+    await db.exec(`update documents set page_count = 3 where id = 'copy'`);
   }, 60_000);
 
   it("records an Office count as billing pages and leaves page_count alone", async () => {

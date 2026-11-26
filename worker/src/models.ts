@@ -93,18 +93,6 @@ export interface Document {
    * from before 0130, read as pageCount.
    */
   intakePageCount?: number | null;
-  /**
-   * The completed document of the same organization whose conversion this one reuses (documents.deduped_from_document_id):
-   * set on a content-deduplicated copy, null once that document is deleted.
-   */
-  dedupedFromDocumentId?: string | null;
-  /**
-   * A copy's billing classes, recorded at intake from its original (migration 20261126T0240): of its billing pages, those
-   * that bill OCR and Rich, and an audio or video copy's media Rich pages. Null on originals and on copies made before them.
-   */
-  copyOcrPages?: number | null;
-  copyRichPages?: number | null;
-  copyMediaPages?: number | null;
   /** What intake sniffed the bytes to be (documents.file_facts); absent for documents ingested before it existed. */
   fileFacts?: import("@docslurp/shared").FileFacts | null;
   /** Source size in bytes (documents.file_size), when the loader read it. */

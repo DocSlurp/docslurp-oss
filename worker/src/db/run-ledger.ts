@@ -105,10 +105,6 @@ type DocumentRow = {
   billing_pages_method?: string | null;
   page_count_source?: string | null;
   intake_page_count?: number | null;
-  deduped_from_document_id?: string | null;
-  copy_ocr_pages?: number | null;
-  copy_rich_pages?: number | null;
-  copy_media_pages?: number | null;
   file_facts?: import("@docslurp/shared").FileFacts | null;
   file_size?: string | number | null;
   created_at: string | Date;
@@ -2259,13 +2255,6 @@ function mapRun(row: ProjectRunRow): ProjectRun {
   };
 }
 
-/** A stored non-negative count, or null (absent, null or not a count: never read as a number it is not). */
-function optionalCount(value: number | string | null | undefined): number | null {
-  if (value === null || value === undefined) return null;
-  const n = Number(value);
-  return Number.isSafeInteger(n) && n >= 0 ? n : null;
-}
-
 function mapDocument(row: DocumentRow): Document {
   const document: Document = {
     id: row.id,
@@ -2283,10 +2272,6 @@ function mapDocument(row: DocumentRow): Document {
     billingPagesMethod: row.billing_pages_method ?? null,
     pageCountSource: row.page_count_source === "assumed" || row.page_count_source === "counted" ? row.page_count_source : null,
     intakePageCount: row.intake_page_count === null || row.intake_page_count === undefined ? null : Number(row.intake_page_count),
-    dedupedFromDocumentId: row.deduped_from_document_id ?? null,
-    copyOcrPages: optionalCount(row.copy_ocr_pages),
-    copyRichPages: optionalCount(row.copy_rich_pages),
-    copyMediaPages: optionalCount(row.copy_media_pages),
     fileFacts: row.file_facts ?? null,
     ...(row.file_size === null || row.file_size === undefined ? {} : { sourceBytes: Number(row.file_size) }),
     createdAt: toDate(row.created_at),

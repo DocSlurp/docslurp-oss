@@ -23,9 +23,6 @@ export interface MemoryPageBasisDocument {
   billingPages: number | null;
   billingPagesMethod: string | null;
   dedupedFromDocumentId: string | null;
-  /** A copy's recorded billing classes (migration 20261126T0240); null on originals and older copies. */
-  copyOcrPages: number | null;
-  copyRichPages: number | null;
   /** Per-page equivalents above one page (document_page_facts). */
   facts: Map<number, { text: number | null; area: number | null }>;
   /** Distinct pages a page-read charge of the run already covers (usage_attribution). */
@@ -78,9 +75,7 @@ export class MemoryPageBasisLedger implements PageBasisLedger {
         intakePageCount: document.intakePageCount ?? null,
         billingPages: document.billingPages ?? null,
         billingPagesMethod: document.billingPagesMethod ?? null,
-        dedupedFromDocumentId: document.dedupedFromDocumentId ?? null,
-        copyOcrPages: document.copyOcrPages ?? null,
-        copyRichPages: document.copyRichPages ?? null,
+        dedupedFromDocumentId: (document as { dedupedFromDocumentId?: string | null }).dedupedFromDocumentId ?? null,
         facts: new Map(),
         chargedPages: 0,
       });
@@ -90,14 +85,11 @@ export class MemoryPageBasisLedger implements PageBasisLedger {
 
   private own(runId: string, documentId: string): MemoryPageBasisDocument | null {
     const row = this.documents.get(documentId);
-    return row && row.runId === runId && !isCopyRow(row) ? row : null;
+    return row && row.runId === runId && !row.dedupedFromDocumentId ? row : null;
   }
 
-  /** Copies count (copy billing on, the default) or are left out (`includeCopies` false), as the SQL's p_include_copies. */
-  includeCopies = true;
-
   private ofRun(runId: string): MemoryPageBasisDocument[] {
-    return [...this.documents.values()].filter((row) => row.runId === runId && (this.includeCopies || !isCopyRow(row)));
+    return [...this.documents.values()].filter((row) => row.runId === runId && !row.dedupedFromDocumentId);
   }
 
   async setPageCount(runId: string, documentId: string, pages: number): Promise<boolean> {
@@ -159,37 +151,24 @@ export class MemoryPageBasisLedger implements PageBasisLedger {
     return row.billingPages;
   }
 
-  /** The one run-wide sum, by run_measured_pages' rules (migrations 0190 and 20261126T0240). */
+  /** The one run-wide sum, by run_measured_pages' rules (migration 0190). */
   async runMeasurements(runId: string, excludeDocumentId: string | null, _readMetrics: readonly string[]): Promise<RunMeasurements> {
     let fastPages = 0;
     let ocrFrames = 0;
-    let ocrPages = 0;
-    let richPages = 0;
     let documentChargedPages = 0;
+    // ofRun leaves deduplicated copies out, as the SQL does.
     for (const row of this.ofRun(runId)) {
       if (row.status === "failed") continue;
       const mime = row.mimeType.split(";")[0]!.trim().toLowerCase();
-      const copy = isCopyRow(row);
-      const charged = mime.startsWith("image/") && row.pageCount > 1 && !copy ? Math.min(row.chargedPages, row.pageCount) : 0;
+      const charged = mime.startsWith("image/") && row.pageCount > 1 ? Math.min(row.chargedPages, row.pageCount) : 0;
       if (row.id === excludeDocumentId) { documentChargedPages = charged; continue; }
-      if (copy) {
-        if (mime.startsWith("audio/") || mime.startsWith("video/")) continue;
-        // A copy's pages above intake, dearest first by its recorded classes.
-        const above = Math.max(0, (row.billingPages ?? row.pageCount) - (row.intakePageCount ?? row.pageCount));
-        const rich = Math.min(above, Math.max(0, row.copyRichPages ?? 0));
-        const ocr = Math.min(above - rich, Math.max(0, row.copyOcrPages ?? 0));
-        richPages += rich;
-        ocrPages += ocr;
-        fastPages += above - rich - ocr;
-        continue;
-      }
       if (mime.startsWith("image/")) {
         if (row.pageCount > 1) ocrFrames += Math.max(0, row.pageCount - Math.max(1, row.intakePageCount ?? row.pageCount, charged));
       } else if (!mime.startsWith("audio/") && !mime.startsWith("video/")) {
         fastPages += Math.max(0, (row.billingPages ?? row.pageCount) - (row.intakePageCount ?? row.pageCount));
       }
     }
-    return { fastPages, ocrFrames, ocrPages, richPages, documentChargedPages };
+    return { fastPages, ocrFrames, documentChargedPages };
   }
 
   async checkCharge(run: PageBasisRun, credits: number): Promise<SpendOutcome> {
@@ -258,8 +237,4 @@ export function memoryPageBasis(
   const fullRun = { orgId: "org-1", userId: "user-1", pagesTotal: 0, pipeline: { ...defaultPipelineFeatures }, ...run } as ProjectRun;
   const ledger = new MemoryPageBasisLedger(options).seed(documents);
   return { pageBasis: new PageBasis({ run: fullRun, usageLedger: { pendingBillableCents: 0 } }, ledger), ledger, run: fullRun };
-}
-
-function isCopyRow(row: Pick<MemoryPageBasisDocument, "dedupedFromDocumentId" | "copyOcrPages" | "copyRichPages">): boolean {
-  return row.dedupedFromDocumentId !== null || row.copyOcrPages !== null || row.copyRichPages !== null;
 }
