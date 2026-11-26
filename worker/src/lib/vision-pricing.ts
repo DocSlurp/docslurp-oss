@@ -3,6 +3,8 @@ import {
   DEEPINFRA_VISION_BASE_URL,
   DEFAULT_OPENROUTER_VISION_MODEL,
   isLoopbackModelBaseUrl,
+  normalizedModelBaseUrl,
+  OPENROUTER_BASE_URL,
   isProhibitedPremiumModelId,
   PRIVATE_MODEL_PROVIDER,
   VISION_MAX_OUTPUT_USD_PER_MILLION,
@@ -140,14 +142,13 @@ function priceVisionRouteTokens(
     (usage.inputTokens / 1000) * cfg.costPer1kInputTokens + (usage.outputTokens / 1000) * cfg.costPer1kOutputTokens;
 }
 
-/** True only for an `openrouter.ai` URL (hostname equality, never a substring match). */
+/**
+ * True only for OpenRouter's own base URL (`OPENROUTER_BASE_URL`), compared exactly as the key resolver compares it
+ * (`platformKeyForDestination`: scheme, host, port and path, no user info, query or fragment), so a destination is
+ * billed as OpenRouter only where it would carry the OpenRouter key.
+ */
 export function isOpenRouterBaseUrl(baseUrl: string | null): boolean {
-  if (!baseUrl) return false;
-  try {
-    return new URL(baseUrl).hostname.toLowerCase() === "openrouter.ai";
-  } catch {
-    return false;
-  }
+  return Boolean(baseUrl) && sameBaseUrl(baseUrl!, OPENROUTER_BASE_URL);
 }
 
 /**
@@ -199,14 +200,9 @@ export function readDeepInfraVisionCharge(model: string, usage: unknown): Vision
 
 /** True when two base URLs name the same endpoint (case-insensitive origin, trailing slashes ignored). */
 export function sameBaseUrl(a: string, b: string): boolean {
-  try {
-    const left = new URL(a);
-    const right = new URL(b);
-    return left.origin.toLowerCase() === right.origin.toLowerCase() &&
-      left.pathname.replace(/\/+$/, "") === right.pathname.replace(/\/+$/, "") && !left.search && !right.search;
-  } catch {
-    return false;
-  }
+  // The key resolver's comparison (shared normalizedModelBaseUrl): user info, a query or a fragment never match.
+  const left = normalizedModelBaseUrl(a);
+  return left !== null && left === normalizedModelBaseUrl(b);
 }
 
 export function isBilledVisionRoute(billing: VisionRouteBilling): boolean {

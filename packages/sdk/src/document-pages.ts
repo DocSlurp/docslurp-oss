@@ -21,6 +21,10 @@ export type ImageManifestRecord = {
 export type DocumentPreviewPage = {
   id: string; imageUrl: string; pageNumber: number | null; label: string;
   detail: string | null; widthPx: number | null; heightPx: number | null;
+  /** The project's PII policy withholds this page: show a placeholder, never request its image. */
+  withheld?: boolean;
+  /** Why, when `withheld`: "Page 3 withheld: contains an email address." (categories only). Absent from older servers. */
+  withheldReason?: string;
 };
 
 function isImageArtifact(artifact: DocumentArtifactEntry) {

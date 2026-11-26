@@ -3691,6 +3691,30 @@ export const documentPageExtracts = pgTable("document_page_extracts", {
   uniqueIndex("document_page_extracts_one_final_idx").on(table.documentId, table.pageNumber).where(sql`is_final`),
 ]);
 
+/**
+ * Operator-only PII findings (migration 20261126T0225): per withheld page (0: no page) and category, the detector's
+ * confidence, or null with the rule's validation basis. No tenant-facing route or serializer reads this table.
+ */
+export const piiPageFindings = pgTable("pii_page_findings", {
+  documentId: text("document_id").notNull(),
+  orgId: text("org_id").notNull(),
+  projectId: text("project_id").notNull(),
+  runId: text("run_id").notNull(),
+  pageNumber: integer("page_number").notNull(),
+  patternType: text("pattern_type").notNull(),
+  detector: text().notNull(),
+  validation: text().notNull(),
+  confidence: real(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.documentId, table.pageNumber, table.patternType], name: "pii_page_findings_pkey" }),
+  foreignKey({
+    columns: [table.documentId, table.projectId, table.orgId],
+    foreignColumns: [documents.id, documents.projectId, documents.orgId],
+    name: "pii_page_findings_document_id_fkey",
+  }).onDelete("cascade").onUpdate("cascade"),
+]);
+
 /** Whether a document's Markdown is committed and how far its images got (migration 0141); one row per document. */
 export const documentExtractionLevels = pgTable("document_extraction_levels", {
   documentId: text("document_id").primaryKey().notNull(),

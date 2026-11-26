@@ -44,6 +44,30 @@ export type DocumentVersionChangelog = {
   additions: DocumentVersionChangelogEntry[]; deletions: DocumentVersionChangelogEntry[];
   rewrites: DocumentVersionChangelogEntry[]; contradictions: DocumentVersionChangelogEntry[];
 };
+/**
+ * A kind of PII the project's policy detected: a stable category id (`"email"`, `"credit-card"`, `"ssn"`, ...) and a
+ * short label (`"an email address"`). Never the matched text.
+ */
+export type DocumentPiiCategory = { id: string; label: string };
+export type DocumentPiiWithheldPage = {
+  page: number;
+  /** Empty when the document was processed before types were recorded. */
+  types: DocumentPiiCategory[];
+  /** "Page 3 withheld: contains a payment card number and an email address." */
+  message: string;
+};
+export type DocumentPiiWithheld = {
+  scope: "none" | "pages" | "sections" | "document";
+  withheldPages: number[];
+  withheldPageCount: number;
+  withheldSectionCount: number;
+  /** Kinds of PII detected in what was withheld. Absent from older servers; empty when not recorded. */
+  types?: DocumentPiiCategory[];
+  /** Per withheld page (page scope). Absent from older servers. */
+  pages?: DocumentPiiWithheldPage[];
+  /** "2 pages withheld for privacy (pages 3, 7): contains an email address". */
+  message: string | null;
+};
 /** Stage diagnostics retain the API's database column names. */
 export type DocumentViewerStage = {
   stage_name: string; status: string; attempts: number;
@@ -59,6 +83,12 @@ export type DocumentViewerPayload = {
   artifacts: DocumentArtifactEntry[];
   source: DocumentSourceEntry;
   pageStats: { pageCount: number; chunkCount: number; pageTextCount: number };
+  /**
+   * What the project's PII policy withheld: `pages` (the rest of the document is served; these pages' text, images and
+   * figures are not), `sections` (an unpaged document), `document` (all of it) or `none`. Page numbers and counts
+   * only, never the withheld content. Absent from older servers.
+   */
+  piiWithheld?: DocumentPiiWithheld;
   /** The ingest version that produced the document against the workspace's current one. */
   ingest?: IngestStatus;
   /** Whether this caller may reprocess or change the document (edit access to its project); show Reprocess and Retry only then. */

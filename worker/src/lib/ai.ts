@@ -1,6 +1,6 @@
 import { privateChatLayout } from "@docslurp/shared/org-prompt-salt";
 import { currentProviderPolicy } from "./provider-rate-limit.js";
-import { speedBoostModel, assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
+import { noRedirectFetch, speedBoostModel, assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -154,7 +154,8 @@ export async function generateOpenRouterText(args: {
       }),
     },
     async () => {
-      const accounting = createOpenRouterUsageCapture();
+      // Carries the OpenRouter key: never follows a redirect.
+      const accounting = createOpenRouterUsageCapture(noRedirectFetch());
       const provider = createOpenAI({
         fetch: createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch), { restrictedFallback: true }), settings.reasoningEffort ?? "none"),
         apiKey: args.apiKey,
@@ -207,7 +208,7 @@ export async function generateAnthropicText(args: {
     },
     async () => {
       const provider = createAnthropic({
-        fetch: instrumentFetch("anthropic", "chat"),
+        fetch: instrumentFetch("anthropic", "chat", noRedirectFetch()),
         apiKey: args.apiKey,
       });
       const result = await generateText({

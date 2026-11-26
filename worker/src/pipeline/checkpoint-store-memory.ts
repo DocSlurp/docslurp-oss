@@ -3,7 +3,7 @@
  * database. Each records what it was asked to write so a test can assert on it; none models the Postgres adapters' SQL. Build
  * a whole store with `memoryCheckpointStore(overrides)` and replace only the ports or checkpoints a test is about.
  */
-import type { DerivedDocumentTitle, FileFacts, PrivacyAuditEntry } from "@docslurp/shared";
+import type { DerivedDocumentTitle, FileFacts, PiiWithholding, PrivacyAuditEntry } from "@docslurp/shared";
 
 import type { DocumentAssets } from "../db/document-asset-ledger.js";
 import type { DocumentContentWriter, RunScope } from "../db/document-content.js";
@@ -126,6 +126,8 @@ export interface MemoryDocumentRecord {
   /** The document's PII outcome withholds artifacts (it redacted or blocked). */
   piiWithholds?: boolean;
   withheldArtifactUris?: string[];
+  /** The recorded page-scoped withholding (documentPiiWithholding); unset reads as none, or as the whole document when piiWithholds. */
+  piiWithholding?: PiiWithholding;
 }
 
 /** Document rows by id. A read or write outside the document's run or organization matches no row. */
@@ -161,6 +163,13 @@ export class MemoryDocumentRecords implements DocumentRecords {
     const row = this.row(scope);
     if (!row) return true;
     return row.piiWithholds === true || (row.withheldArtifactUris?.length ?? 0) > 0;
+  }
+
+  /** A missing document withholds everything (fail closed), as the Postgres adapter's does. */
+  async documentPiiWithholding(scope: DocumentRowScope): Promise<PiiWithholding> {
+    const row = this.row(scope);
+    if (!row) return { scope: "document", reason: "missing-document" };
+    return row.piiWithholding ?? (row.piiWithholds ? { scope: "document", reason: "pii-blocked" } : { scope: "none" });
   }
 
   /** Throws when the document has no PII outcome to add to (piiWithholds unset). */

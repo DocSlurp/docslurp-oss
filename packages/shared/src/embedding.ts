@@ -3,6 +3,10 @@ import { assertNoAutomaticSelectionDenied } from "./automatic-model-selection.js
 import { lookupPrivateModelRoute, parsePrivateModelUri, PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
 import { hostedModelsAllowed } from "./private-model-mode.js";
 import { embeddingSpaceUri, type ModelCallConfig } from "./model-provenance.js";
+import { defaultLocalModelBaseUrl, loopbackModelBaseUrlProblem, tenantModelEndpointRefusalMessage } from "./model-endpoints.js";
+
+// Endpoint admission lives in model-endpoints.ts; these names stay importable from here for existing callers.
+export { assertTenantModelEndpointAllowed, isLoopbackModelBaseUrl } from "./model-endpoints.js";
 
 export const supportedEmbeddingModels = [
   "text-embedding-3-small",
@@ -532,10 +536,7 @@ export function resolveEmbeddingRoute(config: EmbeddingConfig) {
   }
   const known = embeddingModelCatalogByUri[embeddingModelBaseUri(config.modelUri)];
   const openAiCompatibleLocal = ["ollama", "vllm", "lmstudio"].includes(parsed.provider);
-  const defaultBaseUrl =
-    parsed.provider === "ollama" ? "http://127.0.0.1:11434/v1" :
-      parsed.provider === "vllm" ? "http://127.0.0.1:8000/v1" :
-        parsed.provider === "lmstudio" ? "http://127.0.0.1:1234/v1" : null;
+  const defaultBaseUrl = defaultLocalModelBaseUrl(parsed.provider);
   // Explicit project dimensions; only these are sent as a request parameter to
   // OpenAI-compatible servers that support Matryoshka truncation (e.g. vLLM).
   const requestedDimensions = config.dimensions;
@@ -1057,7 +1058,8 @@ export function visionModelUriProblem(uri: string): string | null {
   const baseUrl = params.get("baseUrl");
   if (baseUrl !== null) {
     if (!(LOCAL_BASE_URL_PROVIDERS as readonly string[]).includes(provider)) return "baseUrl overrides are only supported for local model providers";
-    if (!isLoopbackModelBaseUrl(baseUrl)) return "Local model baseUrl must use a loopback host";
+    const shape = loopbackModelBaseUrlProblem(baseUrl);
+    if (shape) return tenantModelEndpointRefusalMessage(shape);
   }
   if (provider === PRIVATE_MODEL_PROVIDER) return null;
   if ((LOCAL_VISION_PROVIDERS as readonly string[]).includes(provider)) return null;
@@ -1084,13 +1086,27 @@ export const DEFAULT_VISION_PROFILE = "good-fast-hosted" satisfies VisionProfile
 
 export const visionProfileKeySchema = z.enum([
   "cheapest-local",
-  "fastest-local",
-  "good-fast-local",
   "cheapest-hosted",
   "good-fast-hosted",
   "open-weights-hosted",
 ]);
 export type VisionProfileKey = z.infer<typeof visionProfileKeySchema>;
+
+/**
+ * Retired vision profiles (2026-11-26) and the nearest current profile each reads as. Stored projects and runs that
+ * name one keep working: the profile is rewritten on read, and an explicit stored `modelUri` is kept as is.
+ */
+export const RETIRED_VISION_PROFILES = {
+  "fastest-local": "cheapest-local",
+  "good-fast-local": "cheapest-local",
+} as const satisfies Record<string, VisionProfileKey>;
+
+/** The current profile a retired vision profile name maps to, or undefined for any other value. */
+export function retiredVisionProfile(profile: unknown): VisionProfileKey | undefined {
+  return typeof profile === "string" && Object.hasOwn(RETIRED_VISION_PROFILES, profile)
+    ? RETIRED_VISION_PROFILES[profile as keyof typeof RETIRED_VISION_PROFILES]
+    : undefined;
+}
 
 export const visionProfileCatalog = {
   "cheapest-local": {
@@ -1101,26 +1117,6 @@ export const visionProfileCatalog = {
       profile: "cheapest-local",
       target: "local",
       modelUri: "llm://local-cli/microsoft/Florence-2-small-ft",
-    },
-  },
-  "fastest-local": {
-    label: "Fastest local",
-    description: "Compact Qwen vision route for a local vLLM runtime.",
-    tags: ["speed", "local", "small"],
-    config: {
-      profile: "fastest-local",
-      target: "local",
-      modelUri: "llm://vllm/Qwen/Qwen2-VL-2B-Instruct",
-    },
-  },
-  "good-fast-local": {
-    label: "Good + fast local",
-    description: "Higher-fidelity local Qwen vision route with moderate resource use.",
-    tags: ["quality", "speed", "local"],
-    config: {
-      profile: "good-fast-local",
-      target: "local",
-      modelUri: "llm://vllm/Qwen/Qwen2.5-VL-3B-Instruct",
     },
   },
   "cheapest-hosted": {
@@ -1441,11 +1437,12 @@ export const embeddingConfigSchema = z
         message: "baseUrl overrides are only supported for local model providers",
       });
     }
-    if (baseUrl && !isLoopbackModelBaseUrl(baseUrl)) {
+    const baseUrlShape = baseUrl ? loopbackModelBaseUrlProblem(baseUrl) : null;
+    if (baseUrlShape) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["modelUri"],
-        message: "Local model baseUrl must use a loopback host",
+        message: tenantModelEndpointRefusalMessage(baseUrlShape),
       });
     }
   })
@@ -1474,9 +1471,12 @@ export const defaultEmbeddingConfig: EmbeddingConfig = {
 const LEGACY_VISION_KEYS = ["maxPagesPerDocument", "forceAllPages"] as const;
 const dropLegacyVisionKeys = (value: unknown) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  if (!LEGACY_VISION_KEYS.some((key) => key in value)) return value;
-  const rest = { ...(value as Record<string, unknown>) };
+  const record = value as Record<string, unknown>;
+  const retired = retiredVisionProfile(record.profile);
+  if (!retired && !LEGACY_VISION_KEYS.some((key) => key in record)) return value;
+  const rest = { ...record };
   for (const key of LEGACY_VISION_KEYS) delete rest[key];
+  if (retired) rest.profile = retired;
   return rest;
 };
 
@@ -1637,11 +1637,7 @@ export function resolveVisionRoute(config: VisionConfig): VisionExecutionConfig 
       benchmarkProfile: config.benchmarkProfile,
     };
   }
-  const defaultBaseUrl =
-    provider === "openrouter" ? OPENROUTER_BASE_URL :
-      provider === "ollama" ? "http://127.0.0.1:11434/v1" :
-        provider === "vllm" ? "http://127.0.0.1:8000/v1" :
-          provider === "lmstudio" ? "http://127.0.0.1:1234/v1" : null;
+  const defaultBaseUrl = provider === "openrouter" ? OPENROUTER_BASE_URL : defaultLocalModelBaseUrl(provider);
 
   return {
     target: config.target,
@@ -1654,23 +1650,4 @@ export function resolveVisionRoute(config: VisionConfig): VisionExecutionConfig 
     remoteFallbackModelUri: config.remoteFallbackModelUri,
     benchmarkProfile: config.benchmarkProfile,
   };
-}
-
-/** True when `value` is a URL on a loopback host (`localhost`, `127.0.0.1`, `[::1]`). */
-export function isLoopbackModelBaseUrl(value: string): boolean {
-  try {
-    const host = new URL(value).hostname.toLowerCase();
-    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
-  } catch {
-    return false;
-  }
-}
-
-/** Server-side admission for tenant-selected loopback services; opt in only on trusted single-tenant hosts. */
-export function assertTenantModelEndpointAllowed(modelUri: string): void {
-  const provider = parseLlmModelUri(modelUri).provider;
-  if (["ollama", "vllm", "lmstudio"].includes(provider)
-      && process.env.DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS !== "true") {
-    throw new Error("Tenant-selected local model endpoints are disabled");
-  }
 }

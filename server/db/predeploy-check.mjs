@@ -551,7 +551,42 @@ export async function collectReport(client, { migrationFiles, acceptedPiiPattern
         : ["No runtime role writes the table or executes pricing_state_raise; only the table owner raises values."],
     ));
   }
+
+  // 8. PII page findings (detector confidence) are operator-only: the API role and PUBLIC hold no privilege on the table,
+  // the worker only SELECT, INSERT and DELETE. Any other grant is a BLOCKER.
+  const [{ has_findings: hasFindings }] = await q("select to_regclass('public.pii_page_findings') is not null as has_findings");
+  if (hasFindings) {
+    const grants = await q(
+      `select r.rolname as role, array_remove(array[
+         case when has_table_privilege(r.oid, 'public.pii_page_findings', 'SELECT') then 'select' end,
+         case when has_table_privilege(r.oid, 'public.pii_page_findings', 'INSERT') then 'insert' end,
+         case when has_table_privilege(r.oid, 'public.pii_page_findings', 'UPDATE') then 'update' end,
+         case when has_table_privilege(r.oid, 'public.pii_page_findings', 'DELETE') then 'delete' end,
+         case when has_table_privilege(r.oid, 'public.pii_page_findings', 'TRUNCATE') then 'truncate' end], null) as privileges
+       from pg_roles r where r.rolname = any($1::text[])
+       union all
+       -- PUBLIC (grantee 0) is not a role in pg_roles: read its entries from the table's ACL.
+       select 'PUBLIC', coalesce(array_agg(distinct lower(a.privilege_type)) filter (where a.privilege_type is not null), '{}')
+       from pg_class c cross join lateral aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+       where c.oid = 'public.pii_page_findings'::regclass and a.grantee = 0`,
+      [["docslurp_app", "docslurp_worker"]],
+    );
+    const problems = piiFindingsGrantProblems(grants);
+    sections.push(section("PII page findings: operator-only", problems.length ? "blocker" : "ok",
+      problems.length ? ["Run the role reconciliation (migrate.mjs):", ...problems] : ["The API role has no access; the worker may select, insert and delete."]));
+  }
   return sections;
+}
+
+/** Pure: grants on pii_page_findings that break its operator-only rule. */
+export function piiFindingsGrantProblems(grants) {
+  const problems = [];
+  for (const row of grants) {
+    const allowed = row.role === "docslurp_worker" ? ["select", "insert", "delete"] : [];
+    const extra = row.privileges.filter((privilege) => !allowed.includes(privilege));
+    if (extra.length > 0) problems.push(`${row.role}: ${extra.join(", ")}`);
+  }
+  return problems;
 }
 
 /** Pure: redact unless asked not to (--no-redact) on an interactive terminal; --redact always redacts (CI passes it). */

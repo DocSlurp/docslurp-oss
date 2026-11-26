@@ -16,6 +16,11 @@ export const costEstimateSchema = z.object({
   pagesRange: z.object({ low: z.number().nonnegative(), high: z.number().nonnegative() }).optional(),
   /** How many files' page counts are unknown (priced over a range). */
   unmeasuredFiles: z.number().int().nonnegative().optional(),
+  /**
+   * Of those, the Word, slide, sheet or EPUB files whose high end is not a ceiling (quoteHighIsCeiling): quoted from their
+   * size without a file profile's body size, or a sheet. Repetitive content can measure more pages than `pagesRange.high`.
+   */
+  unboundedFiles: z.number().int().nonnegative().optional(),
   documents: z.number().nonnegative(),
   billing: z.enum(["enforced", "disabled"]),
   credits: z.object({ low: z.number().nonnegative(), high: z.number().nonnegative() }).nullable(),

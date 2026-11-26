@@ -70,6 +70,18 @@ migration `0137_run_completion_overdraft.sql`.
 Credits are checked atomically when the run row is inserted (`admitRunSpend`). An admitted run is paused, not failed,
 when the balance goes negative mid-run (`server/src/services/run-creation.ts`).
 
+## Quotes for converted documents
+
+Word, OpenDocument, RTF, slide, sheet and EPUB files have no page count until the worker converts them, so the upload quote
+prices them over a range of bytes per page (`packages/shared/src/upload-pages.ts`). From the size alone the range is ordinary
+(about 1 KB a page at the high end for Word and EPUB) and is not a ceiling: files of repetitive content (a clause template, a
+generated table, a column of ids) compress far below that and can measure more pages. Such a quote says so (`unboundedFiles`
+and its basis text). A client file profile widens the high end to cover the
+profile's uncompressed body size at 400 bytes a page, up to the worker's 100,000-page cap, but no client-supplied count or
+size makes the quote a ceiling: zip headers, footnotes, speaker notes and dense lines can all exceed it. Billing always uses
+the pages the worker measures. The API never opens an
+upload to measure this: customer files are parsed only inside the parser VM.
+
 ## Stripe
 
 Credits are prepaid packs bought through one-off Checkout payments. There are no plans or subscriptions. The server's

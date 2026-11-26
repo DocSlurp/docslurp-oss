@@ -10,7 +10,8 @@ import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForMarkdownC
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfSalvagedFigures, sandboxedPdfProvider, sandboxedPdfGridSettlement, sandboxedPdfLayoutFacts, sandboxedPdfLayoutFactsSource, sandboxedPdfLayoutWalkerUnknown, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
-import { buildSummaryEvidence } from "./summary-evidence.js";
+import { SUMMARY_MAX_PAGES, buildSummaryEvidence } from "./summary-evidence.js";
+import { readStoredMarkdown, syncPageOffsets } from "./summary-evidence-refresh.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
 import type { MediaJournal } from "../media/types.js";
@@ -67,7 +68,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import { dopplerImageLimits, figuresEnabled, ladderSkipsOcr, type CanonicalDocument } from "@docslurp/shared";
+import { dopplerImageLimits, figuresEnabled, ladderSkipsOcr, summaryScanAvailable, type CanonicalDocument } from "@docslurp/shared";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
 import {
   enrichCanonicalDocumentWithBestParser,
@@ -746,8 +747,12 @@ export class ExtractMarkdownStage implements Stage {
                     ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash,
                       ...(ladderPolicy.ladder.active ? { ladderBudget: ladderPolicy.aboveFastBudget } : {}) }, signal)
                     : null;
+                  // The one text this stage stored byte for byte (UTF-8 of this string): the page offset index describes stored
+                  // bytes, so it is written only when the final text is still this string at this URI.
+                  let exactlyStored: { uri: string; text: string } | null = null;
                   if (scanFill) {
                     winningText = scanFill.text;
+                    exactlyStored = { uri: scanFill.textUri, text: scanFill.text };
                     strategy = `${strategy}+ocr`;
                     partialArtifactUri = scanFill.textUri;
                   }
@@ -774,6 +779,7 @@ export class ExtractMarkdownStage implements Stage {
                   });
                   if (critique && critique.acceptedPages.length > 0) {
                     winningText = critique.correctedText;
+                    if (critique.correctedTextUri) exactlyStored = { uri: critique.correctedTextUri, text: critique.correctedText };
                     strategy = `${strategy}+critique`;
                     plausibilityScore = scoreExtractionPlausibility(
                       winningText,
@@ -1010,6 +1016,18 @@ export class ExtractMarkdownStage implements Stage {
                       documentId: document.id, sourceUri: artifactUri,
                     }));
                     state.artifactLedger.recordDocument(document.id, "summary-evidence", this.storage.uri(evidenceKey));
+                    // The index holds byte offsets into the stored object. The candidate branch (winningCandidate.textUri) holds
+                    // the extractor's raw bytes while winningText has been decoded, sanitized and normalized since, so there the
+                    // stored object is read back: one extra read, paid only when the adaptive summary is on and the document is
+                    // larger than one summary sample (the only reader of the index today).
+                    const exact = exactlyStored && exactlyStored.uri === artifactUri && exactlyStored.text === winningText;
+                    const stored = exact ? winningText
+                      : summaryScanAvailable(process.env) && document.pageCount > SUMMARY_MAX_PAGES
+                        ? await readStoredMarkdown(this.storage, artifactUri, signal)
+                        : null;
+                    await syncPageOffsets(this.storage, {
+                      evidenceKey, documentId: document.id, pageCount: document.pageCount, sourceUri: artifactUri, stored,
+                    });
                   }
                   const manifestUri = this.storage.uri(manifestKey);
                   const canonicalUri = this.storage.uri(canonicalKey);
@@ -1627,7 +1645,9 @@ export class ExtractMarkdownStage implements Stage {
     // Every page is a scan and none could be read: the document has no text, so it fails rather than publishing nothing.
     if (failed.length > 0 && failed.length === pageCount) throw new Error(`OCR failed for every page (${pageCount}) of a scanned document`);
     if (read.length === 0) return null;
-    const text = pages.join("\f");
+    // A form feed inside one page's OCR text would read as a page break and shift every later page's attribution (PII
+    // page withholding, citations): each page's own form feeds become newlines before the pages are joined.
+    const text = pages.map(withoutPageBreaks).join("\f");
     const key = `${args.textKey}.ocr.md`;
     await this.storage.putBytes(key, Buffer.from(text, "utf8"), "text/markdown; charset=utf-8");
     console.log(`[ocr] document=${document.id} scanned pages read=${read.length}/${empty.length}`);
@@ -2114,7 +2134,7 @@ export class ExtractMarkdownStage implements Stage {
     if (owner && renditions < result.pages.length) {
       console.warn(`[ocr] document=${context.documentId} renditions=${renditions}/${result.pages.length}: pages without one get no page-image vectors`);
     }
-    const markdown = result.pages.map((page) => page.text).join("\f");
+    const markdown = result.pages.map((page) => withoutPageBreaks(page.text)).join("\f");
     // An uploaded image's frames also count their decoded area (a giant scan is several standard pages to read).
     if (owner) await recordExtractedPageEquivalents(state, owner, "image", markdown, result.pages);
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-extract-ocr-"));
@@ -4027,4 +4047,9 @@ async function settle<T>(
       reason,
     };
   }
+}
+
+/** One page's text with any form feed (the page-break character) replaced, so joining pages keeps the page count. */
+export function withoutPageBreaks(text: string): string {
+  return text.includes("\f") ? text.replace(/\f/g, "\n") : text;
 }
