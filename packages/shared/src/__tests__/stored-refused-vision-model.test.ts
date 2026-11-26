@@ -122,12 +122,18 @@ describe("a stored vision model that is no longer admitted", () => {
 
   it("a URI that names its own endpoint is never swapped for the default hosted model", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
+    // An endpoint the shared rule refuses (model-endpoints.ts) is dropped and the row reads with the local profile: never
+    // the default hosted model, and never a failed read.
     const remote = "llm://vllm/Qwen/Qwen2-VL-2B-Instruct?baseUrl=http%3A%2F%2F10.0.0.5%3A8000%2Fv1";
-    expect(sanitizeStoredPipeline({ vision: { modelUri: remote } }, "run r10")).toEqual({ vision: { modelUri: remote } });
-    expect(() => normalizeStoredPipelineFeatures({ vision: { modelUri: remote } } as never, "run r10")).toThrow();
-    for (const encoded of ["llm://vllm/Qwen/Qwen2-VL-2B-Instruct?base%55rl=http%3A%2F%2F10.0.0.5%3A8000%2Fv1", "llm://openrouter/openai/gpt-4.1-mini?%62aseUrl=https%3A%2F%2Feu.example.com", "llm://private%2Falias/model"]) {
-      expect(sanitizeStoredPipeline({ vision: { remoteFallbackModelUri: encoded } }, "run r12"), encoded).toEqual({ vision: { remoteFallbackModelUri: encoded } });
+    expect(sanitizeStoredPipeline({ vision: { modelUri: remote } }, "run r10")).toEqual({ vision: { profile: "cheapest-local" } });
+    expect(normalizeStoredPipelineFeatures({ vision: { modelUri: remote } } as never, "run r10").vision.target).toBe("local");
+    // Encoded spellings of the key are judged decoded, so they are dropped the same way.
+    for (const encoded of ["llm://vllm/Qwen/Qwen2-VL-2B-Instruct?base%55rl=http%3A%2F%2F10.0.0.5%3A8000%2Fv1", "llm://openrouter/openai/gpt-4.1-mini?%62aseUrl=https%3A%2F%2Feu.example.com"]) {
+      expect(sanitizeStoredPipeline({ vision: { remoteFallbackModelUri: encoded } }, "run r12"), encoded).toEqual({ vision: {} });
     }
+    // An operator's private route is not judged by the tenant endpoint rule and stays.
+    expect(sanitizeStoredPipeline({ vision: { remoteFallbackModelUri: "llm://private%2Falias/model" } }, "run r12"))
+      .toEqual({ vision: { remoteFallbackModelUri: "llm://private%2Falias/model" } });
     const privateRoute = "llm://private/not-registered/model";
     expect(sanitizeStoredPipeline({ vision: { modelUri: privateRoute } }, "run r11")).toEqual({ vision: { modelUri: privateRoute } });
   });

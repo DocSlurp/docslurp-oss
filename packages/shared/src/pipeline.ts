@@ -25,6 +25,7 @@ import {
   visionModelUriProblem,
   parseLlmModelUri,
 } from "./embedding.js";
+import { storedModelEndpointRefusal } from "./model-endpoints.js";
 import { isProviderCallAllowed } from "./privacy.js";
 import { piiPatternTypeSchema } from "./pii.js";
 import { decisionFormatSchema, routingObjectiveSchema } from "./page-routing.js";
@@ -1257,10 +1258,32 @@ function sanitizeStoredPipelineReport<T>(stored: T, source: string): { value: T;
   // image-token bound, removed from the catalog, repriced past the cap, a Pro/Ultra tier): the setting is dropped, so
   // the row reads with its profile's or the default model. No page is sent to such a model either way; without this one
   // such row fails every read. Rows name the model as a URI, or (older rows) as a catalog id in `model`/`remoteFallbackModel`.
+  // A model URI whose endpoint the shared rule now refuses (model-endpoints.ts: a hosted provider with a baseUrl, or a
+  // local server URL with user info, a query, a fragment, a non-loopback host or a port the operator does not allow):
+  // dropped, never sent. A dropped primary falls back to the local profile, never to a hosted model the tenant did not
+  // choose; a dropped fallback just goes. Logged by path and reason code only (the URL can hold credentials).
+  for (const head of ["embedding", "vision"] as const) {
+    if (!isPlainRecord(next[head])) continue;
+    const current = { ...next[head] } as Record<string, unknown>;
+    const keys = (head === "embedding" ? ["modelUri"] : ["modelUri", "remoteFallbackModelUri"])
+      .filter((key) => storedModelEndpointRefusal(current[key]) !== null);
+    if (keys.length === 0) continue;
+    for (const key of keys) delete current[key];
+    if (keys.includes("modelUri")) {
+      // The stored target and sizes described the dropped model. The row named its own destination, so it is never
+      // rerouted to a hosted model: the local profile reads in its place.
+      for (const key of ["target", "dimensions", "batchSize"]) delete current[key];
+      current.profile = STORED_ENDPOINT_FALLBACK_PROFILE;
+    }
+    next = { ...next, [head]: current };
+    dropped.push(...keys.map((key) => `${head}.${key}`));
+    reasons.add("model-endpoint-refused");
+  }
   if (isPlainRecord(next.vision)) {
     const vision = { ...next.vision } as Record<string, unknown>;
     // A URI that names its own endpoint (a `baseUrl`, or an operator's private route) was a deliberate destination: it
-    // is never swapped for the default hosted model. Such a row keeps failing, as before.
+    // is never swapped for the default hosted model here. One whose endpoint the shared rule refuses was already dropped
+    // above (local profile); an allowed one that fails for another reason keeps failing, as before.
     const pinsEndpoint = (value: string) => {
       // Judged on the decoded text as well, so a percent-encoded key or separator is not a way around it.
       let decoded = value;
@@ -1898,6 +1921,8 @@ export function parseStoredPipelineFeatures(stored: unknown, sourceName = "a sto
 }
 
 const RESTRICTED_LOCAL_PROFILE = "cheapest-local";
+/** The profile a stored local-server model setting whose endpoint is refused falls back to (never a hosted model). */
+const STORED_ENDPOINT_FALLBACK_PROFILE = RESTRICTED_LOCAL_PROFILE;
 
 /**
  * The one reader for a stored pipeline (project rows, run snapshots, project version snapshots). It never throws

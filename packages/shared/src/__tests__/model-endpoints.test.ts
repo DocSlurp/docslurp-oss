@@ -5,6 +5,7 @@ import {
   assertTenantModelEndpointAllowed,
   isLoopbackModelBaseUrl,
   modelEndpointOrigin,
+  modelEndpointUrl,
   platformKeyForDestination,
   tenantModelEndpointProblem,
   tenantPipelineEndpointProblems,
@@ -31,8 +32,8 @@ const INTERNAL_DESTINATIONS = [
   "http://017700000001/v1",
   "http://127.1/v1",
   "http://[::ffff:127.0.0.1]/v1",
-  "http://[fdaa::3]:8080/v1",
-  "http://worker.internal:8080/v1",
+  "http://[fd12:3456:789a::3]:8080/v1",
+  "http://service.internal.example:8080/v1",
   "http://metadata.google.internal/v1",
   "http://0.0.0.0:11434/v1",
 ];
@@ -66,7 +67,7 @@ describe("tenant model endpoints in production configuration (flag off)", () => 
     vi.stubEnv(FLAG, "true");
     expect(tenantModelEndpointProblem("llm://openai/m?base%55rl=http%3A%2F%2F10.0.0.1")).toBe("tenant-base-url-not-allowed");
     expect(tenantModelEndpointProblem("llm://openai/m?BASEURL=http%3A%2F%2F10.0.0.1")).toBe("tenant-base-url-not-allowed");
-    expect(tenantModelEndpointProblem(`llm://vllm/m?baseUrl=${encodeURIComponent("http://127.0.0.1/v1")}&baseUrl=${encodeURIComponent("http://10.0.0.1/v1")}`)).toBe("tenant-base-url-not-loopback");
+    expect(tenantModelEndpointProblem(`llm://vllm/m?baseUrl=${encodeURIComponent("http://127.0.0.1:8000/v1")}&baseUrl=${encodeURIComponent("http://10.0.0.1/v1")}`)).toBe("tenant-base-url-not-loopback");
   });
 
   it("leaves operator-registered private routes and in-process runtimes alone", () => {
@@ -92,19 +93,24 @@ describe("tenant model endpoints on a trusted single-tenant host (flag on)", () 
       "http://169.254.169.254/latest/meta-data/",
       "http://10.0.0.5:8000/v1",
       "http://192.168.1.10/v1",
-      "http://[fdaa::3]:8080/v1",
+      "http://172.16.0.9:8000/v1",
+      "http://[fd12:3456:789a::3]:8080/v1",
       "http://[::ffff:127.0.0.1]/v1",
-      "http://worker.internal:8080/v1",
+      "http://service.internal.example:8080/v1",
       "http://localhost.evil.example/v1",
       "http://127.0.0.1.nip.io/v1",
-      "http://user:pass@localhost/v1",
-      "http://api.openai.com@127.0.0.1/v1",
-      "file:///etc/passwd",
-      "ftp://127.0.0.1/v1",
       "http://0.0.0.0:11434/v1",
-      "not a url",
     ]) {
       expect(tenantModelEndpointProblem(uri("vllm", destination)), destination).toBe("tenant-base-url-not-loopback");
+    }
+    for (const destination of [
+      "http://user:pass@localhost:8000/v1",
+      "http://api.openai.com@127.0.0.1:8000/v1",
+      "file:///etc/passwd",
+      "ftp://127.0.0.1/v1",
+      "not a url",
+    ]) {
+      expect(tenantModelEndpointProblem(uri("vllm", destination)), destination).toBe("tenant-base-url-invalid");
     }
   });
 
@@ -191,5 +197,53 @@ describe("pipeline admission covers every tenant model URI", () => {
     const orgB = { embedding: { modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b" } };
     expect(tenantPipelineEndpointProblems(orgA)).toHaveLength(1);
     expect(tenantPipelineEndpointProblems(orgB)).toEqual([]);
+  });
+});
+
+describe("tenant loopback base URL shape, port and request URL (flag on)", () => {
+  it.each([
+    "http://127.0.0.1:8000/v1?",
+    "http://127.0.0.1:8000/v1?q=",
+    "http://127.0.0.1:8000/admin?x=/v1",
+    "http://127.0.0.1:8000/v1#",
+    "http://127.0.0.1:8000/v1#frag",
+  ])("refuses a query or fragment: %s", (destination) => {
+    vi.stubEnv(FLAG, "true");
+    expect(tenantModelEndpointProblem(uri("vllm", destination))).toBe("tenant-base-url-invalid");
+    expect(() => assertTenantModelBaseUrlAllowed("vllm", destination)).toThrow(TenantModelEndpointRefusedError);
+  });
+
+  it("keeps encoded query and fragment characters in the path, where the request URL keeps them too", () => {
+    vi.stubEnv(FLAG, "true");
+    for (const destination of ["http://127.0.0.1:8000/v1%3Fq%3D", "http://127.0.0.1:8000/v1%23frag"]) {
+      expect(tenantModelEndpointProblem(uri("vllm", destination)), destination).toBeNull();
+      const request = new URL(modelEndpointUrl(destination, "chat/completions"));
+      expect(request.search).toBe("");
+      expect(request.hash).toBe("");
+      expect(request.pathname.endsWith("/chat/completions")).toBe(true);
+    }
+  });
+
+  it("resolves dot segments (also percent-encoded) before the endpoint is appended", () => {
+    expect(modelEndpointUrl("http://127.0.0.1:8000/v1/../../admin", "chat/completions")).toBe("http://127.0.0.1:8000/admin/chat/completions");
+    expect(modelEndpointUrl("http://127.0.0.1:8000/v1/%2e%2e/%2E%2E/admin", "embeddings")).toBe("http://127.0.0.1:8000/admin/embeddings");
+    expect(modelEndpointUrl("http://127.0.0.1:8000/v1/", "chat/completions")).toBe("http://127.0.0.1:8000/v1/chat/completions");
+    expect(modelEndpointUrl("http://127.0.0.1:8000/v1/chat/completions", "chat/completions")).toBe("http://127.0.0.1:8000/v1/chat/completions");
+    // An operator gateway's version query stays a query, after the path.
+    expect(modelEndpointUrl("https://gateway.example/v1?api-version=2", "chat/completions")).toBe("https://gateway.example/v1/chat/completions?api-version=2");
+  });
+
+  it("allows only the standard local server ports unless the operator lists others", () => {
+    vi.stubEnv(FLAG, "true");
+    for (const port of [11434, 8000, 1234]) expect(tenantModelEndpointProblem(uri("vllm", `http://127.0.0.1:${port}/v1`)), String(port)).toBeNull();
+    for (const destination of ["http://127.0.0.1:6379/v1", "http://127.0.0.1/v1", "https://localhost/v1", "http://[::1]:5432/v1"]) {
+      expect(tenantModelEndpointProblem(uri("vllm", destination)), destination).toBe("tenant-base-url-port-not-allowed");
+    }
+    vi.stubEnv("DOCSLURP_TENANT_LOCAL_MODEL_PORTS", "8001, 8002");
+    expect(tenantModelEndpointProblem(uri("vllm", "http://127.0.0.1:8001/v1"))).toBeNull();
+    expect(tenantModelEndpointProblem(uri("vllm", "http://127.0.0.1:8000/v1"))).toBe("tenant-base-url-port-not-allowed");
+    // A list with no valid port allows none (fail closed).
+    vi.stubEnv("DOCSLURP_TENANT_LOCAL_MODEL_PORTS", "all");
+    expect(tenantModelEndpointProblem(uri("vllm", "http://127.0.0.1:8000/v1"))).toBe("tenant-base-url-port-not-allowed");
   });
 });
