@@ -144,8 +144,11 @@ describe("text pages are measured in full by the worker, and only that count bil
   it("an inspection with no text answer (an image older than the worker) is retried, never a document failure, and records nothing", async () => {
     await db.exec(`update documents set page_count = 1, page_count_source = 'assumed' where id = 'vm'`);
     const { state, document } = await stateFor("run1", "vm");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const failure = await recordMeasuredTextPageCount({ state, document, format: "plain-text", measure: async () => undefined }).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(TextPageCountUnavailableError);
+    // The fixed token an alert keys on.
+    expect(logged.mock.calls.flat().join(" ")).toContain("[parser-sandbox] status=refused reason=capability-missing capability=inspection-text-pages");
     expect(isDocumentLevelFailure(failure)).toBe(false);
     // A guest that measured nothing although asked with `force` is not a count of this file: refused (a document failure).
     const none = await recordMeasuredTextPageCount({ state, document, format: "plain-text", measure: async () => null }).catch((error: unknown) => error);

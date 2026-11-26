@@ -3,8 +3,8 @@ import { GUEST_NODE_FLAGS } from "../chart-export/extractors/host.js";
 import { inlineChartsInProcess, validateInlineCharts, type InlineChartRequest, type StoredInlineCharts } from "../chart-export/inline.js";
 import { describeArchiveIssue, inspectQuarantineBytes, pdfHasEncryptName, type QuarantineInspection } from "./quarantine-bytes.js";
 export { sniffMimeType, inspectArchive, type QuarantineInspection } from "./quarantine-bytes.js";
-import { constants } from "node:fs";
-import { mkdtemp, open, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { readGuestResultText } from "./guest-result.js";
 import { tmpdir } from "node:os";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
 
@@ -429,20 +429,9 @@ interface InspectArgs {
   textEvidence?: HostTextEvidence;
 }
 
-/**
- * Reads a guest's result file without following a link (a local sandbox provider's job directory is on this host) and only
- * when it is a regular file within `limit` bytes; anything else is refused with the caller's typed error.
- */
+/** Reads a guest's result as text (lib/guest-result.ts: no links, regular files only, bounded). */
 export async function readGuestResultFile(file: string, limit: number, refuse: (message: string) => Error): Promise<string> {
-  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => { throw refuse("guest result missing"); });
-  try {
-    const info = await handle.stat();
-    if (!info.isFile()) throw refuse("guest result is not a regular file");
-    if (info.size > limit) throw refuse("guest result exceeds limit");
-    return await handle.readFile("utf8");
-  } finally {
-    await handle.close();
-  }
+  return await readGuestResultText(file, limit, refuse);
 }
 
 const SNIFF_CONTAINERS = new Set(["zip", "ole"]);

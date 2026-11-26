@@ -34,14 +34,20 @@ describe("planned pdftoppm dimensions", () => {
   });
 
   it("never exceeds the edge on the long side, whatever the page", () => {
-    for (const [w, h] of [[1, 100_000], [100_000, 1], [3, 5000], [14_400, 14_400]] as const) {
+    let pastEdge = 0;
+    for (const [w, h] of [[1, 100_000], [100_000, 1], [3, 5000], [14_400, 14_400], [333, 333]] as const) {
       for (const rotate of [0, 90, 180, 270]) {
         const planned = plannedPdftoppmDimensions({ widthPt: w, heightPt: h, rotate }, 4000)!;
         expect(Math.min(planned.widthPx, planned.heightPx)).toBeGreaterThanOrEqual(1);
-        // Only a square page goes past the edge, by one pixel, as pdftoppm's own rounding does (the 612 x 612 fixture above).
-        expect(Math.max(planned.widthPx, planned.heightPx)).toBeLessThanOrEqual(w === h ? 4001 : 4000);
+        // Only a square page goes past the edge, by one pixel, as pdftoppm's own rounding does (the 612 x 612 fixture above
+        // at edge 333; a 333 x 333 page at edge 4000 here).
+        const long = Math.max(planned.widthPx, planned.heightPx);
+        expect(long).toBeLessThanOrEqual(w === h ? 4001 : 4000);
+        if (long > 4000) pastEdge++;
       }
     }
+    // The square allowance is exercised, not only permitted.
+    expect(pastEdge).toBe(4);
   });
 });
 

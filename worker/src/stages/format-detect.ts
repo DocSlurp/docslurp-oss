@@ -40,7 +40,10 @@ export class FormatDetectStage implements Stage {
       const encoding = document.fileFacts?.encoding ?? null;
       return inspectTextPages(bytes, { mimeType: document.fileFacts?.sniffedMimeType ?? null, encoding }, request);
     }
-    if (!this.runner || !this.config) throw new TextPageCountUnavailableError("text page count unavailable: no parser VM runner is configured, so no host decoder runs");
+    if (!this.runner || !this.config) {
+      console.error("[parser-sandbox] status=refused reason=capability-missing capability=parser-vm-runner stage=text-pages");
+      throw new TextPageCountUnavailableError("text page count unavailable: no parser VM runner is configured, so no host decoder runs");
+    }
     // A plain-rule format is staged whole: if it is pure ASCII this host counts it from its byte facts at any size.
     const plain = format !== "html";
     const temp = await stageSourceFile(this.storage, document, trustedTempDownloadPattern("docslurp-text-pages-", document), plain ? undefined : { maxBytes: TEXT_MEASURE_MAX_BYTES });

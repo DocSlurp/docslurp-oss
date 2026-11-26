@@ -11,6 +11,7 @@ import { extractDeterministicVisuals as guestExtract, type DeterministicVisualIn
 import { CHART_EXTRACT_LIMITS } from "./limits.js";
 import type { DeterministicVisualResult } from "./types.js";
 import { GUEST_NODE_FLAGS } from "../../sandbox/guest-node-flags.js";
+import { readGuestResultText } from "../../lib/guest-result.js";
 
 /*
  * Host side of the deterministic chart rungs. Customer bytes are parsed only by the guest entry
@@ -147,11 +148,10 @@ export async function extractDeterministicVisualsFile(args: DeterministicFileArg
       log(`[chart-export] parser VM run failed${where} kind=${args.kind} error=${error instanceof Error ? error.name : "error"}`);
       return refuse("guest-unavailable");
     }
-    let outSize: number;
-    try { outSize = (await stat(output)).size; } catch { return refuse("guest-no-output"); }
-    if (outSize > RESULT_LIMIT_BYTES) refuse("guest-output-too-large");
+    let text: string;
+    try { text = await readGuestResultText(output, RESULT_LIMIT_BYTES); } catch (error) { return refuse(String((error as Error).message).includes("exceeds") ? "guest-output-too-large" : "guest-no-output"); }
     let raw: unknown;
-    try { raw = JSON.parse(await readFile(output, "utf8")); } catch { return refuse("guest-output-not-json"); }
+    try { raw = JSON.parse(text); } catch { return refuse("guest-output-not-json"); }
     try { return validateDeterministicResult(raw); } catch { return refuse("invalid-guest-result"); }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -222,11 +222,10 @@ export async function extractDeterministicVisualsBatch(args: DeterministicBatchA
       log(`[chart-export] parser VM run failed${where} kind=svg-batch inputs=${args.inputPaths.length} error=${error instanceof Error ? error.name : "error"}`);
       return refuse("guest-unavailable");
     }
-    let outSize: number;
-    try { outSize = (await stat(output)).size; } catch { return refuse("guest-no-output"); }
-    if (outSize > RESULT_LIMIT_BYTES) refuse("guest-output-too-large");
+    let text: string;
+    try { text = await readGuestResultText(output, RESULT_LIMIT_BYTES); } catch (error) { return refuse(String((error as Error).message).includes("exceeds") ? "guest-output-too-large" : "guest-no-output"); }
     let raw: unknown;
-    try { raw = JSON.parse(await readFile(output, "utf8")); } catch { return refuse("guest-output-not-json"); }
+    try { raw = JSON.parse(text); } catch { return refuse("guest-output-not-json"); }
     try { return validateDeterministicBatch(raw, args.inputPaths.length); } catch { return refuse("invalid-guest-result"); }
   } finally {
     await rm(dir, { recursive: true, force: true });

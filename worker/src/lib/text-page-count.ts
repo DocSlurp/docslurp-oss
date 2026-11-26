@@ -245,6 +245,8 @@ export function validateTextPagesInspection(
  */
 export function pagesFromTextInspection(text: TextPagesInspection | null | undefined, format: NormalizedFormat): number | null {
   if (text === undefined) {
+    // One fixed token an alert keys on: a worker running against a parser image without the text answer.
+    console.error(`[parser-sandbox] status=refused reason=capability-missing capability=${INSPECTION_TEXT_PAGES_CAPABILITY} stage=text-pages`);
     throw new TextPageCountUnavailableError(`text page count unavailable: the parser image's inspection has no text answer (capability ${INSPECTION_TEXT_PAGES_CAPABILITY}); no host decoder runs`);
   }
   if (text === null) return null;
