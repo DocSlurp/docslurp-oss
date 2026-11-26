@@ -137,6 +137,34 @@ describe("SessionStaging", () => {
     expect(readFileSync(path.join(dir, "result.txt"), "utf8")).toBe("done");
   });
 
+  it("refuses a listing that climbs out of the staging root, and writes nothing on the host", async () => {
+    const dir = path.join(root, "out");
+    const outside = path.join(root, "escaped.txt");
+    const snapshot = await staging.snapshot([dir]);
+    remote.put(path.join(dir, "result.txt"), "done");
+    // A VM that forges its listing: `out/..` passes a prefix test and a dirname test, and names the parent directory.
+    const honest = remote.list.bind(remote);
+    remote.list = async (p: string) => p === dir
+      ? [...(await honest(p)), { path: `${dir}/..`, isDir: true, size: 0, mtime: 0 }]
+      : p === `${dir}/..` ? [{ path: `${dir}/../escaped.txt`, isDir: false, size: 4, mtime: 1 }] : honest(p);
+    remote.files.set(`${dir}/../escaped.txt`, { data: Buffer.from("evil"), mtime: 1 });
+    await expect(staging.download(snapshot)).rejects.toBeInstanceOf(SandboxOutputError);
+    expect(existsSync(outside)).toBe(false);
+    for (const forged of [`${dir}/./x`, `${dir}//x`, `${dir}/x/`, "relative/x", `${dir}/x\0y`, `${dir}/${"n".repeat(256)}`]) {
+      remote.list = async (p: string) => p === dir ? [{ path: forged, isDir: false, size: 1, mtime: 1 }] : honest(p);
+      await expect(staging.download(snapshot), forged).rejects.toBeInstanceOf(SandboxOutputError);
+    }
+  });
+
+  it("refuses a root whose stat answers with another path", async () => {
+    const dir = path.join(root, "out");
+    remote.put(path.join(dir, "result.txt"), "done");
+    const honest = remote.stat.bind(remote);
+    // A path inside the root passes the prefix test; only the root check refuses it.
+    remote.stat = async (p: string) => p === dir ? { path: path.join(dir, "result.txt"), isDir: false, size: 4, mtime: 1 } : honest(p);
+    await expect(staging.snapshot([dir])).rejects.toBeInstanceOf(SandboxOutputError);
+  });
+
   it("recreates a directory tree the command created", async () => {
     const dir = path.join(root, "out");
     await remote.mkdir(dir);
