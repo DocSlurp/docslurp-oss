@@ -64,7 +64,7 @@ export const RICH_PAGE_READ_METRICS: ReadonlySet<string> = new Set([
 export const FLAT_RICH_PAGE_READ_METRICS: ReadonlySet<string> = new Set(["ocr-escalation"]);
 
 /** Outcomes of a page read that did not complete: kept for their provider cost, never charged as a page read. */
-export const NON_CHARGING_READ_OUTCOMES: ReadonlySet<string> = new Set(["timeout", "failed", "failure", "rejected"]);
+export const NON_CHARGING_READ_OUTCOMES: ReadonlySet<string> = new Set(["timeout", "failed", "failure", "error", "rejected"]);
 
 const warnedReadOutcomes = new Set<string>();
 

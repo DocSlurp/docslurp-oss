@@ -338,6 +338,21 @@ release keep its rule.
   billable charge. A page the reader replaced is one Scan page, charged once per run like the recogniser's read of it.
 - Quotes count a TIFF's frames as its pages, up to 64.
 
+### Rollout and rollback of the per-document Fast charge
+
+A worker pins a new run to the per-document Fast rule (`run:page-billing-fast-document`) only on the run's first start,
+only when every live worker advertises `billing.fast-per-document` (a worker advertises it once migration
+20261126T0327's backstop exists) and `DOCSLURP_FAST_PER_DOCUMENT` is not `off`. Such a run charges each document's Fast
+pages when the document completes (`fast:<run>:<document>`); every other run keeps the one run-wide charge at
+completion (`fast:<run>`) until it ends. No run is billed under both.
+
+- Deploy order: the migration (a no-op until a per-document charge exists), every worker, then the API. Runs started
+  before the last older worker leaves keep the run-wide rule.
+- Backstop: Fast charges carry `pageRules: 3`, and the database refuses (`DS001`) a Fast charge below 3 for a run that
+  has per-document Fast charges, so an older worker cannot bill those documents again at completion.
+- Rollback of workers to a release before the rule: set `DOCSLURP_FAST_PER_DOCUMENT=off` on the current workers, let
+  the runs pinned to it finish, then follow the OCR class steps above (the same `docslurp.page_rules_guard` switch).
+
 ## Host phases outside OCR
 
 OCR adds no host parsing in `vm` mode: the worker hands the stored file's path to the provider and reads back only the

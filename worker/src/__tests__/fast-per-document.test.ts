@@ -288,7 +288,7 @@ describe("every way a run can end leaves each searchable document charged exactl
 
 describe("deploy transition: no run is billed under both rules", () => {
   it("pins a run per document only on its first start and only when every live worker supports it", async () => {
-    const ledger = (artifacts: Record<string, string> = {}) => ({ read: (key: string) => artifacts[key], record: (key: string, value: string) => { artifacts[key] = value; } });
+    const ledger = (artifacts: Record<string, string> = {}) => ({ read: (key: string) => artifacts[key], record: (key: string, value: string | null | undefined) => { if (value) artifacts[key] = value; return value ?? undefined; } });
     const yes = async () => true;
     const off = { completedDocuments: false, env: {} };
     expect(await pinRunFastPerDocument({ artifactLedger: ledger(), run: { stats: {} } }, yes, off)).toBe(true);

@@ -154,21 +154,25 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
         where d.run_id = ${runId} and ${ownDocumentSql(client)} and d.status <> 'failed'
           and coalesce(d.mime_type, '') not like 'audio/%' and coalesce(d.mime_type, '') not like 'video/%'
           and (${!deferredProfilesEnabled()} or d.indexing_mode = 'full')
+      ), reads as (
+        -- The run's page-read charges, read once (one pass over the run's usage, not one per document): each distinct page of
+        -- a document a read charged (OCR or Rich), and whether a Rich read charged it (an OCR page upgraded to Rich counts).
+        select au.metadata ->> 'documentId' as document_id,
+          case when (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$' then (au.metadata ->> 'pageNumber')::int end as page,
+          bool_or(au.metric = ${BILLABLE_UNIT_METRICS.richPage}) as rich
+        from usage_attribution au
+        where au.run_id = ${runId} and au.metric = any(${[...PAGE_READ_METRICS]}::text[])
+        group by 1, 2
+      ), counted as (
+        -- By page number, inside the document's pages.
+        select r.document_id, count(*)::int as rich_read, count(*) filter (where r.rich)::int as rich_only
+        from reads r join docs on docs.id = r.document_id
+        where docs.measured and r.page between 1 and docs.page_count
+        group by r.document_id
       )
       select docs.id as document_id, docs.pages, docs.measured,
-        -- Distinct pages of this document a read charged (OCR or Rich): by page number, inside the document's pages.
-        coalesce((select count(distinct (au.metadata ->> 'pageNumber')::int) from usage_attribution au
-          where docs.measured and au.run_id = ${runId} and au.metric = any(${[...PAGE_READ_METRICS]}::text[])
-            and au.metadata ->> 'documentId' = docs.id
-            and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
-            and (au.metadata ->> 'pageNumber')::int between 1 and docs.page_count), 0)::int as rich_read,
-        -- Of those, the pages a Rich read charged (an OCR page upgraded to Rich counts here), for the report.
-        coalesce((select count(distinct (au.metadata ->> 'pageNumber')::int) from usage_attribution au
-          where docs.measured and au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
-            and au.metadata ->> 'documentId' = docs.id
-            and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
-            and (au.metadata ->> 'pageNumber')::int between 1 and docs.page_count), 0)::int as rich_only
-      from docs
+        coalesce(counted.rich_read, 0)::int as rich_read, coalesce(counted.rich_only, 0)::int as rich_only
+      from docs left join counted on counted.document_id = docs.id
     `,
     ], async (client, [lockedRows, rows]) => {
       const locked = lockedRows[0];

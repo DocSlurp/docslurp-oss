@@ -56,7 +56,12 @@ BEGIN
         USING ERRCODE = 'DS001',
           HINT = 'An older worker is settling a run started under the OCR page class. Roll workers forward; before a worker rollback, set docslurp.page_rules_guard = off (docs/extraction/ocr.md, rollout and rollback).';
     END IF;
-    -- perDocument: a run billed Fast per document. An older worker's run-wide Fast charge would bill those pages again.
+    -- perDocument: a run billed Fast per document. An older worker's run-wide Fast charge would bill those pages again. The
+    -- run row lock first (as the read branches above take it): a per-document charge still in flight holds it (its usage
+    -- statement's spent_cents update, 0056) until it commits, so this check sees it.
+    IF v_rules_n < 3 THEN
+      PERFORM 1 FROM public.project_runs r WHERE r.id = NEW.run_id FOR NO KEY UPDATE;
+    END IF;
     IF v_rules_n < 3
        AND EXISTS (SELECT 1 FROM public.usage_events e WHERE e.run_id = NEW.run_id AND e.metric = 'ingest-page-fast'
          AND e.metadata ->> 'perDocument' = 'true') THEN

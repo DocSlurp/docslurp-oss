@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 
@@ -17,7 +17,7 @@ const pageCharges = (usage: PipelineUsageEventLedger) =>
 
 describe("page reads charge only when they completed", () => {
   for (const metric of ["ocr-escalation", "hosted-ocr", "page-analysis"]) {
-    for (const outcome of ["timeout", "error", "rejected", "failure"]) {
+    for (const outcome of ["timeout", "failed", "error", "rejected", "failure"]) {
       it(`${metric} with outcome ${outcome} charges no page, and keeps its usage row`, () => {
         const usage = ledger();
         const row = usage.enqueue({
@@ -40,5 +40,15 @@ describe("page reads charge only when they completed", () => {
     usage.enqueue({ provider: "openrouter", model: "reader", metric: "hosted-ocr", amount: 1, unit: "page", costCents: 1, outputTokens: 10,
       metadata: { documentId: "doc-1", pageNumber: 4 } });
     expect(pageCharges(usage).map((event) => event.id)).toEqual(["rich:run-1:doc-1:3", "ocr:run-1:doc-1:4"]);
+  });
+
+  it("an outcome this build does not know charges as a completed read, and is logged (never silently free)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const usage = ledger();
+    usage.enqueue({ provider: "openrouter", model: "reader", metric: "page-analysis", amount: 1, unit: "page", costCents: 1, outputTokens: 10,
+      metadata: { documentId: "doc-1", pageNumber: 5, outcome: "partial-new-kind" } });
+    expect(pageCharges(usage).map((event) => event.id)).toEqual(["rich:run-1:doc-1:5"]);
+    expect(warn.mock.calls.map((call) => String(call[0]))).toContainEqual(expect.stringContaining("unknown outcome=partial-new-kind"));
+    warn.mockRestore();
   });
 });
