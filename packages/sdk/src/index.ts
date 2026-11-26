@@ -1197,6 +1197,11 @@ export type ReprocessRunInput = {
   visuals?: Visuals;
   /** @deprecated Use `visuals`. */
   chartExport?: ChartExportOverride;
+  /**
+   * Sent as the Idempotency-Key header, not in the body: a repeat with the same key and input returns the run the first
+   * request made and charges nothing again (see reprocess idempotency in the API docs). Send one whenever you may retry.
+   */
+  idempotencyKey?: string;
 };
 /** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
 export type ReprocessRunResult = { run: ProjectRun; job?: JobStatus; warnings: string[] };
@@ -1206,6 +1211,11 @@ export type BulkDocumentsInput = {
   action: "reprocess" | "apply-tags" | "remove-tags" | "delete" | "export-artifacts";
   documentIds: string[];
   tags?: string[];
+  /**
+   * `reprocess` only. Sent as the Idempotency-Key header, not in the body: a retry with the same key and input creates only
+   * the runs the first request did not make and returns the others.
+   */
+  idempotencyKey?: string;
 };
 /** Per action: `{ runs, failed, warnings, job? }` (reprocess), `{ updated, documentIds }` (tags), `{ deleted, documentIds }` or `{ artifacts }`. */
 export type BulkDocumentsResult = JsonObject;
@@ -1371,6 +1381,12 @@ function isSessionBusyError(error: unknown): error is DocSlurpApiError {
 
 /** files/complete's answers that mean the file's bytes (or some parts) are not in storage: upload them, then complete. */
 const RESEND_COMPLETION_CODES = new Set(["upload_object_missing", "upload_parts_incomplete"]);
+/**
+ * A session file the server rejected (its stored bytes or the upload policy check failed; `rejection` says why): final, never
+ * sent again. The session goes on with the other files and its confirm reports this one per file.
+ */
+const REJECTED_FILE_STATUS = "rejected";
+const REJECTED_COMPLETION_CODE = "upload_file_rejected";
 function isResendableCompletion(error: unknown): boolean {
   return error instanceof DocSlurpApiError && RESEND_COMPLETION_CODES.has(error.code ?? "");
 }
@@ -2895,6 +2911,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   }
 
   async function transferFile(sessionPath: string, first: DirectUploadDescriptor, blob: Blob, options: UploadOptions, slot: TransferSlot): Promise<void> {
+    // A file the server rejected is final: nothing to send (it carries no upload target).
+    if (first.status === REJECTED_FILE_STATUS) return;
     let descriptor = first;
     for (let round = 0; ; round++) {
       try {
@@ -2925,7 +2943,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         // The refreshed targets must belong to the same file the local bytes were matched to.
         const refreshed = refreshedDescriptor(askedDescriptors(session.files, [descriptor.id]), descriptor);
         if (!refreshed) throw error;
-        if (refreshed.status === "completed") return;
+        if (refreshed.status === "completed" || refreshed.status === REJECTED_FILE_STATUS) return;
         if (refreshed.status === "failed" || refreshed.status === "aborted") throw new Error(`Upload of ${descriptor.filename} ${refreshed.status}`);
         descriptor = refreshed;
       }
@@ -2976,7 +2994,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         const name = original.filename;
         const fresh = refreshedDescriptor(described, original);
         if (!fresh) throw new Error(`Upload session no longer has ${name}`);
-        if (fresh.status === "completed") continue;
+        if (fresh.status === "completed" || fresh.status === REJECTED_FILE_STATUS) continue;
         if (fresh.status === "failed" || fresh.status === "aborted") throw new Error(`Upload of ${name} ${fresh.status}`);
         resend.set(id, fresh);
       }
@@ -3010,7 +3028,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       for (const file of files) {
         const result = byId.get(file.id);
         const code = result?.error?.code;
-        outcomes.set(file.id, result?.status === "completed" ? "completed"
+        outcomes.set(file.id, result?.status === "completed" || code === REJECTED_COMPLETION_CODE ? "completed"
           : code && RESEND_COMPLETION_CODES.has(code) ? "missing"
           : result?.error?.retryable ? "retry"
           : { code: code ?? "missing result" });
@@ -3183,8 +3201,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * the earlier extraction). Spends credits; price it with {@link reprocessEstimate}.
      */
     async reprocessRun(runId: string, input: ReprocessRunInput = {}, requestOptions?: RequestOptions): Promise<ReprocessRunResult> {
+      const { idempotencyKey, ...options } = input;
       const body = await request<ProjectRun & { run?: ProjectRun; job?: JobStatus; warnings?: string[] }>(
-        `/v1/runs/${encodeURIComponent(runId)}/reprocess`, jsonRequest("POST", input), requestOptions,
+        `/v1/runs/${encodeURIComponent(runId)}/reprocess`, withIdempotencyKey(jsonRequest("POST", options), idempotencyKey), requestOptions,
       );
       // A deferred start answers { run, warnings, job }; a started one answers the run itself plus job.
       if (body.run) return { run: body.run, job: body.job, warnings: body.warnings ?? [] };
@@ -3453,7 +3472,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * `export-artifacts` over the limit throw RangeError before sending.
      */
     async bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
-      const send = (documentIds: string[]) => request<BulkDocumentsResult>(`/v1/documents/bulk`, jsonRequest("POST", { ...input, documentIds }), requestOptions);
+      const { idempotencyKey, ...fields } = input;
+      if (idempotencyKey !== undefined && input.action !== "reprocess") throw new TypeError("idempotencyKey applies to the reprocess action only");
+      const send = (documentIds: string[]) => request<BulkDocumentsResult>(`/v1/documents/bulk`,
+        withIdempotencyKey(jsonRequest("POST", { ...fields, documentIds }), idempotencyKey), requestOptions);
       if (input.documentIds.length <= BULK_DOCUMENTS_MAX) return send(input.documentIds);
       if (input.action === "reprocess" || input.action === "export-artifacts") {
         throw new RangeError(`${input.action} takes at most ${BULK_DOCUMENTS_MAX} documents per request; split the batch`);
@@ -3671,6 +3693,12 @@ function newIdempotencyKey(): string {
   if (typeof crypto?.randomUUID === "function") return crypto.randomUUID();
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Adds an Idempotency-Key header to a request when a key is given. */
+function withIdempotencyKey(init: RequestInit, key: string | undefined): RequestInit {
+  if (key === undefined) return init;
+  return { ...init, headers: { ...(init.headers as Record<string, string>), "Idempotency-Key": key } };
 }
 
 function jsonRequest(method: string, body: unknown): RequestInit {

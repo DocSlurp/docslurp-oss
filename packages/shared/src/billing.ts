@@ -187,6 +187,16 @@ export function richPagesForOutputTokens(outputTokens: number | null | undefined
   return pricing().richPagesForOutputTokens(outputTokens);
 }
 
+/**
+ * Rich pages an estimate's high end counts per vision read of a page (the provider's planning figure, at least 1; the open
+ * default and a provider without one count 1). Not a ceiling: see PricingProvider.estimateHighRichPagesPerRead.
+ */
+export function estimateHighRichPagesPerRead(): number {
+  const provider = pricing();
+  const pages = typeof provider.estimateHighRichPagesPerRead === "function" ? Number(provider.estimateHighRichPagesPerRead()) : 1;
+  return Number.isFinite(pages) ? Math.max(1, pages) : 1;
+}
+
 /** Monthly storage credits for `bytes` stored (object + index). */
 export function storageCreditsPerMonth(bytes: number): number {
   return pricing().storageCreditsPerMonth(bytes);

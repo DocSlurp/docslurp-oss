@@ -482,6 +482,33 @@ a while on a large session), confirm waits up to 10 seconds and then answers
 `409` `upload_session_busy` with `Retry-After`. Repeat the same request; it
 never starts a second run.
 
+A file that fails its storage or policy check does not fail the session: its
+status becomes `rejected`, with `rejection: { code, message }` on the session's
+file list (`too_large`, `unsupported_type`, `content_mismatch`,
+`policy_refused` or `object_missing`). It is never offered for upload again
+(no new signed URL; completing it again answers `upload_file_rejected`), it is
+reported in the confirm response's `rejected[]`, and the other files are
+ingested and billed. The session counts as complete once no file is still
+pending, so ingestion starts as soon as the last good file completes. A session
+where no file completed answers `409` `upload_session_no_completed_files` and
+starts nothing.
+
+A confirm sent while a file is still uploading answers `409`
+`upload_files_incomplete`, naming each such file in `issues`, so a file is
+never dropped silently. Send `?skipIncomplete=true` (or
+`{ "skipIncomplete": true }`) to go ahead with the completed files: every check
+runs first, a file whose bytes have already arrived is completed, and the rest
+are closed (`aborted`, rejection code `not_finished`) and reported in
+`rejected[]` only when the run is admitted. A confirm refused before its run is
+admitted (credits, a revoked key, an expired session) does not close or ingest
+any file; files the reconciler has already rejected stay rejected, and an
+expired session is then aborted as usual.
+
+A session that expires before it is confirmed is aborted and its stored bytes
+are deleted: nothing is ingested or charged. Confirm with `skipIncomplete`
+before it expires to keep the files that finished. The stored bytes of files a
+confirmed session left out are deleted once their upload URLs have expired.
+
 ### Matching files, partial acceptance and idempotency
 
 `POST /v1/uploads/direct/sessions` takes `files[]`, each with an optional
@@ -898,6 +925,14 @@ A server key with the `ingest` scope can keep the documents it uploads current w
 | Reprocess, retag or delete many documents (at most 500 per request; the SDK splits deletes and tag changes) | `POST /v1/documents/bulk` with `{ action, documentIds, tags? }` | `bulkDocuments` |
 | Act on an ingest report recommendation | `POST /v1/projects/:project/ingest-report/reprocess` (`ingest`) or `…/apply` (`projects:manage`) | `reprocessIngestRecommendation` / `applyIngestRecommendation` |
 
+- Reprocess (`POST /v1/runs/:runId/reprocess` and the bulk `reprocess` action) accepts an `Idempotency-Key` header (1-255 printable ASCII characters; SDK: `idempotencyKey` on `reprocessRun` and on `bulkDocuments` with `action: "reprocess"`). Each run a reprocess creates is recorded once under the key:
+  - A repeat with the same key and body returns the run the first request made, with the same response (`201`, `Idempotency-Replayed: true`, the same `warnings`, `skipped` and deferred-start shape), and charges nothing again, even when the two requests race.
+  - A bulk reprocess creates one run per project and pipeline, each with its own receipt, so the key and the `409` rules below apply per (project, pipeline) group. A retry with the same key creates only the runs the first request did not make (a group refused for credits, or busy) and returns the others; `Idempotency-Replayed: true` is set when every run was returned rather than created.
+  - The same key with a different body is `409` `idempotency_conflict`. While a request with the key is still running, a repeat waits briefly and then answers `409` `idempotency_in_flight` with `Retry-After`; retry with the same key. A request that failed before creating its run leaves the key free, so a retry runs it.
+  - Keys are scoped to your organization, user, API key and project, and are kept for 30 days from when the receipt was created (longer while its run is still queued or processing). Without a key every request creates a run, so send one whenever you may retry.
+  - Behaviour change: the header was ignored on these routes before. A malformed key is now `400` `invalid_idempotency_key`, and reusing a key with a different body is `409`. Clients that never send the header are unaffected.
+- Reprocess, full-index and config-change estimates return `credits.low` and `credits.high`. `high` is the planning high end, not a cap: very dense text (long tables) can bill more, and spend is limited by the run's `maxCostCents`, when set, and by the organization's balance, checked as the run spends. Audio and video minutes are not in `high`; they bill as they are transcribed, and `basis` says how many were left out. See [config-change jobs](config-change-jobs.md) for the full rules.
+- A source document with no stored size and no counted page count is left out of a reprocess and reported (`skipped` and `warnings` on a run reprocess, `failed` on bulk, code `reprocess_document_unmeasurable`); the rest run. When none remains the request is `422` `reprocess_no_measurable_documents`.
 - Browser keys never get these, whatever their scopes.
 - A key never exceeds its user's role: the user must be able to edit the project. Keys restricted to specific projects reach only documents and runs in those projects. A request naming anything outside them answers 404 before any change, including bulk requests where only one document is out of scope.
 - The bulk `export-artifacts` action is a read and needs `artifacts` instead.

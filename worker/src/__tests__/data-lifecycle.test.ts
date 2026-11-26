@@ -119,6 +119,32 @@ async function drainAll(stores: ReturnType<typeof fakeExternalStores>) {
 }
 
 describe("delete triggers enqueue external cleanup", () => {
+  it("deletes the object of a file a confirmed session left out, never another organization's or a referenced key", async () => {
+    await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o2', 'Other', 'other', 'u2') on conflict do nothing`;
+    const skipped = "u1/s1/raw/skipped.pdf";
+    const rejected = "u1/s1/raw/rejected.pdf";
+    const kept = "u1/s1/raw/sealed-kept.pdf";
+    const foreign = "u2/s2/raw/skipped.pdf";
+    await sql`insert into upload_sessions (id, user_id, org_id, status) values ('s1', 'u1', 'o1', 'confirmed'), ('s2', 'u2', 'o2', 'confirmed')`;
+    await sql`insert into upload_session_files (id, session_id, filename, mime_type, source_key, upload_mode, status) values
+      ('f-skip', 's1', 'skipped.pdf', 'application/pdf', ${skipped}, 'single', 'aborted'),
+      ('f-rej', 's1', 'rejected.pdf', 'application/pdf', ${rejected}, 'single', 'rejected'),
+      ('f-kept', 's1', 'kept.pdf', 'application/pdf', ${kept}, 'single', 'completed'),
+      ('f-foreign', 's2', 'skipped.pdf', 'application/pdf', ${foreign}, 'single', 'aborted')`;
+    const stores = fakeExternalStores([skipped, rejected, kept, foreign], {});
+    // Queued for the right organization: deleted. A row naming another organization's file, or a completed file: refused.
+    await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before) values
+      ('upload_skipped', 'o1', ${skipped}, '{}'::jsonb, 'skipped_upload', now()),
+      ('upload_skipped', 'o1', ${rejected}, '{}'::jsonb, 'skipped_upload', now()),
+      ('upload_skipped', 'o1', ${foreign}, '{}'::jsonb, 'skipped_upload', now()),
+      ('upload_skipped', 'o1', ${kept}, '{}'::jsonb, 'skipped_upload', now())`;
+    const result = await drainStorageCleanupQueue(sql, stores.storage, stores.options);
+    expect(result.failed).toBe(2);
+    expect([...stores.objects].sort()).toEqual([foreign, kept].sort());
+    expect((await sql`select target from storage_cleanup_queue order by target`).map((row) => row.target)).toEqual([foreign, kept].sort());
+    await sql`delete from upload_sessions where id in ('s1', 's2')`;
+  });
+
   it("cleans a replayed original after its delay without deleting the sealed source or other tenants", async () => {
     await seedRun("live");
     const original = "u1/upload/raw/original.pdf";
