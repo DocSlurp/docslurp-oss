@@ -68,7 +68,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import { dopplerImageLimits, figuresEnabled, ladderSkipsOcr, summaryScanAvailable, type CanonicalDocument } from "@docslurp/shared";
+import { dopplerImageLimits, figuresEnabled, ladderSkipsOcr, summaryScanAvailable, summaryScanMaxCalls, type CanonicalDocument } from "@docslurp/shared";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
 import {
   enrichCanonicalDocumentWithBestParser,
@@ -1018,11 +1018,11 @@ export class ExtractMarkdownStage implements Stage {
                     state.artifactLedger.recordDocument(document.id, "summary-evidence", this.storage.uri(evidenceKey));
                     // The index holds byte offsets into the stored object. The candidate branch (winningCandidate.textUri) holds
                     // the extractor's raw bytes while winningText has been decoded, sanitized and normalized since, so there the
-                    // stored object is read back: one extra read, paid only when the adaptive summary is on and the document is
+                    // stored object is read back: one extra read, paid only when the adaptive summary may read further pages and the document is
                     // larger than one summary sample (the only reader of the index today).
                     const exact = exactlyStored && exactlyStored.uri === artifactUri && exactlyStored.text === winningText;
                     const stored = exact ? winningText
-                      : summaryScanAvailable(process.env) && document.pageCount > SUMMARY_MAX_PAGES
+                      : summaryScanAvailable(process.env) && summaryScanMaxCalls(process.env) > 1 && document.pageCount > SUMMARY_MAX_PAGES
                         ? await readStoredMarkdown(this.storage, artifactUri, signal)
                         : null;
                     await syncPageOffsets(this.storage, {
