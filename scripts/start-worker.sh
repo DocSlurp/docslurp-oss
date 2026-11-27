@@ -112,7 +112,7 @@ refuse_unsafe_overrides() {
   esac
   value="$(normalize_env_setting "${DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS:-}")"
   # ASCII digits only, whatever the locale: [0-9] matches other scripts' digits under UTF-8 collation.
-  if [[ -n "${value}" ]] && ! LC_ALL=C bash -c '[[ "$1" =~ ^([1-9]|[1-6][0-9]|7[0-2])$ ]]' _ "${value}"; then
+  if [[ -n "${value}" ]] && ! LC_ALL=C bash -c '[[ "$1" =~ ^([1-9]|[1-9][0-9]|1[0-5][0-9]|16[0-8])$ ]]' _ "${value}"; then
     refused+=(DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS)
   fi
   value="$(normalize_env_setting "${DOCSLURP_PARSER_SANDBOX:-}")"

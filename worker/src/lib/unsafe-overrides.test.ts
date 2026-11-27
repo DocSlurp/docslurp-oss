@@ -75,7 +75,7 @@ describe("unsafe overrides", () => {
   // #398 council: settings whose value weakens protection rather than an on/off fail-open flag.
   const UNSAFE_VALUES: Record<(typeof UNSAFE_VALUE_SETTINGS)[number], { unsafe: string[]; safe: Array<string | undefined> }> = {
     DOCSLURP_CLAMAV_ENABLED: { unsafe: ["false", "0", "no", "off", "typo"], safe: [undefined, "", "true", "1", "yes", "on"] },
-    DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: { unsafe: ["73", "100", "999999", "0", "-1", "NaN", "1+999", "072", "7.2"], safe: [undefined, "", "1", "12", "24", "25", "48", "69", "72"] },
+    DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: { unsafe: ["169", "200", "999999", "0", "-1", "NaN", "1+999", "072", "7.2"], safe: [undefined, "", "1", "12", "24", "25", "48", "69", "72", "73", "100", "168"] },
     QUARANTINE_ENABLED: { unsafe: ["false", "0", "no", "off", " OFF ", "flase"], safe: [undefined, "", "true", "1", "yes", "on", " TRUE "] },
     DOCSLURP_PARSER_SANDBOX: { unsafe: ["none", " None "], safe: [undefined, "", "bubblewrap", "landlock", "modal"] },
   };

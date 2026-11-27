@@ -191,7 +191,7 @@ for (const zone of ["Asia/Tokyo", "America/Los_Angeles"])
     assert.ok(zones.length >= 2);
     assert.ok(zones.every((z) => z === "UTC"));
   });
-for (const [limit, age, ok] of [["25", 24.5, true], ["48", 47, true], ["69", 60, true], ["70", 60, true], ["72", 71, true], ["48", 49, false], ["72", 73, false]])
+for (const [limit, age, ok] of [["25", 24.5, true], ["48", 47, true], ["69", 60, true], ["70", 60, true], ["72", 71, true], ["168", 167, true], ["48", 49, false], ["72", 73, false], ["168", 169, false]])
   test(`a deployed limit of ${limit}h ${ok ? "accepts" : "refuses"} ${age}h-old signatures`, async (t) => {
     const f = await fixture(t, { age, updateFails: true });
     f.env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS = limit;
@@ -549,8 +549,8 @@ for (const nodeEnv of ["production", "staging", "preview", "prodution", "\u00a0d
     ["DOCSLURP_CLAMAV_ENABLED", "false"],
     ["DOCSLURP_CLAMAV_ENABLED", "typo"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "999999"],
-    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "73"],
-    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "100"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "169"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "200"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "0"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "072"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "7.2"],
