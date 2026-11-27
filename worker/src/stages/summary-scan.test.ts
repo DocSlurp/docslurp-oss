@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { imageAnchorMarkdown, normalizePipelineFeatures, summaryScanAvailable, summaryTreeSwitchWarnings } from "@docslurp/shared";
+import { imageAnchorMarkdown, normalizePipelineFeatures, summaryScanAvailable, summaryScanMaxCalls, summaryTreeSwitchWarnings } from "@docslurp/shared";
 
 import { fromEnv } from "../config.js";
 import { buildPageOffsetsJsonl, pageOffsetsKey, PAGE_OFFSETS_MAX_BYTES } from "../lib/page-offsets.js";
@@ -70,6 +70,10 @@ describe("flag", () => {
     for (const value of ["on", "1", "TRUE", " yes "]) expect(summaryScanAvailable({ DOCSLURP_SUMMARY_SCAN: value }), value).toBe(true);
     for (const value of ["off", "0", "", "maybe", "enabled"]) expect(summaryScanAvailable({ DOCSLURP_SUMMARY_SCAN: value }), value).toBe(false);
     expect(summaryTreeSwitchWarnings({ DOCSLURP_SUMMARY_SCAN: "maybe" })[0]).toContain("DOCSLURP_SUMMARY_SCAN");
+    expect(summaryScanMaxCalls({})).toBe(1);
+    for (const value of ["", "0", "7", "-2", "2.5", "many"]) expect(summaryScanMaxCalls({ DOCSLURP_SUMMARY_SCAN_MAX_CALLS: value }), value).toBe(1);
+    expect(summaryScanMaxCalls({ DOCSLURP_SUMMARY_SCAN_MAX_CALLS: " 3 " })).toBe(3);
+    expect(summaryScanMaxCalls({ DOCSLURP_SUMMARY_SCAN_MAX_CALLS: "6" })).toBe(6);
   });
 });
 
@@ -280,8 +284,36 @@ describe("DocumentSummaryStage with DOCSLURP_SUMMARY_SCAN", () => {
     vi.spyOn(console, "info").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.stubEnv("DOCSLURP_SUMMARY_SCAN", "on");
+    // These tests exercise the multi-round loop; a deployment makes one call unless it raises this.
+    vi.stubEnv("DOCSLURP_SUMMARY_SCAN_MAX_CALLS", "6");
   });
   afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+  it("by default makes one call for a large document: labels and summary, no page reads", async () => {
+    vi.stubEnv("DOCSLURP_SUMMARY_SCAN_MAX_CALLS", "");
+    modelReplies([reply("contract", ["a", "b"], [{ do: "read", unit: "page", at: 77 }]), later()]);
+    const { run, putJson } = setup();
+    await run();
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(generate.mock.calls[0]![0].prompt).toContain("EVIDENCE 299");
+    const stored = artifact(putJson);
+    expect(stored.labels).toEqual({ docType: "contract", topics: ["a", "b"] });
+    expect(stored.scan).toMatchObject({ steps: 1, stoppedBy: "steps", pagesTotal: 300 });
+    expect(stored.scan.pagesRead).toBeLessThan(300);
+    expect(stored.summary).toContain("Summary of a contract.");
+    const rows = record.mock.calls.map(([e]) => e).filter((e) => e.metric === "summary-generation");
+    expect(rows.filter((e) => e.amount === 1)).toHaveLength(1);
+    expect(rows.filter((e) => e.amount === 0)).toHaveLength(1);
+  });
+
+  it("stops at the configured number of calls", async () => {
+    vi.stubEnv("DOCSLURP_SUMMARY_SCAN_MAX_CALLS", "2");
+    modelReplies([reply("contract", ["a"]), later({ adds: "More." })]);
+    const { run, putJson } = setup();
+    await run();
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(artifact(putJson).scan).toMatchObject({ steps: 2, stoppedBy: "steps" });
+  });
 
   it("stops after two later rounds add nothing, and stores labels and scan", async () => {
     modelReplies([reply("contract", ["a", "b"]), later()]);

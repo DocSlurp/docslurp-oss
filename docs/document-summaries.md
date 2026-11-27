@@ -110,11 +110,14 @@ for parsing, OCR, page indexing or storage.
 ## Adaptive summary and labels (`DOCSLURP_SUMMARY_SCAN`)
 
 Off by default (unset and unknown values are off). The summary stage normally makes one model call over at most ten
-sampled pages and 10 KB. With `DOCSLURP_SUMMARY_SCAN=on`, a document that has more pages than that sample, verified page
-references and a page offset index gets a short read loop instead:
+sampled pages and 10 KB. With `DOCSLURP_SUMMARY_SCAN=on`, that one call reads the same evidence and returns a document
+type and up to six topics with the summary. This applies to a document whose evidence holds every page and to a larger
+document with verified page references.
 
-- The first call reads the same evidence as today and returns the whole result: a document type, up to six topics and
-  the summary.
+`DOCSLURP_SUMMARY_SCAN_MAX_CALLS` (1 to 6, default 1) sets how many model calls one document may make. Above 1, a
+document that has more pages than the evidence sample and a page offset index gets a short read loop:
+
+- The first call is the one described above and returns the whole result.
 - Each later call reads ten further pages, spread across the unread pages (plus pages the model asks for, within the
   loop's limits), and reports only what those pages add: whether they fit the result so far, their own type, up to
   three new topics and one sentence.
@@ -122,19 +125,22 @@ references and a page offset index gets a short read loop instead:
   pages do not fit, which makes the document `mixed`. New topics follow the first call's, and each sentence is appended
   to the summary. A later call can extend the result but never replace it.
 - The loop stops when two later calls in a row add nothing, when the model says more pages would not change the result
-  (after two calls for documents over 200 pages), or at a limit: six model calls in all, a small cost and token cap,
-  the summary deadline.
+  (after two calls for documents over 200 pages), or at a limit: the configured number of calls, a small cost and token
+  cap, the summary deadline.
 
-A document whose evidence already holds every page gets one call with the first call's prompt, so it is labelled too.
+The default is one call because later calls cost three to five more model calls on a long document and have not been
+shown to improve the summary or the labels.
+
 Every call's tokens and cost are reported as `summary-generation` usage, and the document's one summary unit is recorded
-once. The per-document summary charge stays one. When the scan read more pages than the evidence, the "Sampled document
+once. The per-document summary charge stays one. When the loop read more pages than the evidence, the "Sampled document
 overview" notice and the stored page coverage count the pages it read.
 
-Every other document (no index, unverified pages, text files, a larger document whose pages were redacted for PII) keeps
-the single call and the same prompt, and so does any document whose first call returns an unusable reply. A failed later
-call or page never fails the document: everything merged so far is stored. `summaries/<documentId>.json` gains two
-optional fields, `labels` (`docType`, `topics`) and `scan` (`steps`, `stoppedBy`, `pagesRead`, `pagesTotal`); readers
-that do not know them ignore them. Document text, topics and summaries are never logged or traced by this path.
+Every other document (unverified pages, text files, and with more than one call allowed: no index, or a larger document
+whose pages were redacted for PII) keeps the single call and today's prompt, and so does any document whose first call
+returns an unusable reply. A failed later call or page never fails the document: everything merged so far is stored.
+`summaries/<documentId>.json` gains two optional fields, `labels` (`docType`, `topics`) and `scan` (`steps`,
+`stoppedBy`, `pagesRead`, `pagesTotal`); readers that do not know them ignore them. Document text, topics and summaries
+are never logged or traced by this path.
 
 ## Summary tree: section summaries for long documents
 

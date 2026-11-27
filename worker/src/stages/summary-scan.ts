@@ -11,6 +11,7 @@ import {
   type SliceRef,
 } from "@docslurp/shared";
 
+import { SUMMARY_SCAN_CALL_LIMIT } from "@docslurp/shared";
 import { estimateTokens } from "../lib/unicode-text.js";
 import { pageByteRange, pageOffsetsKey, PAGE_OFFSETS_MAX_BYTES, parsePageOffsets, type PageOffsetIndex } from "../lib/page-offsets.js";
 import { stripSummaryControlCharacters } from "../summary-tree/summary.js";
@@ -32,7 +33,8 @@ export const SCAN_MAX_TOPICS = 6;
 export const SCAN_TOPIC_MAX_CHARS = 40;
 export const SCAN_SUMMARY_MAX_CHARS = 2_000;
 export const SCAN_FILENAME_MAX_CHARS = 200;
-export const SCAN_MAX_MODEL_CALLS = 6;
+/** The most model calls a scan can be configured to make; a deployment makes one unless it raises its own limit. */
+export const SCAN_MAX_MODEL_CALLS = SUMMARY_SCAN_CALL_LIMIT;
 export const SCAN_PAGES_PER_STEP = 10;
 /** A later round's sentence of additions is clipped to this many characters. */
 export const SCAN_ADDS_MAX_CHARS = 280;
@@ -415,9 +417,9 @@ async function callStep<R>(args: { call: ScanModelCall; prompt: { system: string
   throw new Error("unreachable");
 }
 
-export function scanBudget(args: { wallMs: number }): ReadBudget {
+export function scanBudget(args: { wallMs: number; maxCalls?: number }): ReadBudget {
   return {
-    maxSteps: SCAN_MAX_MODEL_CALLS,
+    maxSteps: Math.max(1, Math.min(args.maxCalls ?? SCAN_MAX_MODEL_CALLS, SCAN_MAX_MODEL_CALLS)),
     maxUnitsPerStep: SCAN_PAGES_PER_STEP,
     maxSliceTokens: 1_200,
     maxStepTokens: 3_000,
@@ -455,6 +457,8 @@ export async function runSummaryScan(args: {
   shouldStop?: () => boolean;
   /** Milliseconds left of the stage's summary deadline; a reserve for the embedding after it is kept back. */
   wallMs: number;
+  /** The most model calls this scan may make (at most `SCAN_MAX_MODEL_CALLS`, which is also the default). */
+  maxCalls?: number;
   now?: () => number;
 }): Promise<ScanOutcome | null> {
   const total = args.source.pagesTotal;
@@ -482,7 +486,7 @@ export async function runSummaryScan(args: {
     init: EMPTY_PROGRESS,
     coverage: "representative",
     allowedActions: ALLOWED_ACTIONS,
-    minSteps: total > SCAN_LARGE_DOCUMENT_PAGES ? 2 : 1,
+    minSteps: total > SCAN_LARGE_DOCUMENT_PAGES && (args.maxCalls ?? SCAN_MAX_MODEL_CALLS) > 1 ? 2 : 1,
     // Finished when later rounds keep adding nothing. One quiet round is not enough: the next pages may differ.
     done: (_previous, next) => next.base !== null && next.quiet >= SCAN_QUIET_ROUNDS,
     async step({ state, slices, step, signal }) {
@@ -522,7 +526,7 @@ export async function runSummaryScan(args: {
       task,
       source,
       strategy: stratifiedRounds(SCAN_PAGES_PER_STEP),
-      budget: scanBudget({ wallMs }),
+      budget: scanBudget({ wallMs, maxCalls: args.maxCalls }),
       ports,
       seed: {
         seen: [...evidence],
@@ -547,8 +551,10 @@ export async function runSummaryScan(args: {
 }
 
 /**
- * Labels for a document whose evidence already holds every page: one call with the first round's prompt, no page reads
- * and no loop. Returns null when the reply cannot be used (the caller uses the single call).
+ * Labels and summary from one call over the summary evidence, with the first round's prompt: no page reads and no loop.
+ * Used for a document whose evidence holds every page, and for every document when the deployment allows one call.
+ * `pagesRead` is the number of evidence pages (the whole document when omitted). Returns null when the reply cannot be
+ * used (the caller uses the single call).
  */
 export async function runEvidenceLabels(args: {
   call: ScanModelCall;
@@ -556,13 +562,15 @@ export async function runEvidenceLabels(args: {
   fileName: string;
   evidenceText: string;
   pagesTotal: number;
+  pagesRead?: number;
   signal: AbortSignal;
 }): Promise<ScanOutcome | null> {
+  const pagesRead = Math.min(args.pagesRead ?? args.pagesTotal, args.pagesTotal);
   let costCents = 0;
   let inputTokens = 0;
   let outputTokens = 0;
   try {
-    const prompt = buildScanPrompt({ fileName: args.fileName, state: null, evidenceText: args.evidenceText, pagesRead: args.pagesTotal, pagesTotal: args.pagesTotal });
+    const prompt = buildScanPrompt({ fileName: args.fileName, state: null, evidenceText: args.evidenceText, pagesRead, pagesTotal: args.pagesTotal });
     const result = await callStep({ call: args.call, prompt, signal: args.signal, parse: parseScanReply,
       onAttempt: (attempt, n) => {
         costCents += attempt.costCents ?? 0;
@@ -570,7 +578,7 @@ export async function runEvidenceLabels(args: {
         outputTokens += attempt.outputTokens;
         args.onAttempt(attempt, { step: 1, attempt: n });
       } });
-    return { state: result.reply.state, steps: 1, stoppedBy: "exhausted", pagesRead: args.pagesTotal, pagesTotal: args.pagesTotal,
+    return { state: result.reply.state, steps: 1, stoppedBy: pagesRead < args.pagesTotal ? "steps" : "exhausted", pagesRead, pagesTotal: args.pagesTotal,
       extraPages: [], costCents, inputTokens, outputTokens };
   } catch {
     return null;
