@@ -95,8 +95,8 @@ export const organizations = pgTable(
     creditBalanceCents: numeric("credit_balance_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     /** First paid grant (top-up, auto top-up, adjustment, promo); null for starter orgs (migration 0068). */
     fundedAt: timestamp("funded_at", { withTimezone: true, mode: "string" }),
-    /** Org-wide concurrency ceiling: 50 starter, raised to 250 on first funding (STARTER/FUNDED_WORKER_SLOTS). */
-    workerSlots: integer("worker_slots").default(50).notNull(),
+    /** Org-wide concurrency ceiling: 128 starter, raised to 250 on first funding. */
+    workerSlots: integer("worker_slots").default(128).notNull(),
     autoRechargeEnabled: boolean("auto_recharge_enabled").default(false).notNull(),
     autoRechargeThresholdCredits: integer("auto_recharge_threshold_credits"),
     autoRechargeAmountCents: integer("auto_recharge_amount_cents"),
