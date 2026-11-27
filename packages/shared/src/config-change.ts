@@ -610,7 +610,7 @@ export function estimatePipelineWork(args: {
   chartExportTier?: ChartExportTier | null;
   /**
    * The low end's page basis when it differs from `pages`: the pages and documents the completion charge will include (the
-   * worker's coalesce(billing_pages, page_count) over measured, non-deduplicated, non-failed, non-media documents). `pages`
+   * worker's coalesce(billing_pages, page_count) over measured, non-failed, non-media documents). `pages`
    * stays the high end's basis. Unset: `pages` and `documents`.
    */
   low?: { pages: number; documents: number; fastOnlyPages?: number };

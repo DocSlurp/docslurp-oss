@@ -44,7 +44,7 @@ export interface SpendOutcome { paused: boolean; blocked: boolean }
 /**
  * The persistence and balance port a PageBasis runs over. Every method is required: an adapter that lacks one is a type
  * error, never a skipped check. Adapters: db/page-basis-ledger.ts (Postgres) and pipeline/page-basis-memory.ts (tests).
- * Every write is scoped to the run's own, non-deduplicated document.
+ * Every write is scoped to the run's own documents.
  */
 export interface PageBasisLedger {
   /** documents.page_count = pages, page_count_source = 'counted'. False when the document is not the run's own. */
@@ -58,7 +58,7 @@ export interface PageBasisLedger {
   /**
    * The one run-wide sum every spend check weighs: Fast pages of the run's paged, non-media documents above their intake count
    * and frames of its multi-frame images no page-read charge covers, over every document except `excludeDocumentId` (whose
-   * pages the caller adds from its own state), and that document's charged pages. Failed and deduplicated documents never bill
+   * pages the caller adds from its own state), and that document's charged pages. Failed documents never bill
    * and are not counted. `readMetrics` are the page-read charge metrics.
    */
   runMeasurements(runId: string, excludeDocumentId: string | null, readMetrics: readonly string[]): Promise<RunMeasurements>;
@@ -88,7 +88,7 @@ export type PageMeasurement =
   | { kind: "whole-document"; pages: number };
 
 export interface PageBasisChange {
-  /** The ledger wrote the document (false: not the run's own document, e.g. a deduplicated copy). */
+  /** The ledger wrote the document (false: not the run's own document, e.g. another run's document). */
   persisted: boolean;
   pageCount: number;
   billingPages: number | null;
@@ -359,7 +359,7 @@ export class PageBasis {
 
   /**
    * What the run owes for measured pages no charge covers yet: every other document of the run (durable, run_measured_pages)
-   * plus this document from its in-memory state, so a document whose write the ledger did not take (a deduplicated copy) or
+   * plus this document from its in-memory state, so a document whose write the ledger did not take or
    * an attempt racing another is still counted.
    */
   private async runOwed(document: Document, intake: number): Promise<{ credits: number; pages: number }> {

@@ -1,7 +1,7 @@
 /*
  * In-memory adapter of the page basis ledger (pipeline/page-basis.ts), for tests and tools without a database. It models the
  * documents table's page columns, a run's charged page reads, the organization's available balance and the run's pause state
- * with the same rules as the Postgres adapter (db/page-basis-ledger.ts): writes scoped to the run's own, non-deduplicated
+ * with the same rules as the Postgres adapter (db/page-basis-ledger.ts): writes scoped to the run's own
  * document; monotone page equivalents; a charge blocked once it would take the balance below `floor`.
  */
 import { DEFAULT_PAGE_EQUIVALENT_ALLOWANCE, defaultPipelineFeatures } from "@docslurp/shared";
@@ -85,11 +85,11 @@ export class MemoryPageBasisLedger implements PageBasisLedger {
 
   private own(runId: string, documentId: string): MemoryPageBasisDocument | null {
     const row = this.documents.get(documentId);
-    return row && row.runId === runId && !row.dedupedFromDocumentId ? row : null;
+    return row && row.runId === runId ? row : null;
   }
 
   private ofRun(runId: string): MemoryPageBasisDocument[] {
-    return [...this.documents.values()].filter((row) => row.runId === runId && !row.dedupedFromDocumentId);
+    return [...this.documents.values()].filter((row) => row.runId === runId);
   }
 
   async setPageCount(runId: string, documentId: string, pages: number): Promise<boolean> {
@@ -156,7 +156,6 @@ export class MemoryPageBasisLedger implements PageBasisLedger {
     let fastPages = 0;
     let ocrFrames = 0;
     let documentChargedPages = 0;
-    // ofRun leaves deduplicated copies out, as the SQL does.
     for (const row of this.ofRun(runId)) {
       if (row.status === "failed") continue;
       const mime = row.mimeType.split(";")[0]!.trim().toLowerCase();

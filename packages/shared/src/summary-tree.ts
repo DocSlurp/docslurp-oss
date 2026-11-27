@@ -57,8 +57,9 @@ export const SUMMARY_TREE_SERVE_ENV_FLAG = "DOCSLURP_SUMMARY_TREE_SERVE";
 
 /**
  * `DOCSLURP_SUMMARY_SCAN`: parsed like the switches above (unset and unknown are off). On, the document summary stage
- * keeps reading further page samples of a large document until its labels stop changing and stores the labels beside
- * the summary. Off is the single-call summary. It is not a tree switch and needs no project setting.
+ * asks for a document type and topics with the summary and stores them beside it; `DOCSLURP_SUMMARY_SCAN_MAX_CALLS`
+ * above 1 also lets large documents read further page samples. Off is the single-call summary. It is not a tree switch
+ * and needs no project setting.
  */
 export const SUMMARY_SCAN_ENV_FLAG = "DOCSLURP_SUMMARY_SCAN";
 
@@ -82,9 +83,24 @@ export function summaryTreeServeAvailable(env: Env): boolean {
   return switchOn(env, SUMMARY_TREE_SERVE_ENV_FLAG);
 }
 
-/** Whether this deployment lets the document summary read further page samples of large documents. */
+/** Whether this deployment's document summary stage returns labels with the summary. */
 export function summaryScanAvailable(env: Env): boolean {
   return switchOn(env, SUMMARY_SCAN_ENV_FLAG);
+}
+
+/**
+ * `DOCSLURP_SUMMARY_SCAN_MAX_CALLS`: the most model calls one document's summary may make while the scan is on, 1 to
+ * `SUMMARY_SCAN_CALL_LIMIT`. The default is 1: one call over the summary evidence returns the labels and the summary.
+ * A larger value lets large documents read further page samples. Unset, non-numeric and out-of-range values are 1.
+ */
+export const SUMMARY_SCAN_MAX_CALLS_ENV = "DOCSLURP_SUMMARY_SCAN_MAX_CALLS";
+export const SUMMARY_SCAN_CALL_LIMIT = 6;
+
+export function summaryScanMaxCalls(env: Env): number {
+  const raw = env[SUMMARY_SCAN_MAX_CALLS_ENV]?.trim() ?? "";
+  if (!/^\d+$/.test(raw)) return 1;
+  const value = Number(raw);
+  return value >= 1 && value <= SUMMARY_SCAN_CALL_LIMIT ? value : 1;
 }
 
 /** Startup warnings for switch values the parser does not know (each is treated as off). */

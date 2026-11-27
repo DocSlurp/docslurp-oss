@@ -88,6 +88,9 @@ describe("parseNextActions", () => {
     expect(parseNextActions(null)).toEqual({ actions: [], dropped: 0 });
     expect(parseNextActions("read everything")).toEqual({ actions: [], dropped: 1 });
     expect(parseNextActions({ do: "stop" })).toEqual({ actions: [], dropped: 1 });
+    // One valid action written as a bare object is read as a one-item list.
+    expect(parseNextActions({ do: "read", unit: "page", at: 7 })).toEqual({ actions: [{ do: "read", unit: "page", at: 7 }], dropped: 0 });
+    expect(parseNextActions({ do: "stop", reason: "answered" })).toEqual({ actions: [{ do: "stop", reason: "answered" }], dropped: 0 });
   });
 
   it("accepts the closed vocabulary", () => {
