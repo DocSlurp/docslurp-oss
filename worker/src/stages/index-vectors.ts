@@ -19,9 +19,9 @@ import { maxInt } from "./utils.js";
 import { projectVectorLocation } from "./lancedb-location.js";
 import { keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { chunkFirstPage, deleteLanceDbRecords, planPageWindows, writeLanceDbDocumentInWindows } from "./lancedb-writer.js";
+import { chunkFirstPage, deleteLanceDbRecords, planPageWindows, writeLanceDbDocumentInWindows, writeLanceDbTextRecords, type LanceTextRecord } from "./lancedb-writer.js";
 import { lanceDbMaintenanceSettings, type LanceDbMaintenanceSettings } from "./lancedb-maintenance.js";
-import { LanceDbWriteQueue, type VectorWriteOutcome } from "./lancedb-write-queue.js";
+import { LanceDbWriteQueue, type VectorOutboxRow, type VectorWriteOutcome } from "./lancedb-write-queue.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
 
 type BackendResult = {
@@ -124,6 +124,57 @@ export function buildVectorRecords(
   }));
 }
 
+/** One document's chunk rows as stored in Postgres, for LanceDB rows written ahead of the vectors. */
+export type StoredChunkRow = {
+  id: string;
+  chunk_index: number;
+  text: string;
+  heading_path: string[] | null;
+  page_number: number | null;
+  token_estimate: number | null;
+  metadata: Record<string, unknown> | null;
+};
+
+/** The rows buildVectorRecords produces for the same chunks, minus the vector. */
+export function buildTextRecords(
+  chunks: readonly StoredChunkRow[],
+  documentId: string,
+  metadata: { sourceKey?: unknown; filename?: unknown },
+  runId: string,
+): LanceTextRecord[] {
+  return chunks.map((chunk) => ({
+    id: chunk.id,
+    documentId,
+    chunkIndex: chunk.chunk_index,
+    text: chunk.text,
+    metadata: { documentId, sourceKey: metadata.sourceKey, filename: metadata.filename },
+    runId,
+    pageNumber: lancePageNumberValue(chunk.page_number),
+    hydration: encodeLanceChunkHydration({
+      runId,
+      headingPath: chunk.heading_path,
+      pageNumber: chunk.page_number,
+      tokenEstimate: chunk.token_estimate,
+      metadata: chunk.metadata ?? undefined,
+    }),
+  }));
+}
+
+/** A document's stored chunks for one run, read inside the organization that owns the document. */
+export type TextChunkLoader = (scope: { orgId: string; documentId: string; runId: string }) => Promise<StoredChunkRow[]>;
+
+/** What the embed stage asks for once a document's chunks are stored: its text rows in LanceDB, ahead of the vectors. */
+export type DocumentTextIndexer = (args: {
+  orgId: string;
+  projectId: string;
+  runId: string;
+  documentId: string;
+  space: { model: string; dimensions: number };
+  recordMetadata: { sourceKey?: unknown; filename?: unknown };
+  recordCount: number;
+  signal?: AbortSignal;
+}) => Promise<{ written: boolean }>;
+
 /** The artifact was embedded for another document, so its chunk ids are not this document's. */
 export function isForeignArtifact(artifact: { documentId?: string }, documentId: string): boolean {
   return Boolean(artifact.documentId) && artifact.documentId !== documentId;
@@ -144,7 +195,15 @@ export class IndexStage implements Stage {
     private readonly config: Config,
     private readonly deleteVectors: (uri: string, table: string, ids: readonly string[]) => Promise<void> = deleteLanceDbRecords,
     loadChunkIds?: ChunkIdLoader,
+    loadTextChunks?: TextChunkLoader,
   ) {
+    this.loadTextChunks = loadTextChunks ?? (async (scope) => await this.sql()<StoredChunkRow[]>`
+      select c.id, c.chunk_index, c.text, c.heading_path, c.page_number, c.token_estimate, c.metadata
+      from document_chunks c
+      join documents d on d.id = c.document_id
+      where c.document_id = ${scope.documentId} and c.run_id = ${scope.runId} and d.org_id = ${scope.orgId}
+      order by c.chunk_index
+    `);
     this.loadChunkIds = loadChunkIds ?? (async (documentId) => {
       const rows = await this.sql()<{ chunk_index: number; id: string }[]>`
         select chunk_index, id from document_chunks where document_id = ${documentId}
@@ -155,6 +214,39 @@ export class IndexStage implements Stage {
   }
 
   private readonly loadChunkIds: ChunkIdLoader;
+  private readonly loadTextChunks: TextChunkLoader;
+
+  /** A text job's rows: the document's stored chunks of the job's run. A job without an organization or run loads nothing. */
+  private async textRecords(row: Pick<VectorOutboxRow, "documentId" | "runId" | "orgId" | "metadata">): Promise<LanceTextRecord[]> {
+    if (!row.orgId || !row.runId) throw new Error(`text rows of document ${row.documentId} need its organization and run`);
+    const chunks = await this.loadTextChunks({ orgId: row.orgId, documentId: row.documentId, runId: row.runId });
+    return buildTextRecords(chunks, row.documentId, row.metadata, row.runId);
+  }
+
+  /**
+   * Write a document's chunk rows to its LanceDB table without vectors, through the same group-commit queue as the
+   * vector write (or directly in direct write mode). `written` is false when the vector job replaced this one first.
+   */
+  readonly indexDocumentText: DocumentTextIndexer = async (args) => {
+    const location = projectVectorLocation(args, args.space);
+    if (this.lance.writeMode === "queued") {
+      const outcome = await this.writeQueue().indexDocument({
+        uri: location.uri,
+        table: location.table,
+        orgId: args.orgId,
+        documentId: args.documentId,
+        runId: args.runId,
+        artifactKey: "",
+        metadata: args.recordMetadata,
+        recordCount: args.recordCount,
+        textDimensions: args.space.dimensions,
+      }, args.signal);
+      return { written: !outcome.superseded };
+    }
+    const records = await this.textRecords({ documentId: args.documentId, runId: args.runId, orgId: args.orgId, metadata: args.recordMetadata });
+    await writeLanceDbTextRecords(location.uri, location.table, records, args.space.dimensions, args.signal);
+    return { written: true };
+  };
 
   /** Records for one document's artifact, rebound to its own chunk ids when the artifact is another document's. */
   private async documentRecords(
@@ -198,6 +290,7 @@ export class IndexStage implements Stage {
         const artifact = await this.storage.getJson<EmbeddingArtifact>(row.artifactKey, { streamJson: true });
         return await this.documentRecords(artifact, row.documentId, row.metadata, row.runId);
       },
+      loadTextRecords: (row) => this.textRecords(row),
       maintenance: {
         enabled: this.lance.enabled,
         mode: this.lance.mode,

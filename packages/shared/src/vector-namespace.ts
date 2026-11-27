@@ -31,6 +31,15 @@ export function isLanceDbVectorTable(value: unknown): value is LanceDbVectorTabl
   return typeof value === "string" && (LANCEDB_VECTOR_TABLES as readonly string[]).includes(value);
 }
 
+/**
+ * `documents.lexical_index_key`: the run and embedding space whose LanceDB chunks table holds a document's text rows
+ * ahead of its vectors. The worker stamps it after those rows commit; search compares it with the document's current
+ * run and the space it is about to search, so a key from an earlier run or another space never matches.
+ */
+export function lexicalIndexKey(runId: string, model: string, dimensions: number): string {
+  return `${runId}:${model}:${dimensions}`;
+}
+
 export interface VectorLocation {
   uri: string;
   table: string;

@@ -60,6 +60,8 @@ export function createStages(args: {
   setDeterministicVisualExtractor(createVmDeterministicVisualExtractor({ runner: args.runner, storage: args.storage }));
   const sourceCache = new PdfSourceCache(args.storage);
   const rasterCache = new PdfRasterCache(args.runner, args.storage, sourceCache);
+  // The embed stage writes text rows through the index stage's write queue: one queue, one lease per table.
+  const indexStage = new IndexStage(args.runner, args.storage, args.config);
   const stages: Record<PipelineRunStage, () => Stage> = {
     quarantine: () => new QuarantineStage(args.runner, args.storage, args.config),
     "format-detect": () => new FormatDetectStage(args.storage, args.runner, args.config),
@@ -83,14 +85,14 @@ export function createStages(args: {
     "vision-extract": () => new VisionExtractStage(args.runner, args.storage, args.config, rasterCache),
     "document-summary": () => new DocumentSummaryStage(args.runner, args.storage, args.config),
     "structured-extract": () => new StructuredExtractStage(args.storage, args.config),
-    embed: () => new EmbedStage(args.runner, args.storage, args.config),
+    embed: () => new EmbedStage(args.runner, args.storage, args.config, undefined, indexStage.indexDocumentText),
     "graph-enrich": () => new GraphEnrichStage(args.runner, args.storage, args.config),
     "page-index": () => new PageIndexStage(args.runner, args.storage, () => {
       if (!args.sql) throw new Error("page-index requires a database client");
       return args.sql;
     }),
     "proposition-index": () => new PropositionIndexStage(args.runner, args.storage, args.config),
-    index: () => new IndexStage(args.runner, args.storage, args.config),
+    index: () => indexStage,
     "summary-tree": () => new SummaryTreeStage(args.runner, args.storage, args.config, () => {
       if (!args.sql) throw new Error("summary-tree requires a database client");
       return args.sql;

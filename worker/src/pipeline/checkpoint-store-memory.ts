@@ -39,6 +39,8 @@ export class MemoryDocumentContent implements DocumentContentWriter {
   /** Documents whose chunks were linked to their pages, per run. */
   readonly linkedDocuments: Array<{ documentId: string; runId: string }> = [];
   readonly lexicalSearchable = new Set<string>();
+  /** documents.lexical_index_key by document id. */
+  readonly lexicalIndexKeys = new Map<string, string>();
   /** Embedding reuse refs per organization and key. */
   readonly reuseRefs = new Map<string, EmbeddingReuseRef>();
 
@@ -59,9 +61,14 @@ export class MemoryDocumentContent implements DocumentContentWriter {
   }
 
   /** The prune, then the marker: the Postgres adapter's one transaction, as its two halves in order. */
-  async finalizeDocumentChunks(scope: DocumentRowScope, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
+  async finalizeDocumentChunks(scope: DocumentRowScope, keepChunkIds: readonly string[], markSearchable: boolean, resetLexicalIndex = false): Promise<void> {
     await this.deleteStaleDocumentChunks(scope, keepChunkIds);
     if (markSearchable) await this.markDocumentLexicalSearchable(scope);
+    if (resetLexicalIndex) this.lexicalIndexKeys.delete(scope.documentId);
+  }
+
+  async markDocumentLexicalIndexed({ documentId }: DocumentRowScope, key: string): Promise<void> {
+    this.lexicalIndexKeys.set(documentId, key);
   }
 
   async markDocumentLexicalSearchable({ documentId }: DocumentRowScope): Promise<void> {

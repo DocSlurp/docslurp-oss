@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { connect } from "@lancedb/lancedb";
 import { expect, it } from "vitest";
-import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
+import { deleteLanceDbRecords, writeLanceDbRecords, writeLanceDbTextRecords } from "../stages/lancedb-writer.js";
+import { hasCurrentChunkTextFtsIndex } from "../stages/lancedb-maintenance.js";
 
 it.each([1, 2, 3, 4, 5])("creates an org table concurrently and upserts retried chunks without Python (%i)", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "docslurp-lance-test-"));
@@ -82,4 +83,45 @@ it("deletes rows by chunk id and ignores a table that does not exist", async () 
       } finally { table.close(); }
     } finally { db.close(); }
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+it("writes chunk rows without vectors: keyword-searchable at once, skipped by vector search, filled by the vector write", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "docslurp-lance-text-"));
+  const text = (index: number, body: string) => ({
+    id: `d1-${index}`, documentId: "d1", chunkIndex: index, text: body,
+    metadata: { documentId: "d1", sourceKey: "k", filename: "f.pdf" }, runId: "r1", pageNumber: 1, hydration: "{}",
+  });
+  const vector = (seed: number) => [seed, seed + 1, seed + 2].map((value) => value / 10);
+  try {
+    // The table does not exist: the text write creates it with a typed vector column and the full-text index.
+    await writeLanceDbTextRecords(dir, "chunks", [text(0, "the annual subscription plan renews"), text(1, "refunds within thirty days")], 3);
+    const db = await connect(dir);
+    try {
+      const table = await db.openTable("chunks");
+      try {
+        expect(String((await table.schema()).fields.find((field) => field.name === "vector")?.type)).toContain("FixedSizeList[3]");
+        expect(hasCurrentChunkTextFtsIndex(await table.listIndices())).toBe(true);
+        expect(await table.countRows("vector IS NULL")).toBe(2);
+        expect((await table.query().fullTextSearch("refunds", { columns: "text" }).limit(5).toArray()).map((row) => row.id)).toEqual(["d1-1"]);
+        expect(await table.vectorSearch(vector(1)).limit(5).toArray()).toEqual([]);
+      } finally { table.close(); }
+      // The index stage's upsert of the same ids fills the vectors.
+      await writeLanceDbRecords(dir, "chunks", [0, 1].map((index) => ({ ...text(index, index === 0 ? "the annual subscription plan renews" : "refunds within thirty days"), vector: vector(index + 1) })));
+      // A later text write (an embed retry) changes the text and keeps the stored vector; a new id gets none.
+      await writeLanceDbTextRecords(dir, "chunks", [text(0, "rewritten opening"), text(2, "a third chunk")], 3);
+      const after = await db.openTable("chunks");
+      try {
+        const rows = new Map((await after.query().toArray()).map((row) => [row.id as string, row]));
+        expect(rows.get("d1-0")?.text).toBe("rewritten opening");
+        expect(rows.get("d1-0")?.vector).not.toBeNull();
+        expect(rows.get("d1-2")?.vector).toBeNull();
+        expect((await after.vectorSearch(vector(1)).limit(5).toArray()).map((row) => row.id).sort()).toEqual(["d1-0", "d1-1"]);
+      } finally { after.close(); }
+    } finally { db.close(); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+it("refuses text rows without the table's vector dimensions", async () => {
+  await expect(writeLanceDbTextRecords("/nonexistent", "chunks", [{ id: "a", documentId: "a", chunkIndex: 0, text: "x", metadata: {} }], 0))
+    .rejects.toThrow(/vector dimensions/);
 });
