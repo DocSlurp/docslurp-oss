@@ -1,4 +1,4 @@
-import { calculateAiUsageCostCents, resolveAllowedPipelineTextModel, summaryScanAvailable, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { calculateAiUsageCostCents, resolveAllowedPipelineTextModel, summaryScanAvailable, summaryScanMaxCalls, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { generateOpenRouterText } from "../lib/ai.js";
@@ -23,7 +23,7 @@ import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { selectSummaryInput } from "./summary-input.js";
 import { readSummarySource } from "./summary-source.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { openScanSource, runSummaryScan, scanArtifactFields, scanEligible, type ScanModelCall, type ScanOutcome } from "./summary-scan.js";
+import { evidenceIsWholeDocument, openScanSource, runEvidenceLabels, runSummaryScan, scanArtifactFields, scanEligible, type ScanModelCall, type ScanOutcome } from "./summary-scan.js";
 
 export const SUMMARY_MAX_CONCURRENCY = 4;
 const SUMMARY_DEADLINE_MS = 120_000;
@@ -234,15 +234,25 @@ export class DocumentSummaryStage implements Stage {
     const { state, document, extracted, selected, model, signal } = args;
     try {
       const coverage = extracted.coverage;
-      if (!scanEligible(coverage, selected.sampled)) return null;
-      // Redaction rewrites the Markdown under the same key; never read pages of a document it touched.
-      if (state.documentStage?.(document.id, "pii-detect")?.stats?.redacted === true) return null;
-      const evidenceUri = state.artifactLedger.readDocument(document.id, "summary-evidence");
-      const markdownUri = state.artifactLedger.readDocument(document.id, "markdown");
-      if (!evidenceUri || !markdownUri) return null;
-      const source = await openScanSource({ storage: this.storage, documentId: document.id, evidenceUri, markdownUri,
-        pagesTotal: coverage.totalPages, signal });
-      if (!source) return null;
+      if (!coverage || coverage.totalPages === null) return null;
+      const pagesTotal = coverage.totalPages;
+      // One call over the evidence labels the document when the evidence holds every page (nothing is left to scan) or
+      // the deployment allows one call (the default). Only a higher limit opens the page index and reads further pages.
+      const maxCalls = summaryScanMaxCalls(process.env);
+      const whole = evidenceIsWholeDocument(coverage);
+      const single = whole || maxCalls <= 1;
+      let source: Awaited<ReturnType<typeof openScanSource>> = null;
+      if (!whole && !scanEligible(coverage, selected.sampled)) return null;
+      if (!single) {
+        // Redaction rewrites the Markdown under the same key; never read pages of a document it touched.
+        if (state.documentStage?.(document.id, "pii-detect")?.stats?.redacted === true) return null;
+        const evidenceUri = state.artifactLedger.readDocument(document.id, "summary-evidence");
+        const markdownUri = state.artifactLedger.readDocument(document.id, "markdown");
+        if (!evidenceUri || !markdownUri) return null;
+        source = await openScanSource({ storage: this.storage, documentId: document.id, evidenceUri, markdownUri,
+          pagesTotal, signal });
+        if (!source) return null;
+      }
       const textGeneration = state.run.pipeline.textGeneration;
       const call: ScanModelCall = async ({ system, prompt, maxOutputTokens, signal: callSignal }) => {
         const result = await generateOpenRouterText({
@@ -270,9 +280,7 @@ export class DocumentSummaryStage implements Stage {
           costCents: costCents ?? calculateAiUsageCostCents({ inputTokens, outputTokens,
             costPer1kInputTokens: this.config.costPer1kInputTokens, costPer1kOutputTokens: this.config.costPer1kOutputTokens }) };
       };
-      const outcome = await runSummaryScan({
-        call,
-        onAttempt: (result, info) => {
+      const onAttempt = (result: Parameters<Parameters<typeof runSummaryScan>[0]["onAttempt"]>[0], info: { step: number; attempt: number }) => {
           state.usageLedger.record({
             ...textUsageLabels(model),
             metric: "summary-generation",
@@ -284,7 +292,19 @@ export class DocumentSummaryStage implements Stage {
             outputTokens: result.outputTokens,
             metadata: { ...result.metadata, documentId: document.id, scanStep: info.step, scanAttempt: info.attempt },
           });
-        },
+      };
+      if (single) {
+        const pagesRead = whole ? pagesTotal : coverage.pages.length;
+        const labelled = await runEvidenceLabels({ call, onAttempt, fileName: document.filename ?? "", evidenceText: selected.text,
+          pagesTotal, pagesRead, signal });
+        if (!labelled) console.warn(`[document-summary] summary_scan_first_step_failed document=${document.id}`);
+        else console.info(`[document-summary] summary_scan document=${document.id} steps=1 stopped_by=${labelled.stoppedBy} pages_read=${labelled.pagesRead} pages_total=${labelled.pagesTotal}`);
+        return labelled;
+      }
+      if (!source) return null;
+      const outcome = await runSummaryScan({
+        call,
+        onAttempt,
         source,
         fileName: document.filename ?? "",
         evidenceText: selected.text,
@@ -292,6 +312,7 @@ export class DocumentSummaryStage implements Stage {
         signal,
         shouldStop: () => isCostCapExceeded(state),
         wallMs: args.wallMs,
+        maxCalls,
       });
       if (!outcome) {
         console.warn(`[document-summary] summary_scan_first_step_failed document=${document.id}`);

@@ -96,8 +96,11 @@ function parseAction(raw: unknown): NextAction | null {
 }
 
 /** Validate untrusted JSON into proposals. Never throws; counts what it refuses. */
-export function parseNextActions(value: unknown): { actions: NextAction[]; dropped: number } {
+export function parseNextActions(input: unknown): { actions: NextAction[]; dropped: number } {
+  let value = input;
   if (value === undefined || value === null) return { actions: [], dropped: 0 };
+  // One action written as a bare object, not a one-item list, is the same proposal.
+  if (typeof value === "object" && !Array.isArray(value)) value = [value];
   if (!Array.isArray(value)) return { actions: [], dropped: 1 };
   const actions: NextAction[] = [];
   let dropped = Math.max(0, value.length - NEXT_ACTIONS_MAX);
