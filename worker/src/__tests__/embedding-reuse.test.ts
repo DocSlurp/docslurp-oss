@@ -352,10 +352,10 @@ describe("EmbedStage chunk materialization", () => {
     try {
       const result = await embedDocument({
         storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-text", documentId: "text",
-        storeExtras: { markDocumentLexicalSearchable: async () => { calls.push("searchable"); } },
-        indexDocumentText: async (job) => { calls.push("text"); jobs.push(job); return { written: true }; },
+        storeExtras: { insertChunks: async () => { calls.push("chunks"); } },
+        indexDocumentText: async (job) => { expect(providerCalls.embed).toHaveLength(0); calls.push("text"); jobs.push(job); return { written: true }; },
       });
-      expect(calls).toEqual(["searchable", "text"]);
+      expect(calls).toEqual(["chunks", "text"]);
       expect(jobs).toHaveLength(1);
       expect(jobs[0]).toMatchObject({ orgId: "o1", projectId: "w1", runId: "run-text", documentId: "text", recordCount: result.artifact.chunks.length });
       const space = jobs[0]!.space;
@@ -379,6 +379,26 @@ describe("EmbedStage chunk materialization", () => {
       expect((result.state.store!.content as unknown as { lexicalIndexKeys: Map<string, string> }).lexicalIndexKeys.size).toBe(0);
       expect(result.artifact.chunks.length).toBeGreaterThan(0);
     } finally { warn.mockRestore(); vi.unstubAllEnvs(); }
+  });
+
+  it("stops a text write still waiting when embedding fails, and stamps nothing", async () => {
+    vi.stubEnv("DOCSLURP_EARLY_LEXICAL_CHUNKS", "on");
+    vi.stubEnv("DOCSLURP_EARLY_LEXICAL_INDEX", "on");
+    let aborted = false;
+    try {
+      const result = await runEmbed({
+        storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-text-fail", documentId: "text-fail",
+        privacyMode: "local-only", allowFailure: true,
+        storeExtras: { failDocumentStage: async () => undefined },
+        // Waits in the queue until told to stop.
+        indexDocumentText: (job) => new Promise((_resolve, reject) => {
+          job.signal!.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); }, { once: true });
+        }),
+      });
+      expect(result.embedInputs).toEqual([]);
+      expect(aborted).toBe(true);
+      expect((result.state.store!.content as unknown as { lexicalIndexKeys: Map<string, string> }).lexicalIndexKeys.size).toBe(0);
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it.each([

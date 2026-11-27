@@ -317,13 +317,7 @@ export class PostgresDocumentContent {
    * deleteStaleDocumentChunks, then (when the replacement set is non-empty) markDocumentLexicalSearchable,
    * in one transaction and one round trip: the marker never precedes the tail drop.
    */
-  async finalizeDocumentChunks(
-    scope: DocumentRowScope,
-    keepChunkIds: readonly string[],
-    markSearchable: boolean,
-    /** The chunks' LanceDB text rows are about to be rewritten: lift the key until that commits (needs lexical_index_key). */
-    resetLexicalIndex = false,
-  ): Promise<void> {
+  async finalizeDocumentChunks(scope: DocumentRowScope, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
     await pipelineTransaction(this.sql, (client) => [
       client`
         delete from document_chunks
@@ -335,21 +329,25 @@ export class PostgresDocumentContent {
         set lexical_searchable_at = coalesce(lexical_searchable_at, now())
         where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId}
       `] : []),
-      ...(resetLexicalIndex ? [client`
+      // The chunk set was just replaced: text rows an earlier attempt wrote to LanceDB no longer describe it, whichever
+      // worker wrote them. The key comes back when this attempt's own text rows commit (markDocumentLexicalIndexed).
+      client`
         update documents set lexical_index_key = null
         where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId} and lexical_index_key is not null
-      `] : []),
+      `,
     ]);
   }
 
   /**
    * The document's chunk rows of this run are committed to LanceDB without vectors: keyword search may read them
-   * there (`key` is lexicalIndexKey of the run and embedding space). Only for the document's current run.
+   * there (`key` is lexicalIndexKey of the run and embedding space). Only for the document's current run, and only
+   * while its keyword marker stands: a retry that lifted the marker has rewritten, or is rewriting, the chunks.
    */
   async markDocumentLexicalIndexed(scope: DocumentRowScope, key: string): Promise<void> {
     await this.sql`
       update documents set lexical_index_key = ${key}
       where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId}
+        and lexical_searchable_at is not null
     `;
   }
 

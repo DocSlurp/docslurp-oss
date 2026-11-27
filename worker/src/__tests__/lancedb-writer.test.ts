@@ -4,7 +4,7 @@ import path from "node:path";
 import { connect } from "@lancedb/lancedb";
 import { expect, it } from "vitest";
 import { deleteLanceDbRecords, writeLanceDbRecords, writeLanceDbTextRecords } from "../stages/lancedb-writer.js";
-import { hasCurrentChunkTextFtsIndex } from "../stages/lancedb-maintenance.js";
+import { hasCurrentChunkTextFtsIndex, runLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
 
 it.each([1, 2, 3, 4, 5])("creates an org table concurrently and upserts retried chunks without Python (%i)", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "docslurp-lance-test-"));
@@ -124,4 +124,29 @@ it("writes chunk rows without vectors: keyword-searchable at once, skipped by ve
 it("refuses text rows without the table's vector dimensions", async () => {
   await expect(writeLanceDbTextRecords("/nonexistent", "chunks", [{ id: "a", documentId: "a", chunkIndex: 0, text: "x", metadata: {} }], 0))
     .rejects.toThrow(/vector dimensions/);
+});
+
+it("maintains a table that holds rows without vectors: the vector index builds and never returns them", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "docslurp-lance-text-maint-"));
+  const row = (index: number) => ({
+    id: `d-${index}`, documentId: `d${index % 7}`, chunkIndex: index, text: `passage ${index} about subscription renewals`,
+    metadata: { documentId: `d${index % 7}`, sourceKey: "k", filename: "f.pdf" }, runId: "r1", pageNumber: 1, hydration: "{}",
+  });
+  const vector = (index: number) => Array.from({ length: 8 }, (_, i) => Math.sin((index + 1) * (i + 1)));
+  try {
+    await writeLanceDbRecords(dir, "chunks", Array.from({ length: 400 }, (_, index) => ({ ...row(index), vector: vector(index) })));
+    await writeLanceDbTextRecords(dir, "chunks", Array.from({ length: 60 }, (_, index) => row(1_000 + index)), 8);
+    const result = await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 256, versionRetentionMs: 0 });
+    expect(result).toMatchObject({ ok: true, rows: 460, indexCreated: true });
+    const db = await connect(dir);
+    try {
+      const table = await db.openTable("chunks");
+      try {
+        const hits = await table.vectorSearch(vector(3)).limit(460).toArray();
+        expect(hits.length).toBeGreaterThan(0);
+        expect(hits.every((hit) => hit.vector !== null && Number(hit.chunkIndex) < 1_000)).toBe(true);
+        expect((await table.query().fullTextSearch("passage 1042", { columns: "text" }).limit(100).toArray()).some((hit) => hit.id === "d-1042")).toBe(true);
+      } finally { table.close(); }
+    } finally { db.close(); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

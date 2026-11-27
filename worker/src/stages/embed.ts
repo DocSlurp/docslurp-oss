@@ -14,6 +14,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
+import { setTimeout as delay } from "node:timers/promises";
 import { deleteLanceDbRecords } from "./lancedb-writer.js";
 import type { DocumentTextIndexer } from "./index-vectors.js";
 import { projectVectorLocation } from "./lancedb-location.js";
@@ -60,6 +61,20 @@ export class EmbedStage implements Stage {
     private readonly indexDocumentText?: DocumentTextIndexer
   ) {}
 
+  /** Text writes in flight, by run and document: stopped when the document's embed ends, however it ends. */
+  private readonly textIndexes = new Map<string, { stop(): Promise<void> }>();
+
+  private stoppingTextIndex<T>(state: WorkflowState, work: (document: WorkflowState["documents"][number]) => Promise<T>) {
+    return async (document: WorkflowState["documents"][number]): Promise<T> => {
+      try {
+        return await work(document);
+      } finally {
+        // A failed or skipped embed must not leave its text write polling, or stamp the key for a later attempt.
+        await this.textIndexes.get(`${state.run.id}:${document.id}`)?.stop();
+      }
+    };
+  }
+
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     if (!state.run.pipeline.embed) {
       return;
@@ -68,7 +83,7 @@ export class EmbedStage implements Stage {
     const vectorBackends = resolveVectorBackends(this.config, state.run.pipeline);
 
     // Documents blocked by the PII policy are terminal and never embedded.
-    await runDocuments(indexableDocuments(state), state.docConcurrency, async (document) => {
+    await runDocuments(indexableDocuments(state), state.docConcurrency, this.stoppingTextIndex(state, async (document) => {
       if (isCostCapExceeded(state)) {
         state.pendingPerformance.push({
           documentId: document.id,
@@ -465,9 +480,8 @@ export class EmbedStage implements Stage {
           if (publishBeforeEmbedding) {
             // All source chunks are durable before the readiness marker. Vector
             // availability remains governed by the later index stage.
-            const indexText = earlyLexicalIndexEnabled() && this.indexDocumentText !== undefined;
-            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion, vectorSpace: tunedProfile, resetLexicalIndex: indexText });
-            if (indexText) textIndex = this.startTextIndex(state, document, chunks.length, tunedProfile, signal);
+            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion, vectorSpace: tunedProfile });
+            if (earlyLexicalIndexEnabled()) textIndex = this.startTextIndex(state, document, chunks.length, tunedProfile, signal);
           }
           const freshVectors = new Map<string, number[]>();
           const embeddedVectors: number[][] = Array.from({ length: embeddingInputs.length });
@@ -871,7 +885,7 @@ export class EmbedStage implements Stage {
         },
         signal
       );
-    });
+    }));
   }
 
   /** Point this org's reuse refs at the artifact just written; never fails the stage. */
@@ -1014,7 +1028,17 @@ export class EmbedStage implements Stage {
         signal?.removeEventListener("abort", abort);
       }
     })();
-    return { stop: async () => { controller.abort(); await settled; } };
+    const key = `${runId}:${document.id}`;
+    const handle = {
+      stop: async () => {
+        controller.abort();
+        if (this.textIndexes.get(key) === handle) this.textIndexes.delete(key);
+        // A write that is draining the queue for other documents finishes on its own; do not hold embed for it.
+        await Promise.race([settled, delay(TEXT_INDEX_STOP_WAIT_MS)]);
+      },
+    };
+    this.textIndexes.set(key, handle);
+    return handle;
   }
 
   private async materializeChunks(args: {
@@ -1025,8 +1049,6 @@ export class EmbedStage implements Stage {
     pipelineVersion: string;
     /** The embedding space the document's LanceDB rows live in. */
     vectorSpace?: { model: string; dimensions: number };
-    /** The document's LanceDB text rows are rewritten after this: lift lexical_index_key with the marker. */
-    resetLexicalIndex?: boolean;
   }): Promise<void> {
     // Unbound states (unit tests, a page task) persist no chunks; every stage activity's state is bound (loadRunState).
     if (!args.state.store) {
@@ -1069,7 +1091,7 @@ export class EmbedStage implements Stage {
       args.state.staleVectorIds.set(args.document.id, stale);
     }
     // Keyword search can serve the chunks from here on, ahead of the index stage.
-    await store.finalizeDocumentChunks(scope, keep, dbChunks.length > 0, args.resetLexicalIndex === true);
+    await store.finalizeDocumentChunks(scope, keep, dbChunks.length > 0);
     if (dbChunks.length > 0) recordDocumentMilestone(args.state.run, "lexical_searchable", args.document.pageCount);
   }
 }
@@ -1079,6 +1101,9 @@ export class EmbedStage implements Stage {
  * document's chunk rows to LanceDB before embedding, so keyword search reads them there instead of from Postgres.
  * Needs migration 20261127T2148 (documents.lexical_index_key).
  */
+/** How long a document's embed waits for its text write to wind down after telling it to stop. */
+const TEXT_INDEX_STOP_WAIT_MS = 1_000;
+
 export function earlyLexicalIndexEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.DOCSLURP_EARLY_LEXICAL_INDEX === "on";
 }

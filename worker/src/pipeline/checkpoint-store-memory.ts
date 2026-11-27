@@ -61,14 +61,14 @@ export class MemoryDocumentContent implements DocumentContentWriter {
   }
 
   /** The prune, then the marker: the Postgres adapter's one transaction, as its two halves in order. */
-  async finalizeDocumentChunks(scope: DocumentRowScope, keepChunkIds: readonly string[], markSearchable: boolean, resetLexicalIndex = false): Promise<void> {
+  async finalizeDocumentChunks(scope: DocumentRowScope, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
     await this.deleteStaleDocumentChunks(scope, keepChunkIds);
     if (markSearchable) await this.markDocumentLexicalSearchable(scope);
-    if (resetLexicalIndex) this.lexicalIndexKeys.delete(scope.documentId);
+    this.lexicalIndexKeys.delete(scope.documentId);
   }
 
   async markDocumentLexicalIndexed({ documentId }: DocumentRowScope, key: string): Promise<void> {
-    this.lexicalIndexKeys.set(documentId, key);
+    if (this.lexicalSearchable.has(documentId)) this.lexicalIndexKeys.set(documentId, key);
   }
 
   async markDocumentLexicalSearchable({ documentId }: DocumentRowScope): Promise<void> {

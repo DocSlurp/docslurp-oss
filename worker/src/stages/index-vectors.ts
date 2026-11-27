@@ -244,6 +244,7 @@ export class IndexStage implements Stage {
       return { written: !outcome.superseded };
     }
     const records = await this.textRecords({ documentId: args.documentId, runId: args.runId, orgId: args.orgId, metadata: args.recordMetadata });
+    if (records.length !== args.recordCount) throw new Error(`text rows expected ${args.recordCount} chunks, found ${records.length}`);
     await writeLanceDbTextRecords(location.uri, location.table, records, args.space.dimensions, args.signal);
     return { written: true };
   };

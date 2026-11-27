@@ -281,7 +281,7 @@ function completeRunDocumentStatements(client: Sql<Record<string, unknown>>, run
     // Legacy retries may already contain obsolete queued rows. They were not
     // hydrated or processed; retire them instead of declaring them completed.
     client`
-      update documents set status = 'cancelled', lexical_searchable_at = null, updated_at = now()
+      update documents set status = 'cancelled', lexical_searchable_at = null, lexical_index_key = null, updated_at = now()
       where run_id = ${runId} and superseded_at is not null
         and status in ('queued', 'processing')
     `,
@@ -1642,6 +1642,8 @@ export class PostgresRunLedger implements CheckpointStore {
           -- marker is lifted until the replacement is complete
           -- (server/src/search/eligibility.ts).
           lexical_searchable_at = case when ${stage} in ('pii-detect', 'embed') then null else lexical_searchable_at end,
+          -- Its LanceDB text rows are that attempt's too (documents.lexical_index_key, migration 20261127T2148).
+          lexical_index_key = case when ${stage} in ('pii-detect', 'embed') then null else lexical_index_key end,
           updated_at = now()
       where id = ${documentId}
     `.then(() => undefined));

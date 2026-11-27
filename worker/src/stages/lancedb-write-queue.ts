@@ -235,10 +235,16 @@ export class LanceDbWriteQueue {
   async indexDocument(job: VectorWriteJob, signal?: AbortSignal): Promise<VectorWriteOutcome> {
     const started = performance.now();
     const tableKey = lanceTableKey(job.uri, job.table);
-    const { id, generation } = await this.enqueue(tableKey, job);
     const outcome: VectorWriteOutcome = {
       waitedMs: 0, superseded: false, drains: 0, batches: 0, batchedDocuments: 0, maintenance: null, maintenanceScheduled: false,
     };
+    const enqueued = await this.enqueue(tableKey, job);
+    if (!enqueued) {
+      // A text job that found the document's vector job waiting: the full rows are on their way.
+      outcome.superseded = true;
+      return outcome;
+    }
+    const { id, generation } = enqueued;
     const deadline = Date.now() + this.settings.waitTimeoutMs;
     let pause = this.settings.pollMinMs;
 
@@ -358,7 +364,14 @@ export class LanceDbWriteQueue {
                      or t.last_optimized_at < now() - (${policy.optimizeIntervalMs} * interval '1 millisecond'))))`;
   }
 
-  async enqueue(tableKey: string, job: VectorWriteJob): Promise<{ id: number; generation: number }> {
+  /**
+   * Null for a text job that finds the document's vector job pending: text rows never replace it, or the index stage
+   * waiting on that job would see it gone and register vectors that were not written.
+   */
+  async enqueue(tableKey: string, job: VectorWriteJob): Promise<{ id: number; generation: number } | null> {
+    const keepsPendingVectorJob = job.textDimensions
+      ? this.sql`where not (vector_index_outbox.status = 'pending' and not (vector_index_outbox.metadata ? ${TEXT_JOB_DIMENSIONS}))`
+      : this.sql``;
     const metadata = { ...(job.metadata ?? {}), ...(job.textDimensions ? { [TEXT_JOB_DIMENSIONS]: job.textDimensions } : {}) };
     const [row] = await this.sql<{ id: string | number; generation: number }[]>`
       insert into vector_index_outbox
@@ -377,8 +390,9 @@ export class LanceDbWriteQueue {
         last_error = null,
         enqueued_at = now(),
         written_at = null
+      ${keepsPendingVectorJob}
       returning id, generation`;
-    return { id: Number(row!.id), generation: Number(row!.generation) };
+    return row ? { id: Number(row.id), generation: Number(row.generation) } : null;
   }
 
   private async status(id: number, tableKey: string): Promise<{
@@ -497,7 +511,11 @@ export class LanceDbWriteQueue {
         if (textDimensions === null) return { row, records: await this.deps.loadRecords(row), textDimensions, error: null };
         // A build that cannot load text rows fails the job; the vector job that follows re-enqueues the row.
         if (!this.deps.loadTextRecords) throw new Error("this worker cannot load text rows");
-        return { row, records: await this.deps.loadTextRecords(row), textDimensions, error: null };
+        const records = await this.deps.loadTextRecords(row);
+        // Fewer or more rows than the job counted: the chunks were rewritten since. Writing these and reporting the
+        // document indexed would hide the rest of it from keyword search.
+        if (records.length !== row.recordCount) throw new Error(`text job expected ${row.recordCount} chunks, found ${records.length}`);
+        return { row, records, textDimensions, error: null };
       } catch (error) {
         return { row, records: [], textDimensions, error };
       }
@@ -637,10 +655,13 @@ export class LanceDbWriteQueue {
           last_optimized_at = now(), last_maintenance_error = null,
           maint_holder = null, maint_expires_at = now(), updated_at = now()
         where table_key = ${tableKey} and maint_holder = ${holder}`;
-      // Written rows are only needed until their waiters have seen them.
+      // Written rows are only needed until their waiters have seen them. A written text job stays: until the vector
+      // job replaces it (or the document is deleted) it is the only record of where that document's rows live, and
+      // the document delete trigger reads it to purge them.
       await this.sql`
         delete from vector_index_outbox
-        where table_key = ${tableKey} and status = 'written' and written_at < now() - interval '1 day'`;
+        where table_key = ${tableKey} and status = 'written' and written_at < now() - interval '1 day'
+          and not (metadata ? ${TEXT_JOB_DIMENSIONS})`;
     } else {
       // Leave the counters; the lease expiry doubles as the retry back-off. A table that is
       // gone (dropped with its project, or never created) has no history left to prune.

@@ -482,6 +482,38 @@ describe("LanceDbWriteQueue text jobs", () => {
     expect((await waiting).superseded).toBe(true);
   });
 
+  it("never replaces the document's pending vector job with a text job", async () => {
+    const q = textQueue();
+    const tableKey = lanceTableKey(dir, TABLE);
+    await sql`insert into vector_index_tables (table_key, lance_uri, lance_table, write_holder, write_expires_at)
+              values (${tableKey}, ${dir}, ${TABLE}, 'other', now() + interval '5 seconds')`;
+    const vector = await q.enqueue(tableKey, job("doc-p", makeDocument("doc-p", 2), 2));
+    expect((await q.indexDocument({ ...job("doc-p", "", 2), textDimensions: DIMS })).superseded).toBe(true);
+    expect(await sql`select generation, status, artifact_key from vector_index_outbox where document_id = 'doc-p'`)
+      .toEqual([{ generation: vector!.generation, status: "pending", artifact_key: "artifacts/doc-p.json" }]);
+  });
+
+  it("fails a text job whose chunks no longer match the count it was enqueued with", async () => {
+    const q = queue({
+      loadTextRecords: async (row) => textRows(row.documentId, row.recordCount - 1),
+      settings: { pollMinMs: 5, pollMaxMs: 40, leaseTtlMs: 5_000, maxAttempts: 1 },
+    });
+    await expect(q.indexDocument({ ...job("doc-short", "", 3), textDimensions: DIMS })).rejects.toThrow(/expected 3 chunks, found 2/);
+  });
+
+  it("keeps a written text job past the outbox prune: it is the record of where the rows live", async () => {
+    const q = queue({
+      loadTextRecords: async (row) => textRows(row.documentId, row.recordCount),
+      maintenance: { enabled: true, mode: "inline", vectorIndexMinRows: 1_000_000, optimizeEveryRows: 1, optimizeIntervalMs: 0 },
+    });
+    await q.indexDocument({ ...job("doc-t", "", 1), textDimensions: DIMS });
+    await q.indexDocument(job("doc-v", makeDocument("doc-v", 1), 1));
+    await sql`update vector_index_outbox set written_at = now() - interval '2 days'`;
+    await sql`update vector_index_tables set rows_since_optimize = 10, maint_expires_at = now() - interval '1 second', last_optimized_at = null`;
+    expect(await q.maybeMaintain(lanceTableKey(dir, TABLE), dir, TABLE)).toMatchObject({ ok: true });
+    expect((await sql`select document_id from vector_index_outbox order by document_id`).map((row) => row.document_id)).toEqual(["doc-t"]);
+  });
+
   it("fails a text job on a queue that cannot load text rows, leaving other documents to commit", async () => {
     const q = queue({ settings: { pollMinMs: 5, pollMaxMs: 40, leaseTtlMs: 5_000, maxAttempts: 1 } });
     const [text, vector] = await Promise.allSettled([
