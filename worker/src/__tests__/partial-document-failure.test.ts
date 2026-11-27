@@ -21,6 +21,36 @@ function doc(id: string): Document {
   } as Document;
 }
 
+it("waits for an in-flight document before propagating a run-level failure", async () => {
+  let rejectFirst!: (error: Error) => void;
+  let finishSibling!: () => void;
+  const first = new Promise<void>((_resolve, reject) => { rejectFirst = reject; });
+  const sibling = new Promise<void>((resolve) => { finishSibling = resolve; });
+  const failure = new Error("stage infrastructure unavailable");
+  const started: string[] = [];
+  let activityEnded = false;
+  const activity = runDocuments([doc("first"), doc("sibling"), doc("queued")], 2, async (document) => {
+    started.push(document.id);
+    if (document.id === "first") await first;
+    if (document.id === "sibling") await sibling;
+  }).catch((error: unknown) => {
+    activityEnded = true;
+    return error;
+  });
+
+  rejectFirst(failure);
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(activityEnded).toBe(false);
+    expect(started).toEqual(["first", "sibling"]);
+  } finally {
+    finishSibling();
+  }
+
+  expect(await activity).toBe(failure);
+  expect(started).toEqual(["first", "sibling"]);
+});
+
 /** Persists document stage checkpoints between stage activities, like document_run_stage_states. */
 class MemoryStore implements StageExecutionStore {
   pageBasisLedger = new MemoryPageBasisLedger();

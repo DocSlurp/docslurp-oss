@@ -39,18 +39,25 @@ export async function runDocuments<T>(
 
   const results: T[] = new Array(documents.length);
   let index = 0;
+  let failure: { error: unknown } | undefined;
 
   async function worker(): Promise<void> {
-    while (true) {
+    while (!failure) {
       const i = index++;
       if (i >= documents.length) return;
       const doc = documents[i]!;
-      results[i] = await fn(doc);
+      try {
+        results[i] = await fn(doc);
+      } catch (error) {
+        failure ??= { error };
+      }
     }
   }
 
+  // Keep the activity's sandbox open until the documents already in flight have settled.
   const workers = Array.from({ length: Math.min(concurrency, documents.length) }, () => worker());
   await Promise.all(workers);
+  if (failure) throw failure.error;
   return results;
 }
 
