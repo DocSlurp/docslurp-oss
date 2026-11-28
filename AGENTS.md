@@ -12,7 +12,14 @@ This repository (`DocSlurp/docslurp-oss`) is the open-source core. The hosted AP
 - `plugins/docslurp`: the DocSlurp plugin for Claude (skills and MCP setup).
 - `docs/`: public documentation; self-hosting in `docs/self-host/`.
 
-Setup, commands, test databases and style live in [CONTRIBUTING.md](CONTRIBUTING.md). Before a pull request: `pnpm typecheck`, `pnpm test` and `pnpm build` for what you touched.
+Keep new code in the package that owns it. Setup, test databases and style detail live in [CONTRIBUTING.md](CONTRIBUTING.md); the everyday commands:
+
+- `pnpm install`, then `pnpm --filter @docslurp/worker build`
+- `pnpm db:up` (local Postgres, Redis, MinIO and Temporal), `pnpm db:migrate`, `pnpm db:new <name>`
+- `pnpm typecheck`, `pnpm test`, `pnpm build` (run for what you touched before a pull request)
+- `pnpm fixtures:fetch` (pinned third-party test fixtures into `.cache/`)
+
+Code style: TypeScript strict mode, 2-space indentation, double quotes.
 
 ## Security-Sensitive Boundaries (mandatory)
 
@@ -30,7 +37,7 @@ These rules override speed and convenience. When in doubt, treat a change as sec
 
 - Treat every input file and every request field as hostile.
 - Fail closed. A missing sandbox, engine or policy is a startup failure or a loud, logged refusal, never a silent fallback to running customer bytes next to secrets, a broader scope or an unauthenticated path.
-- Scope explicitly. A query, cache key or storage key without an explicit tenant scope is a bug.
+- Never widen a default scope. A query, cache key or storage key without an explicit tenant scope is a bug.
 - Ship boundary changes with negative tests where they apply: cross-organization data access, a revoked or wrong-scope key, a malicious or oversized file.
 
 **Organization data scoping:** the organization is the only tenant scope.
@@ -56,11 +63,11 @@ These rules override speed and convenience. When in doubt, treat a change as sec
 ## Conventions
 
 - **Migrations:** schema changes go only through `server/db/migrations`; tests build databases by applying them in order.
-  - New files are `YYYYMMDDTHHMM_name.sql` (UTC; `pnpm db:new <name>`). The numbered `NNNN_` files are frozen, and a shipped file is never edited or renamed: downstream deployments copy this folder file for file.
+  - New files are `YYYYMMDDTHHMM_name.sql` (UTC; `pnpm db:new <name>`). The numbered `NNNN_` files are frozen: add, renumber or edit none of them. A shipped file is never edited or renamed either, since downstream deployments copy this folder file for file.
   - There is no journal: `server/db/migration-runner.mjs` records each applied file by name in `docslurp_migrations.applied` and applies every unrecorded file in name order, one transaction per file, so a late-merged migration still runs. Write each to apply cleanly both in name order (a fresh database) and after everything already on `main` (`worker/src/__tests__/migrations-late-merge.test.ts`).
   - Keep each file short (one table rewrite or index build): it waits at most `MIGRATION_STATEMENT_LOCK_TIMEOUT_MS` for a lock and is retried.
   - Every migration is idempotent: two runs leave the same schema and data as one. Use `IF NOT EXISTS` / `IF EXISTS`, `CREATE OR REPLACE`, a `DO` block that checks the catalog before `ADD CONSTRAINT`, `CREATE TYPE`, `CREATE POLICY` or a rename, `ON CONFLICT` or `NOT EXISTS` on inserts, and guarded backfills (`WHERE col IS NULL`, never an unguarded `x = x + n`). `worker/src/__tests__/migrations-idempotent.test.ts` runs each twice and `scripts/check-migration-safety.mjs` flags the usual causes; mark an exception the check cannot see with `-- idempotent-migration: <why>`.
-- **Model usage:** log every LLM or embedding call as `[ai-usage] <metric> model=<id> input_tokens=<n> output_tokens=<n>` (plus `cached_input_tokens=<n>` / `cache_write_input_tokens=<n>` when the provider reports prompt-cache use) and persist it through the existing recorder with an explicit scope. Order prompts static first, per-request last so prefixes stay cacheable.
+- **Model usage:** log every LLM or embedding call as `[ai-usage] <metric> model=<id> input_tokens=<n> output_tokens=<n>` (plus `cached_input_tokens=<n>` / `cache_write_input_tokens=<n>` when the provider reports prompt-cache use) and persist it through the existing recorder with an explicit scope. Order prompts static first, per-request last so prefixes stay cacheable; Claude via OpenRouter caches only with `createOpenRouterPromptCacheFetch` (`packages/shared`) on Chat Completions.
 - **Test accounts:** fake, QA and agent-created accounts use a reserved domain (`@example.com`, `@<run>.invalid`, `@<name>.test`), which `docslurp_reserved_test_email` (migration 0094) marks `test` so customer metrics exclude them; for an address you cannot choose, use `TEST_ACCOUNT_EMAIL_PATTERNS`.
 - **Pricing:** core exposes neutral usage and profile data and a generic quoting seam with an open default; the customer-visible price list is the only pricing published here. Credit multipliers, zero-rated routes, infrastructure costs and margins stay in `DocSlurp/app`.
 - **Evaluation inputs are held-out evidence:** production code and prompts stay free of document names, field names or expected values from an evaluation.
@@ -81,11 +88,11 @@ The worker, `server/db/` and the CLI are BUSL-1.1 (free production use up to 16 
 
 ## Git and pull requests
 
-**This repository is public.** Push exactly one named branch at a time with an explicit refspec, `git push origin HEAD:refs/heads/<branch>`, based on `origin/main`. Local core Git directories still hold branches built on the private pre-split history (root `46d295e2`), and on 2026-10-27 one bulk push published 2,602 private commits: `--all`, `--mirror`, `--tags` and glob refspecs are off limits. Before pushing a branch you did not create in this session, run `scripts/check-public-history.sh <ref>`. If a guard (pre-push hook, ruleset, CI) blocks a push, stop and report it.
+**This repository is public.** Push exactly one named branch at a time with an explicit refspec, `git push origin HEAD:refs/heads/<branch>`, based on `origin/main`. Local core Git directories still hold branches built on the private pre-split history (root `46d295e2`), and on 2026-10-27 one bulk push published 2,602 private commits: `--all`, `--mirror`, `--tags` and glob refspecs are off limits. Before pushing a branch you did not create in this session, run `scripts/check-public-history.sh <ref>`. If a guard (pre-push hook, ruleset, CI) blocks a push, stop and report it; never work around it.
 
 - **Branching:** create task branches with `git switch --no-track -c <branch> origin/main`. A branch that tracks `origin/main` pushes straight to `main` under `push.default=upstream`; check that push output reads `HEAD -> <branch>`.
 - **Forward-only history:** catch a branch up by merging `origin/main` into it, fix mistakes with a new commit, undo with `git revert`. Rebase, amend, `reset --hard`, force pushes and `filter-branch` are never used.
-- **Stay in sync:** fetch and merge `origin/main` (and the branch's upstream) before starting, committing and pushing; push each commit soon after making it. Finish only when `git status -sb` shows neither `ahead` nor `behind`, in every worktree you used.
+- **Stay in sync:** fetch and merge `origin/main` (and the branch's upstream) before starting, committing and pushing; push each commit soon after making it. Finish only when `git status -sb` shows neither `ahead` nor `behind` on every branch you worked on (`main` included), in every worktree you used.
 - **Commits and merges:** small, focused commits with imperative subjects and a "why" in the body (see `CONTRIBUTING.md`). Squash-merge with `gh pr merge --squash`; for a PR stacked on one just squash-merged, merge the new `main` into it and retarget it to `main`.
 - **Releases:** follow [docs/releases.md](docs/releases.md). All public libraries share a version and release together through `release-npm.yml`; publish or push release tags only on an explicit release request.
 
