@@ -4,50 +4,19 @@ DocSlurp is a document and media ingestion service: files go through a configura
 
 ## Source of truth
 
-This repository (`DocSlurp/docslurp-oss`) owns the server, worker, packages and migrations. The private web application and production operations live in `DocSlurp/app`, which pins this repository at `core/`. Merge core changes to this repository's main before updating the app pin. The former `DocSlurp/docslurp` repository is a read-only historical archive; do not develop or release there. Work directly here.
+This repository (`DocSlurp/docslurp-oss`) is the open-source core. The hosted API server, web application and production operations live in the private `DocSlurp/app`, which pins this repository at `core/`; merge core changes to `main` here before that pin moves. `DocSlurp/docslurp` is a read-only archive.
 
-## Layout
-
-- `server/`: Hono API (`@docslurp/server`). Routes in `server/src/routes/`, services in `server/src/services/`, the Drizzle schema, Postgres migrations, `migrate.mjs` and `seed.ts` in `server/db/`.
-- `worker/`: TypeScript ingestion pipeline. Stages live in `worker/src/stages/`.
-- `packages/`: `sdk` (with the `@docslurp/sdk/embed` subpath), `cli`, `contrib-astro`, `contrib-search-compat`, `contrib-algolia-server`, `contrib-wordpress`, `estimate` (offline file profiler; the server quotes from its profiles) and `shared` (contracts shared by server and clients).
+- `worker/`: TypeScript ingestion pipeline (stages in `worker/src/stages/`).
+- `server/db/`: the database schema, migrations and their runner. There is no API server package here.
+- `packages/`: `sdk` (with the `@docslurp/sdk/embed` subpath), `cli`, `shared` (contracts shared by the worker, the server and clients), `estimate` (offline file profiler; the server quotes from its profiles) and the `contrib-*` integrations.
 - `plugins/docslurp`: the DocSlurp plugin for Claude (skills and MCP setup).
-- `docs/`: public documentation. Self-host instructions are in `docs/self-host/`.
+- `docs/`: public documentation; self-hosting in `docs/self-host/`.
 
-Keep new code in the package that owns it. `server/` must not import from outside the project packages it declares.
-
-## Prefer native Mastra agent features
-
-When implementing or changing agent behavior, prefer Mastra's native features:
-Memory, Signals, Tools, durable agents, background tasks, AgentController,
-subagents, channels, and guardrails/processors. Use these for the capabilities
-they provide before introducing custom agent loops, execution queues, memory
-stores, task controllers, replay journals, or orchestration primitives.
-
-Before choosing an implementation, inspect the installed Mastra version and its
-APIs and read the current official documentation for the relevant feature. Use
-native persistence and observe/reconnect support for durable agent execution;
-keep DocSlurp's tenant authorization, billing/usage accounting, application
-projections, and external-workflow integration in thin adapters around it.
-Verify required disconnect/reconnect, cancellation, restart, task ownership,
-and isolation behavior with tests; a native feature does not replace those
-application guarantees.
-
-If a native feature cannot meet a requirement, record the specific gap, the
-version/API checked, and why a small adapter or supported upgrade is insufficient
-in the design or PR before adding a custom primitive. Reassess existing custom
-agent code when touching that capability rather than expanding a duplicate runtime.
-
-Official references: [Mastra docs](https://mastra.ai/docs) (Memory, Signals, Tools),
-[durable agents](https://mastra.ai/docs/harness/durable-agents),
-[background tasks](https://mastra.ai/docs/harness/background-tasks),
-[AgentController](https://mastra.ai/docs/harness/agent-controller),
-[channels](https://mastra.ai/docs/channels), and
-[guardrails](https://mastra.ai/docs/agents/guardrails).
+Setup, commands, test databases and style live in [CONTRIBUTING.md](CONTRIBUTING.md). Before a pull request: `pnpm typecheck`, `pnpm test` and `pnpm build` for what you touched.
 
 ## Security-Sensitive Boundaries (mandatory)
 
-These rules are mandatory and override speed and convenience. When in doubt, treat a change as security-sensitive.
+These rules override speed and convenience. When in doubt, treat a change as security-sensitive. `DocSlurp/app` carries the same rules (plus hosted-only notes); change both together.
 
 **Boundaries in scope:**
 
@@ -57,53 +26,45 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 - **Secrets and egress:** credential storage and distribution, user-supplied URLs, connectors and any outbound fetch driven by user input.
 - **Billing and credits:** anything that can let one tenant spend, see or reset another tenant's balance.
 
-**Be extremely careful:**
+**Defaults on every boundary:**
 
-- Assume every input file and every request field is hostile.
-- Fail closed. Never fall back silently to running customer bytes next to secrets, a broader scope or an unauthenticated path. A missing sandbox, engine or policy is a startup failure or a loud, logged refusal.
-- Never widen a default scope. A query, cache key or storage key without an explicit tenant scope is a bug.
-- Boundary changes ship with negative tests where they apply: cross-organization data access, a revoked or wrong-scope key, a malicious or oversized file.
+- Treat every input file and every request field as hostile.
+- Fail closed. A missing sandbox, engine or policy is a startup failure or a loud, logged refusal, never a silent fallback to running customer bytes next to secrets, a broader scope or an unauthenticated path.
+- Scope explicitly. A query, cache key or storage key without an explicit tenant scope is a bug.
+- Ship boundary changes with negative tests where they apply: cross-organization data access, a revoked or wrong-scope key, a malicious or oversized file.
 
 **Organization data scoping:** the organization is the only tenant scope.
 
-- One organization never receives another organization's data: documents, results, search hits, chat, cached responses or URLs. Queries filter by organization, and storage and cache keys carry the organization (or a project, run or document id that belongs to one). `orgScopedCacheKey` from `@docslurp/shared` builds such a key; a hash match on content is never proof of ownership, so content-hash lookups filter by organization in the same query.
-- That is the whole rule. Use the cheapest form and never add round trips, locks, partitions, salts or lookups for isolation. Cache statistics shown to a caller are that organization's own.
+- One organization never receives another organization's data: documents, results, search hits, chat, cached responses or URLs. Queries filter by organization, and storage and cache keys carry the organization (or a project, run or document id that belongs to one). `orgScopedCacheKey` from `@docslurp/shared` builds such a key; a content-hash match is never proof of ownership, so content-hash lookups filter by organization in the same query.
+- That is the whole rule. Use the cheapest form (the organization in the key or in the same query's predicate), with no extra round trips, locks, partitions, salts or lookups for isolation. Cache statistics shown to a caller are that organization's own.
+- Authenticated and tenant HTTP responses are `private, no-store` (never `public` or `s-maxage`, and never relying on `Vary: Cookie`, which Cloudflare ignores). Tenant file and page URLs are signed and short-lived. Telemetry, analytics, eval datasets and trace stores never receive customer documents, queries, answers or names derived from them.
 
-**No per-organization, per-run or per-job compute isolation (owner, 2026-11-17).** It is an enterprise feature for later and costs latency now. Compute that touches customer bytes (VMs, sandboxes, warm pools, GPU readers, OCR and text hosts, parser lanes) is shared and reused across jobs, runs and organizations, warm by default. Do not add, require or review for: dedicated or fresh VMs per job, run or organization; unit-to-organization or unit-to-run bindings; per-job workspace wipes or attestation that add latency; per-organization cache partitions, prompt salts or `cache_salt`. Residue or timing side channels on shared compute are accepted, not findings. Results still go back only to the job that asked (normal correctness). Fairness comes from fleet-wide caps and fair queueing.
+**Compute is shared (owner, 2026-11-17).** Compute that touches customer bytes (VMs, sandboxes, warm pools, GPU readers, OCR and text hosts, parser lanes) is shared and reused across jobs, runs and organizations, warm by default. Per-organization, per-run or per-job compute isolation is a later enterprise feature: do not add, require or review for fresh or dedicated VMs, unit-to-organization or unit-to-run bindings, per-job wipes or attestation, per-organization cache partitions, prompt salts or `cache_salt`. Residue and timing side channels on shared compute are accepted. Results still go back only to the job that asked, and fairness comes from fleet-wide caps and fair queueing.
 
-**Isolation for untrusted files:** this protects the worker's secrets, not one tenant from another.
+**Isolation for untrusted files** protects the worker's secrets, not one tenant from another:
 
 - Untrusted files are processed outside any process that holds secrets, behind a VM or microVM boundary (Firecracker, Cloud Hypervisor, a cloud VM). One shared, warm VM serving many jobs qualifies.
-- Containers, namespaces, bubblewrap, landlock and seccomp are defense in depth inside that boundary, never the boundary on their own. In-process parsing of customer bytes in the worker, including native bindings, does not qualify.
+- Containers, namespaces, bubblewrap, landlock and seccomp are defense in depth inside that boundary, never the boundary on their own. In-process parsing of customer bytes in the worker, native bindings included, does not qualify.
 - The sandbox host holds the minimum keys it needs, ideally none: no database credentials, model-provider keys, auth or encryption secrets, or bucket-wide storage keys; short-lived access scoped to its own input and output objects; no network beyond what the job requires; no cloud metadata endpoint.
 
-**Council review before merge:**
+**Council review before merge** for identity and access, secrets and egress, billing, organization data scoping, or the VM boundary between customer bytes and secrets (sharing, reusing or warming compute needs none):
 
-- Changes to identity and access, secrets and egress, billing, organization data scoping, or the VM boundary between customer bytes and secrets need a council review before they merge. Sharing, reusing or warming compute does not.
-- A council is at least two independent reviewers, run as separate agents or models. Give each one the diff, the threat model and the boundary rules, but not the author's conclusion. At least one is adversarial: read another organization's data, reuse a credential, escape to the secrets.
-- Cross-job or cross-organization residue on shared compute is out of scope for reviewers (see above); do not raise it or block on it.
-- Record each reviewer, their findings and how each was resolved in the pull request. An unresolved high-severity finding blocks the merge.
-- Use a draft pull request, never a direct push to `main`. A human owner approves the merge, and deploying the change remains a separate manual decision.
-
-## Commands
-
-- `pnpm install`
-- `pnpm dev:api` (http://localhost:8787), `pnpm dev:worker`
-- `pnpm db:up`, `pnpm db:migrate`, `pnpm db:seed`
-- `pnpm typecheck`, `pnpm test`, `pnpm build`
-- `pnpm fixtures:fetch` (pinned third-party test fixtures into `.cache/`)
+- A council is at least two independent reviewers, run as separate agents or models. Give each the diff, the threat model and these rules, not the author's conclusion. At least one is adversarial: read another organization's data, reuse a credential, escape to the secrets. Shared-compute residue is out of scope for them.
+- Record each reviewer, their findings and each resolution in the pull request. An unresolved high-severity finding blocks the merge.
+- Use a draft pull request. A human owner approves the merge; deploying is a separate manual decision.
 
 ## Conventions
 
-- TypeScript strict mode, 2-space indentation, double quotes.
-- Database schema changes go only through `server/db/migrations`; tests build databases by applying migrations in order. Never create tables or columns any other way.
-- New migrations are `YYYYMMDDTHHMM_name.sql` (UTC; `pnpm db:new <name>`). The numbered `NNNN_` files are frozen: never add one, renumber one or edit one that has shipped. There is no journal: `server/db/migration-runner.mjs` records each applied file by name in `docslurp_migrations.applied` and applies every unrecorded file in name order, one transaction per file, so a migration that merges late still runs. Write a migration to apply cleanly both in name order (a fresh database) and after every migration already on `main` (an existing one); `worker/src/__tests__/migrations-late-merge.test.ts` checks the second case. Keep each file short (one table rewrite or index build): it waits at most `MIGRATION_STATEMENT_LOCK_TIMEOUT_MS` for a lock and is retried.
-- Every migration must be idempotent: running it twice in a row succeeds and leaves the same schema and data as one run. Use `CREATE TABLE/INDEX/SEQUENCE ... IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, `DROP ... IF EXISTS`, `CREATE OR REPLACE FUNCTION/TRIGGER/VIEW`, a `DO` block that checks the catalog before `ADD CONSTRAINT`, `CREATE TYPE`, `CREATE POLICY` or a rename, `ON CONFLICT` or `NOT EXISTS` on inserts, and a guard on backfills (`WHERE col IS NULL`, never an unguarded `x = x + n`). `worker/src/__tests__/migrations-idempotent.test.ts` runs each migration twice and compares the database, and `scripts/check-migration-safety.mjs` flags the usual causes statically; a migration that is idempotent for a reason the check cannot see says so with `-- idempotent-migration: <why>`.
-- Log every LLM or embedding call as `[ai-usage] <metric> model=<id> input_tokens=<n> output_tokens=<n>` (plus `cached_input_tokens=<n>` / `cache_write_input_tokens=<n>` when the provider reports prompt-cache use) and persist usage through the existing recorder with an explicit scope. Keep prompts static first, per-request last, so prefixes stay cacheable; Claude via OpenRouter caches only with `createOpenRouterPromptCacheFetch` on Chat Completions.
-- Never commit secrets, `.env` files, model weights or test fixtures with unclear licenses. Third-party fixtures are fetched on first use with `pnpm fixtures:fetch` into the gitignored `.cache/`.
-- Fake, QA and agent-created accounts use a reserved email domain (`@example.com`, `@<run>.invalid`, `@<name>.test`) so `docslurp_reserved_test_email` (migration 0094) marks them `test` and admin customer metrics exclude them; for an address you cannot choose, use `TEST_ACCOUNT_EMAIL_PATTERNS`.
-- Pricing mechanics (credit multipliers, zero-rated routes, infrastructure costs, margins) stay in `DocSlurp/app`. Core exposes neutral usage and profile data, and a generic seam with an open default for quoting; the customer-visible price list is the only pricing published here.
-- Benchmark and evaluation inputs are held-out evidence. Do not hard-code document names, field names or expected values from an evaluation into production code or prompts.
+- **Migrations:** schema changes go only through `server/db/migrations`; tests build databases by applying them in order.
+  - New files are `YYYYMMDDTHHMM_name.sql` (UTC; `pnpm db:new <name>`). The numbered `NNNN_` files are frozen, and a shipped file is never edited or renamed: downstream deployments copy this folder file for file.
+  - There is no journal: `server/db/migration-runner.mjs` records each applied file by name in `docslurp_migrations.applied` and applies every unrecorded file in name order, one transaction per file, so a late-merged migration still runs. Write each to apply cleanly both in name order (a fresh database) and after everything already on `main` (`worker/src/__tests__/migrations-late-merge.test.ts`).
+  - Keep each file short (one table rewrite or index build): it waits at most `MIGRATION_STATEMENT_LOCK_TIMEOUT_MS` for a lock and is retried.
+  - Every migration is idempotent: two runs leave the same schema and data as one. Use `IF NOT EXISTS` / `IF EXISTS`, `CREATE OR REPLACE`, a `DO` block that checks the catalog before `ADD CONSTRAINT`, `CREATE TYPE`, `CREATE POLICY` or a rename, `ON CONFLICT` or `NOT EXISTS` on inserts, and guarded backfills (`WHERE col IS NULL`, never an unguarded `x = x + n`). `worker/src/__tests__/migrations-idempotent.test.ts` runs each twice and `scripts/check-migration-safety.mjs` flags the usual causes; mark an exception the check cannot see with `-- idempotent-migration: <why>`.
+- **Model usage:** log every LLM or embedding call as `[ai-usage] <metric> model=<id> input_tokens=<n> output_tokens=<n>` (plus `cached_input_tokens=<n>` / `cache_write_input_tokens=<n>` when the provider reports prompt-cache use) and persist it through the existing recorder with an explicit scope. Order prompts static first, per-request last so prefixes stay cacheable.
+- **Test accounts:** fake, QA and agent-created accounts use a reserved domain (`@example.com`, `@<run>.invalid`, `@<name>.test`), which `docslurp_reserved_test_email` (migration 0094) marks `test` so customer metrics exclude them; for an address you cannot choose, use `TEST_ACCOUNT_EMAIL_PATTERNS`.
+- **Pricing:** core exposes neutral usage and profile data and a generic quoting seam with an open default; the customer-visible price list is the only pricing published here. Credit multipliers, zero-rated routes, infrastructure costs and margins stay in `DocSlurp/app`.
+- **Evaluation inputs are held-out evidence:** production code and prompts stay free of document names, field names or expected values from an evaluation.
+- **Committed files:** secrets, `.env` files, model weights and fixtures with unclear licenses stay out of Git; third-party fixtures arrive on first use through `pnpm fixtures:fetch` into the gitignored `.cache/`.
 
 ## Scale targets
 
@@ -112,37 +73,22 @@ Ingestion must perform equally well at both ends of the workload:
 - **Big:** one uploaded ~1 GB file of 10,000–20,000 pages.
 - **Many:** 10,000 files of variable size, from a few KB to a few MB each.
 
-"Equally well" covers latency (time to first searchable text, time to complete) and throughput (pages per minute, pages per $1). Judge every ingestion, extraction, storage or pipeline change against both ends before calling it done:
-
-- memory stays bounded whatever the document size;
-- limits scale with page count;
-- big documents shard;
-- small files batch, so per-file fixed costs such as VM start-up are amortised.
+"Equally well" covers latency (time to first searchable text, time to complete) and throughput (pages per minute, pages per $1). Judge every ingestion, extraction, storage or pipeline change against both ends before calling it done: memory stays bounded whatever the document size, limits scale with page count, big documents shard, and small files batch so per-file fixed costs such as VM start-up are amortised.
 
 ## Licensing
 
-The server, worker and CLI are BUSL-1.1 (free production use up to 16 worker vCPUs and 4 worker/GPU instances; each version converts to Apache-2.0 after three years); the SDKs, clients (including `contrib-algolia-server`) and `packages/shared` are MIT. New files inherit the license of the package they live in. Do not copy code from incompatibly licensed projects (for example AGPL or GPL sources) into any package.
+The worker, `server/db/` and the CLI are BUSL-1.1 (free production use up to 16 worker vCPUs across at most 4 worker or GPU instances; each version converts to Apache-2.0 after three years). The SDKs, clients (including the `contrib-*` packages) and `packages/shared` are MIT. New files take the license of their package; code from incompatibly licensed projects (for example AGPL or GPL sources) stays out of every package. See [LICENSE](LICENSE).
 
-## Pull requests
+## Git and pull requests
 
-Small, focused commits with imperative subjects and a "why" in the body. Run typecheck and tests for the packages you touched before opening a pull request. See `CONTRIBUTING.md`.
+**This repository is public.** Push exactly one named branch at a time with an explicit refspec, `git push origin HEAD:refs/heads/<branch>`, based on `origin/main`. Local core Git directories still hold branches built on the private pre-split history (root `46d295e2`), and on 2026-10-27 one bulk push published 2,602 private commits: `--all`, `--mirror`, `--tags` and glob refspecs are off limits. Before pushing a branch you did not create in this session, run `scripts/check-public-history.sh <ref>`. If a guard (pre-push hook, ruleset, CI) blocks a push, stop and report it.
 
-**This repository is public.** Push exactly one named branch at a time (`git push origin HEAD:refs/heads/<branch>`), based on `origin/main`. Never `git push --all`, `--mirror`, `--tags` or a glob refspec: local core git directories still hold branches built on the private pre-split DocSlurp/app history (root `46d295e2`), and on 2026-10-27 one such push published 2,602 private commits. Before pushing a branch you did not create in this session, run `scripts/check-public-history.sh <ref>`. If a guard (pre-push hook, ruleset, CI) blocks a push, stop and report it; never work around it.
-
-Never rewrite git history; always move forward with new commits. Do not use `git rebase`, `git commit --amend`, `git reset --hard`, `git push --force`/`--force-with-lease`, `git filter-branch` or similar. To catch a branch up, merge `main` into it and resolve conflicts in the merge commit. To fix a mistake, commit the corrected state on top. To undo a commit, `git revert` it.
-
-Keep every branch in sync with its remote. Fetch and merge `origin/main`, plus the current branch's upstream when it has one, before you start work, before you commit and before you push. Push each commit soon after making it, so unpushed commits never pile up locally and the remote never moves far ahead of you. Before you finish a task, `git status -sb` must show neither `ahead` nor `behind` on the branch you worked on (`main` included). If it does, merge and push at once, resolving conflicts in a merge commit. This applies in every worktree.
-
-Squash-merge pull requests into `main` (`gh pr merge --squash`) so each PR lands as one commit. For a PR stacked on a branch that was just squash-merged, merge the new `main` into it and retarget its base to `main`.
-
-## Releases
-
-Follow [docs/releases.md](docs/releases.md). All public libraries share a version and release together through release-npm.yml. Do not publish or push release tags without an explicit release request.
+- **Branching:** create task branches with `git switch --no-track -c <branch> origin/main`. A branch that tracks `origin/main` pushes straight to `main` under `push.default=upstream`; check that push output reads `HEAD -> <branch>`.
+- **Forward-only history:** catch a branch up by merging `origin/main` into it, fix mistakes with a new commit, undo with `git revert`. Rebase, amend, `reset --hard`, force pushes and `filter-branch` are never used.
+- **Stay in sync:** fetch and merge `origin/main` (and the branch's upstream) before starting, committing and pushing; push each commit soon after making it. Finish only when `git status -sb` shows neither `ahead` nor `behind`, in every worktree you used.
+- **Commits and merges:** small, focused commits with imperative subjects and a "why" in the body (see `CONTRIBUTING.md`). Squash-merge with `gh pr merge --squash`; for a PR stacked on one just squash-merged, merge the new `main` into it and retarget it to `main`.
+- **Releases:** follow [docs/releases.md](docs/releases.md). All public libraries share a version and release together through `release-npm.yml`; publish or push release tags only on an explicit release request.
 
 ## Production performance investigations
 
-During production tests or tuning, inspect logs and traces before, at least every
-five minutes during active experiments, and after the run. Use
-[dependency tracing](docs/dependency-tracing.md) for attribution and verification.
-Keep provider costs separate from customer credits and deduplicate usage receipts.
-Do not create a recurring scheduler unless explicitly requested.
+During production tests or tuning, inspect logs and traces before the run, at least every five minutes while it is active, and after it. Use [dependency tracing](docs/dependency-tracing.md) for attribution and verification. Keep provider costs separate from customer credits and deduplicate usage receipts. Create a recurring scheduler only when explicitly asked.
