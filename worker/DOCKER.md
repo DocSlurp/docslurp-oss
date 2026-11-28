@@ -84,7 +84,7 @@ The worker entrypoint can now manage ClamAV readiness before the Temporal worker
 - `DOCSLURP_CLAMAV_PRIVATE_MIRROR=https://...` (shared signature mirror for large fleets)
 - build arg `DOCSLURP_BAKE_CLAMAV_SIGNATURES=true` (lean image) downloads signatures at build time
 - `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB=true|false` (default `false`; `true` is development-only and stops startup anywhere else)
-- `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS=24` (1 to 72 outside development and test)
+- `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS=24` (1 to 168 outside development and test)
 - `DOCSLURP_CLAMAV_DB_DIR=/var/lib/clamav`
 - `DOCSLURP_CLAMAV_RUN_DIR=/tmp/clamav`
 - `DOCSLURP_CLAMAV_READY_TIMEOUT_SECONDS=180`

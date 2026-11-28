@@ -40,7 +40,7 @@ The web dashboard is not part of this repository, so there is no `pnpm dev` UI h
 ## Before you open a pull request
 
 1. `pnpm typecheck`
-2. `pnpm test` (server, worker, packages and scripts)
+2. `pnpm test` (worker, packages and scripts)
 3. `pnpm build`
 4. For worker or runtime dependency changes, check the Docker image still builds.
 
