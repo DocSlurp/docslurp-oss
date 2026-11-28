@@ -1,11 +1,14 @@
-import { Index, type Table } from "@lancedb/lancedb";
+import { Index, makeArrowTable, type Table } from "@lancedb/lancedb";
 import { LANCE_HYDRATION_COLUMN_SPECS } from "@docslurp/shared/lancedb-hydration";
 
 import { connectLanceDb } from "./lancedb-connection.js";
 import { setTimeout as delay } from "node:timers/promises";
 import type { VectorBackendRecord } from "./embedding-runtime.js";
 import {
+  ensureChunkTextFtsIndex,
+  lanceDbFtsIndexEnabled,
   lanceDbMaintenanceDue,
+  lanceMaintenanceKey,
   requestLanceDbMaintenance,
   scheduleLanceDbMaintenance,
   type LanceDbCadencePolicy,
@@ -89,12 +92,45 @@ export async function writeLanceDbRecords(
   await inTableQueue(`${uri}\u0000${collection}`, () => writeLanceDbRecordsNow(uri, collection, records, signal, retry));
 }
 
+/** A chunk row without its vector: what keyword search needs, written before the document is embedded. */
+export type LanceTextRecord = Omit<VectorBackendRecord, "vector">;
+
+/** Rows sampled to infer a new table's schema; one document's rows share one shape. */
+const TEXT_SCHEMA_SAMPLE_ROWS = 64;
+
+/**
+ * Upsert chunk rows without vectors, keyed by chunk id. A matched row keeps the vector it has (the source carries
+ * no `vector` column) and a new row gets a null one, which vector search and vector index builds skip; the index
+ * stage's upsert of the same ids fills it. `dimensions` is the table's embedding space: a table created here gets
+ * the schema a vector write would have inferred, and its full-text index, so the rows are searchable at once.
+ */
+export async function writeLanceDbTextRecords(
+  uri: string,
+  collection: string,
+  records: LanceTextRecord[],
+  dimensions: number,
+  signal?: AbortSignal,
+  retry: LanceWriteRetryOptions = {},
+): Promise<void> {
+  signal?.throwIfAborted();
+  if (records.length === 0) return;
+  if (!Number.isSafeInteger(dimensions) || dimensions < 1) throw new Error("LanceDB text rows require the table's vector dimensions");
+  const rows = records.map((record) => {
+    const { vector: _vector, ...rest } = record as LanceTextRecord & { vector?: unknown };
+    return rest;
+  });
+  await inTableQueue(`${uri}\u0000${collection}`, () =>
+    writeLanceDbRecordsNow(uri, collection, rows as unknown as VectorBackendRecord[], signal, retry, dimensions));
+}
+
 async function writeLanceDbRecordsNow(
   uri: string,
   collection: string,
   records: VectorBackendRecord[],
   signal: AbortSignal | undefined,
   retry: LanceWriteRetryOptions,
+  /** Set for rows without vectors: the dimensions a table created by this write declares for its vector column. */
+  textOnlyDimensions?: number,
 ): Promise<void> {
   signal?.throwIfAborted();
   const retries = retry.retries ?? 10;
@@ -113,7 +149,26 @@ async function writeLanceDbRecordsNow(
           // existOk can publish a replacement after another first writer has
           // already upserted. Strict creation makes the loser retry against the
           // winner's table instead of resetting its rows.
-          (await withAttemptTimeout(db.createTable(collection, rows), attemptTimeoutMs)).close();
+          if (textOnlyDimensions === undefined) {
+            (await withAttemptTimeout(db.createTable(collection, rows), attemptTimeoutMs)).close();
+          } else {
+            // Rows without vectors cannot type the vector column: infer the schema from a sample carrying a
+            // placeholder vector, create the table empty, and let the upsert below insert the real rows.
+            const placeholder = new Array<number>(textOnlyDimensions).fill(0);
+            const { schema } = makeArrowTable(rows.slice(0, TEXT_SCHEMA_SAMPLE_ROWS).map((row) => ({ ...row, vector: placeholder })));
+            const created = await withAttemptTimeout(db.createEmptyTable(collection, schema), attemptTimeoutMs);
+            try {
+              // Best effort: without it keyword search waits for the table's first maintenance pass.
+              if (lanceDbFtsIndexEnabled()) {
+                const fts = await withAttemptTimeout(
+                  ensureChunkTextFtsIndex(created, [], { key: lanceMaintenanceKey(uri, collection) }), attemptTimeoutMs,
+                ).catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
+                if ("error" in fts && fts.error) console.warn(`[lancedb] fts index on new table ${collection} failed: ${fts.error.split("\n")[0]}`);
+              }
+            } finally {
+              created.close();
+            }
+          }
         }
         const table = await withAttemptTimeout(db.openTable(collection), attemptTimeoutMs);
         initializingTable = false;
@@ -248,7 +303,7 @@ export async function deleteLanceDbRecords(
  * rows) get empty hydration values when they share a batch with hydrated rows;
  * search hydrates those from Postgres.
  */
-export function withUniformHydrationColumns(records: VectorBackendRecord[]): VectorBackendRecord[] {
+export function withUniformHydrationColumns<T extends LanceTextRecord>(records: T[]): T[] {
   const hydrated = records.some((record) => record.hydration !== undefined);
   return records.map((record) => hydrated && record.hydration === undefined
     ? { ...record, runId: "", pageNumber: 0, hydration: "" }

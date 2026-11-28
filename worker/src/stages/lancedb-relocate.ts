@@ -363,16 +363,22 @@ export async function relocateOrgVectors(options: LanceRelocateOptions): Promise
         ? [...destinations.values()].filter((entry) => entry.rows > 0 || entry.seen.size > 0).map((entry) => entry.location)
         : result.written;
       for (const target of targets) {
+        // Registered before maintenance, with work pending: if maintenance fails here, the worker's sweep
+        // retries it. Registering only after success left a failed table with no indexes and nobody to build them.
+        await sql`
+          insert into vector_index_tables (table_key, lance_uri, lance_table, rows_since_optimize, updated_at)
+          values (${`${target.uri}#${target.table}`}, ${target.uri}, ${target.table}, 1, now())
+          on conflict (table_key) do update set lance_uri = excluded.lance_uri, lance_table = excluded.lance_table,
+            rows_since_optimize = greatest(vector_index_tables.rows_since_optimize, 1), updated_at = now()
+        `;
         const outcome = await runLanceDbMaintenance(target.uri, target.table, maintenance);
         if (!outcome.ok) {
           result.errors.push(`maintenance ${target.uri}: ${outcome.error ?? "failed"}`);
           continue;
         }
-        // Known to the maintenance sweep from now on, with nothing pending.
         await sql`
-          insert into vector_index_tables (table_key, lance_uri, lance_table, last_optimized_at, updated_at)
-          values (${`${target.uri}#${target.table}`}, ${target.uri}, ${target.table}, now(), now())
-          on conflict (table_key) do update set lance_uri = excluded.lance_uri, lance_table = excluded.lance_table, updated_at = now()
+          update vector_index_tables set last_optimized_at = now(), rows_since_optimize = 0, updated_at = now()
+          where table_key = ${`${target.uri}#${target.table}`}
         `;
         result.maintained.push({ uri: target.uri, table: target.table });
       }

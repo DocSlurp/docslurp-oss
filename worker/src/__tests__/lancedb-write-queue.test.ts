@@ -17,7 +17,7 @@ import {
   type LanceDbWriteQueueDeps,
   type VectorOutboxRow,
 } from "../stages/lancedb-write-queue.js";
-import { writeLanceDbRecords } from "../stages/lancedb-writer.js";
+import { writeLanceDbRecords, type LanceTextRecord } from "../stages/lancedb-writer.js";
 import { KeyedTaskPool } from "../stages/lancedb-maintenance-pool.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -429,6 +429,101 @@ describe("LanceDbWriteQueue", () => {
       maint_holder = 'other', maint_expires_at = now() + interval '1 minute' where table_key = ${key}`;
     expect(await q.sweepDueMaintenance()).toBe(0);
   }, 30_000);
+});
+
+describe("LanceDbWriteQueue text jobs", () => {
+  /** Stand-in for a document's chunk rows in Postgres. */
+  const textRows = (documentId: string, chunks: number): LanceTextRecord[] => Array.from({ length: chunks }, (_, index) => ({
+    id: `${documentId}-${index.toString().padStart(3, "0")}`, documentId, chunkIndex: index,
+    text: `early ${documentId} chunk ${index}`, metadata: { documentId, filename: `${documentId}.pdf` },
+  }));
+  const textQueue = () => queue({ loadTextRecords: async (row) => textRows(row.documentId, row.recordCount) });
+  const vectors = async () => {
+    const lance = await connect(dir);
+    try {
+      const table = await lance.openTable(TABLE);
+      try {
+        return new Map((await table.query().select(["id", "text", "vector"]).toArray()).map((row) => [row.id as string, row]));
+      } finally { table.close(); }
+    } finally { lance.close(); }
+  };
+
+  it("commits text rows and vector rows of one drain, and the vector job then fills the text rows", async () => {
+    const q = textQueue();
+    const vectorKey = makeDocument("doc-v", 2);
+    const outcomes = await Promise.all([
+      q.indexDocument({ ...job("doc-t", "", 3), textDimensions: DIMS }),
+      q.indexDocument(job("doc-v", vectorKey, 2)),
+    ]);
+    expect(outcomes.every((outcome) => !outcome.superseded)).toBe(true);
+    let rows = await vectors();
+    expect(rows.size).toBe(5);
+    expect(rows.get("doc-t-000")).toMatchObject({ text: "early doc-t chunk 0", vector: null });
+    expect(rows.get("doc-v-000")?.vector).not.toBeNull();
+
+    // The document's vector job reuses its outbox row and upserts the same ids.
+    await q.indexDocument(job("doc-t", makeDocument("doc-t", 3, "embedded"), 3));
+    rows = await vectors();
+    expect(rows.size).toBe(5);
+    expect(rows.get("doc-t-002")?.text).toBe("embedded doc-t chunk 2");
+    expect([...rows.values()].every((row) => row.vector !== null)).toBe(true);
+    expect(await sql`select count(*)::int as n from vector_index_outbox where document_id = 'doc-t'`).toEqual([{ n: 1 }]);
+  });
+
+  it("reports a text job the vector job replaced before anyone drained it", async () => {
+    const q = textQueue();
+    const tableKey = lanceTableKey(dir, TABLE);
+    // Another process holds the write lease, so the text job waits in the outbox.
+    await sql`insert into vector_index_tables (table_key, lance_uri, lance_table, write_holder, write_expires_at)
+              values (${tableKey}, ${dir}, ${TABLE}, 'other', now() + interval '5 seconds')`;
+    const waiting = q.indexDocument({ ...job("doc-s", "", 2), textDimensions: DIMS });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await q.enqueue(tableKey, job("doc-s", makeDocument("doc-s", 2), 2));
+    expect((await waiting).superseded).toBe(true);
+  });
+
+  it("never replaces the document's pending vector job with a text job", async () => {
+    const q = textQueue();
+    const tableKey = lanceTableKey(dir, TABLE);
+    await sql`insert into vector_index_tables (table_key, lance_uri, lance_table, write_holder, write_expires_at)
+              values (${tableKey}, ${dir}, ${TABLE}, 'other', now() + interval '5 seconds')`;
+    const vector = await q.enqueue(tableKey, job("doc-p", makeDocument("doc-p", 2), 2));
+    expect((await q.indexDocument({ ...job("doc-p", "", 2), textDimensions: DIMS })).superseded).toBe(true);
+    expect(await sql`select generation, status, artifact_key from vector_index_outbox where document_id = 'doc-p'`)
+      .toEqual([{ generation: vector!.generation, status: "pending", artifact_key: "artifacts/doc-p.json" }]);
+  });
+
+  it("fails a text job whose chunks no longer match the count it was enqueued with", async () => {
+    const q = queue({
+      loadTextRecords: async (row) => textRows(row.documentId, row.recordCount - 1),
+      settings: { pollMinMs: 5, pollMaxMs: 40, leaseTtlMs: 5_000, maxAttempts: 1 },
+    });
+    await expect(q.indexDocument({ ...job("doc-short", "", 3), textDimensions: DIMS })).rejects.toThrow(/expected 3 chunks, found 2/);
+  });
+
+  it("keeps a written text job past the outbox prune: it is the record of where the rows live", async () => {
+    const q = queue({
+      loadTextRecords: async (row) => textRows(row.documentId, row.recordCount),
+      maintenance: { enabled: true, mode: "inline", vectorIndexMinRows: 1_000_000, optimizeEveryRows: 1, optimizeIntervalMs: 0 },
+    });
+    await q.indexDocument({ ...job("doc-t", "", 1), textDimensions: DIMS });
+    await q.indexDocument(job("doc-v", makeDocument("doc-v", 1), 1));
+    await sql`update vector_index_outbox set written_at = now() - interval '2 days'`;
+    await sql`update vector_index_tables set rows_since_optimize = 10, maint_expires_at = now() - interval '1 second', last_optimized_at = null`;
+    expect(await q.maybeMaintain(lanceTableKey(dir, TABLE), dir, TABLE)).toMatchObject({ ok: true });
+    expect((await sql`select document_id from vector_index_outbox order by document_id`).map((row) => row.document_id)).toEqual(["doc-t"]);
+  });
+
+  it("fails a text job on a queue that cannot load text rows, leaving other documents to commit", async () => {
+    const q = queue({ settings: { pollMinMs: 5, pollMaxMs: 40, leaseTtlMs: 5_000, maxAttempts: 1 } });
+    const [text, vector] = await Promise.allSettled([
+      q.indexDocument({ ...job("doc-t", "", 1), textDimensions: DIMS }),
+      q.indexDocument(job("doc-v", makeDocument("doc-v", 1), 1)),
+    ]);
+    expect(text.status).toBe("rejected");
+    expect(vector.status).toBe("fulfilled");
+    expect((await tableRows()).map((row) => row.id)).toEqual(["doc-v-000"]);
+  });
 });
 
 describe("lanceDbMaintenanceSettings write-path tuning", () => {

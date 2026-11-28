@@ -417,6 +417,8 @@ export const documents = pgTable(
     reindexOf: text("reindex_of"),
     // Chunks fully materialized: keyword search may serve this version before completion.
     lexicalSearchableAt: timestamp("lexical_searchable_at", { withTimezone: true, mode: "string" }),
+    // `<run id>:<embedding model>:<dimensions>` once the chunks' text rows are in LanceDB ahead of their vectors (lexicalIndexKey).
+    lexicalIndexKey: text("lexical_index_key"),
   },
   (table) => [
     index("documents_superseded_unpurged_idx")

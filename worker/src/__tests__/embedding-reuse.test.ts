@@ -57,6 +57,7 @@ import {
 import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { EmbedStage } from "../stages/embed.js";
+import type { DocumentTextIndexer } from "../stages/index-vectors.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 
@@ -149,6 +150,8 @@ type EmbedArgs = {
   storeExtras?: Record<string, unknown>;
   /** EmbedStage's LanceDB delete (default: none recorded). */
   deleteVectors?: (uri: string, table: string, ids: readonly string[]) => Promise<void>;
+  /** EmbedStage's text-row writer (the index stage's queue in production). */
+  indexDocumentText?: DocumentTextIndexer;
 };
 
 async function embedDocument(args: EmbedArgs) {
@@ -190,7 +193,7 @@ async function runEmbed(args: EmbedArgs) {
 
   let failure: unknown;
   try {
-    await new EmbedStage({} as CommandRunner, args.storage as unknown as ArtifactStore, config, args.deleteVectors ?? (async () => {})).run(state);
+    await new EmbedStage({} as CommandRunner, args.storage as unknown as ArtifactStore, config, args.deleteVectors ?? (async () => {}), args.indexDocumentText).run(state);
   } catch (error) {
     if (!args.allowFailure) throw error;
     failure = error;
@@ -338,6 +341,78 @@ describe("EmbedStage chunk materialization", () => {
       expect(calls).toEqual(["written", "searchable"]);
       expect(providerCalls.embed.length).toBeGreaterThan(0);
       expect(result.artifact.chunks.every(chunk => chunk.vector.length > 0)).toBe(true);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("writes text rows to LanceDB after the early publish and stamps the key of the run and embedding space", async () => {
+    vi.stubEnv("DOCSLURP_EARLY_LEXICAL_CHUNKS", "on");
+    vi.stubEnv("DOCSLURP_EARLY_LEXICAL_INDEX", "on");
+    const calls: string[] = [];
+    const jobs: Array<Parameters<DocumentTextIndexer>[0]> = [];
+    try {
+      const result = await embedDocument({
+        storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-text", documentId: "text",
+        storeExtras: { insertChunks: async () => { calls.push("chunks"); } },
+        indexDocumentText: async (job) => { expect(providerCalls.embed).toHaveLength(0); calls.push("text"); jobs.push(job); return { written: true }; },
+      });
+      expect(calls).toEqual(["chunks", "text"]);
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ orgId: "o1", projectId: "w1", runId: "run-text", documentId: "text", recordCount: result.artifact.chunks.length });
+      const space = jobs[0]!.space;
+      expect(space).toEqual({ model: result.artifact.embedding.model, dimensions: result.artifact.embedding.dimensions });
+      const keys = (result.state.store!.content as unknown as { lexicalIndexKeys: Map<string, string> }).lexicalIndexKeys;
+      expect(keys.get("text")).toBe(`run-text:${space.model}:${space.dimensions}`);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it.each([
+    ["the write fails", async () => { throw new Error("lance unavailable"); }],
+    ["the vector job replaced it", async () => ({ written: false })],
+  ] as const)("completes the document without the key when %s", async (_name, indexDocumentText) => {
+    vi.stubEnv("DOCSLURP_EARLY_LEXICAL_CHUNKS", "on");
+    vi.stubEnv("DOCSLURP_EARLY_LEXICAL_INDEX", "on");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const result = await embedDocument({
+        storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-text-off", documentId: "text-off", indexDocumentText,
+      });
+      expect((result.state.store!.content as unknown as { lexicalIndexKeys: Map<string, string> }).lexicalIndexKeys.size).toBe(0);
+      expect(result.artifact.chunks.length).toBeGreaterThan(0);
+    } finally { warn.mockRestore(); vi.unstubAllEnvs(); }
+  });
+
+  it("stops a text write still waiting when embedding fails, and stamps nothing", async () => {
+    vi.stubEnv("DOCSLURP_EARLY_LEXICAL_CHUNKS", "on");
+    vi.stubEnv("DOCSLURP_EARLY_LEXICAL_INDEX", "on");
+    let aborted = false;
+    try {
+      const result = await runEmbed({
+        storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-text-fail", documentId: "text-fail",
+        privacyMode: "local-only", allowFailure: true,
+        storeExtras: { failDocumentStage: async () => undefined },
+        // Waits in the queue until told to stop.
+        indexDocumentText: (job) => new Promise((_resolve, reject) => {
+          job.signal!.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); }, { once: true });
+        }),
+      });
+      expect(result.embedInputs).toEqual([]);
+      expect(aborted).toBe(true);
+      expect((result.state.store!.content as unknown as { lexicalIndexKeys: Map<string, string> }).lexicalIndexKeys.size).toBe(0);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it.each([
+    ["the index switch is off", { DOCSLURP_EARLY_LEXICAL_CHUNKS: "on" }],
+    ["chunks are published after embedding", { DOCSLURP_EARLY_LEXICAL_INDEX: "on" }],
+  ] as const)("writes no text rows when %s", async (_name, env) => {
+    for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value);
+    let called = 0;
+    try {
+      await embedDocument({
+        storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-no-text", documentId: "no-text",
+        indexDocumentText: async () => { called += 1; return { written: true }; },
+      });
+      expect(called).toBe(0);
     } finally { vi.unstubAllEnvs(); }
   });
 

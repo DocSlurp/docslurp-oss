@@ -126,7 +126,7 @@ export async function noteDocumentStageComplete(state: Pick<WorkflowState, "run"
   await noteRunMilestone(store, state.run.id, "first_page_completed");
 }
 
-export function recordDocumentMilestone(run: { createdAt: Date }, milestone: "lexical_searchable" | "embedded" | "indexed", pageCount: number): void {
+export function recordDocumentMilestone(run: { createdAt: Date }, milestone: "lexical_searchable" | "lexical_indexed" | "embedded" | "indexed", pageCount: number): void {
   const seconds = secondsSinceAccepted(run);
   if (seconds !== null) recordPipelineTelemetry("document.milestone.duration", seconds, { milestone, pages: pageCountBucket(pageCount) }, "duration");
 }

@@ -4,6 +4,7 @@ import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
 
 import {
   buildVectorIndexSearchMetadata,
+  buildTextRecords,
   buildVectorRecords,
   vectorBackendCollectionName
 } from "../stages/index-vectors.js";
@@ -62,6 +63,15 @@ describe("buildVectorRecords", () => {
   it("keeps a document's own artifact ids", () => {
     const records = buildVectorRecords({ documentId: "doc", chunks: [chunk("doc", 0)] }, "doc", {}, "run-1");
     expect(records[0]).toMatchObject({ id: "doc-000", documentId: "doc", runId: "run-1" });
+  });
+
+  it("builds the same rows from stored chunks, without the vector", () => {
+    const [record] = buildVectorRecords({ documentId: "doc", chunks: [chunk("doc", 0)] }, "doc", { sourceKey: "k", filename: "f.pdf" }, "run-1");
+    const { vector: _vector, ...expected } = record!;
+    expect(buildTextRecords([{
+      id: "doc-000", chunk_index: 0, text: "text 0", heading_path: ["H"], page_number: 2, token_estimate: 3,
+      metadata: { documentId: "doc", locator: "x" },
+    }], "doc", { sourceKey: "k", filename: "f.pdf" }, "run-1")).toEqual([expected]);
   });
 
   it("rebinds another document's artifact to this document's own chunk ids by chunk index", () => {

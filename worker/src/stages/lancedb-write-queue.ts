@@ -14,7 +14,7 @@ import {
   type LanceDbMaintenanceResult,
 } from "./lancedb-maintenance.js";
 import { lanceMaintenancePool, type KeyedTaskPool } from "./lancedb-maintenance-pool.js";
-import { writeLanceDbRecords } from "./lancedb-writer.js";
+import { writeLanceDbRecords, writeLanceDbTextRecords, type LanceTextRecord } from "./lancedb-writer.js";
 
 /**
  * Group-commit writer for the per-org LanceDB tables.
@@ -54,7 +54,22 @@ export type VectorWriteJob = {
   artifactKey: string;
   metadata?: Record<string, unknown>;
   recordCount: number;
+  /**
+   * Set for a text job: the document's chunk rows are written without vectors (keyword search ahead of embedding)
+   * into a table of this many dimensions. It shares the document's outbox row with the vector job that follows, so
+   * the later enqueue replaces a text job nobody drained yet. `artifactKey` is unused.
+   */
+  textDimensions?: number;
 };
+
+/** Outbox metadata key marking a text job; its value is the table's vector dimensions. */
+const TEXT_JOB_DIMENSIONS = "lexicalTextDimensions";
+
+/** The vector dimensions of a text job's table, or null for a vector job. */
+export function textJobDimensions(metadata: Record<string, unknown> | null | undefined): number | null {
+  const value = metadata?.[TEXT_JOB_DIMENSIONS];
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
 
 export type VectorOutboxRow = {
   id: number;
@@ -96,7 +111,10 @@ export type LanceDbWriteQueueDeps = {
   sql: Sql;
   /** Build a document's Lance rows from its outbox row (normally: read the embedding artifact). */
   loadRecords: (row: VectorOutboxRow) => Promise<VectorBackendRecord[]>;
+  /** Build a text job's rows (textJobDimensions(row.metadata) is set): the document's chunks, without vectors. */
+  loadTextRecords?: (row: VectorOutboxRow) => Promise<LanceTextRecord[]>;
   write?: (uri: string, table: string, records: VectorBackendRecord[]) => Promise<void>;
+  writeText?: (uri: string, table: string, records: LanceTextRecord[], dimensions: number) => Promise<void>;
   maintain?: (uri: string, table: string, options: LanceDbMaintenanceOptions) => Promise<LanceDbMaintenanceResult>;
   maintenance: LanceDbQueueMaintenancePolicy;
   settings?: Partial<LanceDbWriteQueueSettings>;
@@ -109,6 +127,8 @@ export type LanceDbWriteQueueDeps = {
 export type VectorWriteOutcome = {
   /** Wall time from enqueue until the document's rows were committed. */
   waitedMs: number;
+  /** The wait ended because a later enqueue replaced this job (or its row is gone): these rows may not be written. */
+  superseded: boolean;
   /** Drain leaderships this call took, the batches it committed and the documents in them. */
   drains: number;
   batches: number;
@@ -198,6 +218,7 @@ export class LanceDbWriteQueue {
   private readonly sql: Sql;
   private readonly settings: LanceDbWriteQueueSettings;
   private readonly write: NonNullable<LanceDbWriteQueueDeps["write"]>;
+  private readonly writeText: NonNullable<LanceDbWriteQueueDeps["writeText"]>;
   private readonly maintain: NonNullable<LanceDbWriteQueueDeps["maintain"]>;
   private readonly workerId: string;
 
@@ -205,6 +226,7 @@ export class LanceDbWriteQueue {
     this.sql = deps.sql;
     this.settings = { ...DEFAULT_QUEUE_SETTINGS, ...deps.settings };
     this.write = deps.write ?? ((uri, table, records) => writeLanceDbRecords(uri, table, records));
+    this.writeText = deps.writeText ?? ((uri, table, records, dimensions) => writeLanceDbTextRecords(uri, table, records, dimensions));
     this.maintain = deps.maintain ?? runLanceDbMaintenance;
     this.workerId = deps.workerId ?? process.env.FLY_MACHINE_ID ?? `local-${process.pid}`;
   }
@@ -213,17 +235,27 @@ export class LanceDbWriteQueue {
   async indexDocument(job: VectorWriteJob, signal?: AbortSignal): Promise<VectorWriteOutcome> {
     const started = performance.now();
     const tableKey = lanceTableKey(job.uri, job.table);
-    const { id, generation } = await this.enqueue(tableKey, job);
     const outcome: VectorWriteOutcome = {
-      waitedMs: 0, drains: 0, batches: 0, batchedDocuments: 0, maintenance: null, maintenanceScheduled: false,
+      waitedMs: 0, superseded: false, drains: 0, batches: 0, batchedDocuments: 0, maintenance: null, maintenanceScheduled: false,
     };
+    const enqueued = await this.enqueue(tableKey, job);
+    if (!enqueued) {
+      // A text job that found the document's vector job waiting: the full rows are on their way.
+      outcome.superseded = true;
+      return outcome;
+    }
+    const { id, generation } = enqueued;
     const deadline = Date.now() + this.settings.waitTimeoutMs;
     let pause = this.settings.pollMinMs;
 
     for (;;) {
       signal?.throwIfAborted();
       const state = await this.status(id, tableKey);
-      if (!state || state.status === "written" || state.generation !== generation) break;
+      if (!state || state.generation !== generation) {
+        outcome.superseded = true;
+        break;
+      }
+      if (state.status === "written") break;
       if (state.status === "failed") {
         throw new VectorIndexWriteFailed(
           `LanceDB write failed for document ${job.documentId} after ${state.attempts} attempts: ${state.lastError ?? "unknown error"}`,
@@ -332,12 +364,20 @@ export class LanceDbWriteQueue {
                      or t.last_optimized_at < now() - (${policy.optimizeIntervalMs} * interval '1 millisecond'))))`;
   }
 
-  async enqueue(tableKey: string, job: VectorWriteJob): Promise<{ id: number; generation: number }> {
+  /**
+   * Null for a text job that finds the document's vector job pending: text rows never replace it, or the index stage
+   * waiting on that job would see it gone and register vectors that were not written.
+   */
+  async enqueue(tableKey: string, job: VectorWriteJob): Promise<{ id: number; generation: number } | null> {
+    const keepsPendingVectorJob = job.textDimensions
+      ? this.sql`where not (vector_index_outbox.status = 'pending' and not (vector_index_outbox.metadata ? ${TEXT_JOB_DIMENSIONS}))`
+      : this.sql``;
+    const metadata = { ...(job.metadata ?? {}), ...(job.textDimensions ? { [TEXT_JOB_DIMENSIONS]: job.textDimensions } : {}) };
     const [row] = await this.sql<{ id: string | number; generation: number }[]>`
       insert into vector_index_outbox
         (table_key, lance_uri, lance_table, org_id, document_id, run_id, artifact_key, metadata, record_count)
       values (${tableKey}, ${job.uri}, ${job.table}, ${job.orgId}, ${job.documentId}, ${job.runId},
-              ${job.artifactKey}, ${this.sql.json((job.metadata ?? {}) as postgres.JSONValue)}, ${job.recordCount})
+              ${job.artifactKey}, ${this.sql.json(metadata as postgres.JSONValue)}, ${job.recordCount})
       on conflict (table_key, document_id) do update set
         run_id = excluded.run_id,
         org_id = excluded.org_id,
@@ -350,8 +390,9 @@ export class LanceDbWriteQueue {
         last_error = null,
         enqueued_at = now(),
         written_at = null
+      ${keepsPendingVectorJob}
       returning id, generation`;
-    return { id: Number(row!.id), generation: Number(row!.generation) };
+    return row ? { id: Number(row.id), generation: Number(row.generation) } : null;
   }
 
   private async status(id: number, tableKey: string): Promise<{
@@ -463,11 +504,20 @@ export class LanceDbWriteQueue {
   /** Load, write and mark one batch. Returns the number of documents committed. */
   private async commitBatch(tableKey: string, uri: string, table: string, batch: VectorOutboxRow[]): Promise<number> {
     const started = performance.now();
-    const loaded = await mapLimit(batch, this.settings.loadConcurrency, async (row) => {
+    type Loaded = { row: VectorOutboxRow; records: Array<VectorBackendRecord | LanceTextRecord>; textDimensions: number | null; error: unknown };
+    const loaded = await mapLimit(batch, this.settings.loadConcurrency, async (row): Promise<Loaded> => {
+      const textDimensions = textJobDimensions(row.metadata);
       try {
-        return { row, records: await this.deps.loadRecords(row), error: null as unknown };
+        if (textDimensions === null) return { row, records: await this.deps.loadRecords(row), textDimensions, error: null };
+        // A build that cannot load text rows fails the job; the vector job that follows re-enqueues the row.
+        if (!this.deps.loadTextRecords) throw new Error("this worker cannot load text rows");
+        const records = await this.deps.loadTextRecords(row);
+        // Fewer or more rows than the job counted: the chunks were rewritten since. Writing these and reporting the
+        // document indexed would hide the rest of it from keyword search.
+        if (records.length !== row.recordCount) throw new Error(`text job expected ${row.recordCount} chunks, found ${records.length}`);
+        return { row, records, textDimensions, error: null };
       } catch (error) {
-        return { row, records: [] as VectorBackendRecord[], error };
+        return { row, records: [], textDimensions, error };
       }
     });
     for (const item of loaded) if (item.error !== null) await this.recordFailure(item.row, item.error);
@@ -477,22 +527,30 @@ export class LanceDbWriteQueue {
 
     const writeStarted = performance.now();
     const records = ready.flatMap((item) => item.records);
-    let committed: typeof ready = [];
-    try {
-      await this.write(uri, table, records);
-      committed = ready;
-    } catch (error) {
-      if (ready.length === 1) {
-        await this.recordFailure(ready[0]!.row, error);
-      } else {
-        // Isolate a poison document: write the batch one document at a time.
-        console.warn(`[lancedb-queue] batch write failed table=${table} documents=${ready.length}; retrying per document: ${errorText(error)}`);
-        for (const item of ready) {
-          try {
-            await this.write(uri, table, item.records);
-            committed.push(item);
-          } catch (single) {
-            await this.recordFailure(item.row, single);
+    const committed: Loaded[] = [];
+    // One merge-insert takes one schema: rows with vectors and rows without commit separately.
+    const groups = new Map<number | null, Loaded[]>();
+    for (const item of ready) groups.set(item.textDimensions, [...(groups.get(item.textDimensions) ?? []), item]);
+    for (const [textDimensions, group] of groups) {
+      const write = (items: Loaded[]) => textDimensions === null
+        ? this.write(uri, table, items.flatMap((item) => item.records) as VectorBackendRecord[])
+        : this.writeText(uri, table, items.flatMap((item) => item.records), textDimensions);
+      try {
+        await write(group);
+        committed.push(...group);
+      } catch (error) {
+        if (group.length === 1) {
+          await this.recordFailure(group[0]!.row, error);
+        } else {
+          // Isolate a poison document: write the batch one document at a time.
+          console.warn(`[lancedb-queue] batch write failed table=${table} documents=${group.length}; retrying per document: ${errorText(error)}`);
+          for (const item of group) {
+            try {
+              await write([item]);
+              committed.push(item);
+            } catch (single) {
+              await this.recordFailure(item.row, single);
+            }
           }
         }
       }
@@ -597,10 +655,13 @@ export class LanceDbWriteQueue {
           last_optimized_at = now(), last_maintenance_error = null,
           maint_holder = null, maint_expires_at = now(), updated_at = now()
         where table_key = ${tableKey} and maint_holder = ${holder}`;
-      // Written rows are only needed until their waiters have seen them.
+      // Written rows are only needed until their waiters have seen them. A written text job stays: until the vector
+      // job replaces it (or the document is deleted) it is the only record of where that document's rows live, and
+      // the document delete trigger reads it to purge them.
       await this.sql`
         delete from vector_index_outbox
-        where table_key = ${tableKey} and status = 'written' and written_at < now() - interval '1 day'`;
+        where table_key = ${tableKey} and status = 'written' and written_at < now() - interval '1 day'
+          and not (metadata ? ${TEXT_JOB_DIMENSIONS})`;
     } else {
       // Leave the counters; the lease expiry doubles as the retry back-off. A table that is
       // gone (dropped with its project, or never created) has no history left to prune.

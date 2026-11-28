@@ -39,6 +39,8 @@ export class MemoryDocumentContent implements DocumentContentWriter {
   /** Documents whose chunks were linked to their pages, per run. */
   readonly linkedDocuments: Array<{ documentId: string; runId: string }> = [];
   readonly lexicalSearchable = new Set<string>();
+  /** documents.lexical_index_key by document id. */
+  readonly lexicalIndexKeys = new Map<string, string>();
   /** Embedding reuse refs per organization and key. */
   readonly reuseRefs = new Map<string, EmbeddingReuseRef>();
 
@@ -62,6 +64,11 @@ export class MemoryDocumentContent implements DocumentContentWriter {
   async finalizeDocumentChunks(scope: DocumentRowScope, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
     await this.deleteStaleDocumentChunks(scope, keepChunkIds);
     if (markSearchable) await this.markDocumentLexicalSearchable(scope);
+    this.lexicalIndexKeys.delete(scope.documentId);
+  }
+
+  async markDocumentLexicalIndexed({ documentId }: DocumentRowScope, key: string): Promise<void> {
+    if (this.lexicalSearchable.has(documentId)) this.lexicalIndexKeys.set(documentId, key);
   }
 
   async markDocumentLexicalSearchable({ documentId }: DocumentRowScope): Promise<void> {
