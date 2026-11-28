@@ -50,7 +50,7 @@ const UNSAFE_WHEN: Record<UnsafeSetting, (value: string) => boolean> = {
   DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB: (value) => !OFF_VALUES.has(value),
   // Inverted: unset or an on value keeps quarantine; anything else (off values, typos) is refused, loudly.
   DOCSLURP_CLAMAV_ENABLED: (value) => value !== "" && !ON_VALUES.has(value),
-  DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: (value) => value !== "" && !/^(?:[1-9]|[1-6][0-9]|7[0-2])$/.test(value),
+  DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: (value) => value !== "" && !/^(?:[1-9]|[1-9][0-9]|1[0-5][0-9]|16[0-8])$/.test(value),
   QUARANTINE_ENABLED: (value) => value !== "" && !ON_VALUES.has(value),
   DOCSLURP_PARSER_SANDBOX: (value) => value === "none",
 };
