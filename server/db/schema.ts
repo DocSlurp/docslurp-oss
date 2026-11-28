@@ -1641,9 +1641,6 @@ export const documentPropositions = pgTable(
     text: text().notNull(),
     sourceParagraph: text("source_paragraph").notNull(),
     tokenEstimate: integer("token_estimate").default(0).notNull(),
-    tsContent: tsvector("ts_content").generatedAlwaysAs(
-      sql`to_tsvector('english'::regconfig, text)`,
-    ),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -1652,10 +1649,6 @@ export const documentPropositions = pgTable(
     index("document_propositions_document_id_idx").using(
       "btree",
       table.documentId.asc().nullsLast().op("text_ops"),
-    ),
-    index("document_propositions_ts_content_idx").using(
-      "gin",
-      table.tsContent.asc().nullsLast().op("tsvector_ops"),
     ),
     index("document_propositions_user_id_run_id_idx").using(
       "btree",
