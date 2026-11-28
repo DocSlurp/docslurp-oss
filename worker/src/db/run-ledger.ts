@@ -1,5 +1,6 @@
 import { pageCountsFinal, RUN_MILESTONE_COLUMNS, type RunMilestone, type RunMilestoneExtra, type RunMilestoneHit } from "../pipeline/run-milestones.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
+import { lexicalIndexKeyColumnPresent } from "./lexical-index-key.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { type GeoFinalSource } from "./geo-final-source.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
@@ -275,13 +276,13 @@ type ProgressWrite = {
 const CONTROL_REQUEST_STATES = ["pause_requested", "paused", "cancel_requested", "cancelled"];
 
 /** The documents of a completing run: retire obsolete rows, then mark the healthy ones completed. */
-function completeRunDocumentStatements(client: Sql<Record<string, unknown>>, runId: string) {
+function completeRunDocumentStatements(client: Sql<Record<string, unknown>>, runId: string, lexicalKey: boolean) {
   return [
     client`select retire_replaced_pending_documents(${runId})`,
     // Legacy retries may already contain obsolete queued rows. They were not
     // hydrated or processed; retire them instead of declaring them completed.
     client`
-      update documents set status = 'cancelled', lexical_searchable_at = null, lexical_index_key = null, updated_at = now()
+      update documents set status = 'cancelled', lexical_searchable_at = null, ${lexicalKey ? client`lexical_index_key = null,` : client``} updated_at = now()
       where run_id = ${runId} and superseded_at is not null
         and status in ('queued', 'processing')
     `,
@@ -308,7 +309,8 @@ async function completeRunDocuments(
   runId: string,
   after: readonly [PendingQuery<any>, PendingQuery<{ run_found: number; changed: number }[]>],
 ): Promise<{ ids: string[]; finalized: Array<{ run_found: number; changed: number }> }> {
-  const [retire, cancel, completed] = completeRunDocumentStatements(client, runId);
+  const lexicalKey = await lexicalIndexKeyColumnPresent(client);
+  const [retire, cancel, completed] = completeRunDocumentStatements(client, runId, lexicalKey);
   await retire;
   await cancel;
   // Pipelined: sent together, run in order on the transaction's connection.
@@ -1614,6 +1616,7 @@ export class PostgresRunLedger implements CheckpointStore {
     documentId: string,
     stage: string,
   ): Promise<void> {
+    const lexicalKey = await lexicalIndexKeyColumnPresent(this.sql);
     // Checkpoint and document status in one statement (one commit).
     await retryTransaction(`start-document-stage run=${state.run.id} stage=${stage}`, () => this.sql`
       with checkpoint as (
@@ -1643,7 +1646,7 @@ export class PostgresRunLedger implements CheckpointStore {
           -- (server/src/search/eligibility.ts).
           lexical_searchable_at = case when ${stage} in ('pii-detect', 'embed') then null else lexical_searchable_at end,
           -- Its LanceDB text rows are that attempt's too (documents.lexical_index_key, migration 20261127T2148).
-          lexical_index_key = case when ${stage} in ('pii-detect', 'embed') then null else lexical_index_key end,
+          ${lexicalKey ? this.sql`lexical_index_key = case when ${stage} in ('pii-detect', 'embed') then null else lexical_index_key end,` : this.sql``}
           updated_at = now()
       where id = ${documentId}
     `.then(() => undefined));

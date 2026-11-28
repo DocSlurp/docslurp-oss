@@ -1,6 +1,7 @@
 import type { PendingQuery, Row, Sql } from "postgres";
 
 import type { EmbeddingReuseRef } from "../embeddings/embedding-reuse.js";
+import { lexicalIndexKeyColumnPresent } from "./lexical-index-key.js";
 import type { PageFactUpsert } from "../pipeline/page-facts.js";
 import type { DocumentRowScope } from "./document-records.js";
 import { DocumentNotFoundError, DocumentOutOfScopeError } from "./missing-document.js";
@@ -318,6 +319,7 @@ export class PostgresDocumentContent {
    * in one transaction and one round trip: the marker never precedes the tail drop.
    */
   async finalizeDocumentChunks(scope: DocumentRowScope, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
+    const lexicalKey = await lexicalIndexKeyColumnPresent(this.sql);
     await pipelineTransaction(this.sql, (client) => [
       client`
         delete from document_chunks
@@ -331,10 +333,10 @@ export class PostgresDocumentContent {
       `] : []),
       // The chunk set was just replaced: text rows an earlier attempt wrote to LanceDB no longer describe it, whichever
       // worker wrote them. The key comes back when this attempt's own text rows commit (markDocumentLexicalIndexed).
-      client`
+      ...(lexicalKey ? [client`
         update documents set lexical_index_key = null
         where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId} and lexical_index_key is not null
-      `,
+      `] : []),
     ]);
   }
 
@@ -344,6 +346,7 @@ export class PostgresDocumentContent {
    * while its keyword marker stands: a retry that lifted the marker has rewritten, or is rewriting, the chunks.
    */
   async markDocumentLexicalIndexed(scope: DocumentRowScope, key: string): Promise<void> {
+    if (!(await lexicalIndexKeyColumnPresent(this.sql))) return;
     await this.sql`
       update documents set lexical_index_key = ${key}
       where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId}
