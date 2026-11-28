@@ -307,9 +307,9 @@ function completeRunDocumentStatements(client: Sql<Record<string, unknown>>, run
 async function completeRunDocuments(
   client: Sql<Record<string, unknown>>,
   runId: string,
+  lexicalKey: boolean,
   after: readonly [PendingQuery<any>, PendingQuery<{ run_found: number; changed: number }[]>],
 ): Promise<{ ids: string[]; finalized: Array<{ run_found: number; changed: number }> }> {
-  const lexicalKey = await lexicalIndexKeyColumnPresent(client);
   const [retire, cancel, completed] = completeRunDocumentStatements(client, runId, lexicalKey);
   await retire;
   await cancel;
@@ -1003,6 +1003,8 @@ export class PostgresRunLedger implements CheckpointStore {
     // Resolve schema capabilities before reserving the terminal transaction connection.
     await this.creditLeases.active();
     if (state.pendingParserEvaluations.length) await this.tableExists("parser_eval_results");
+    // On the pool, whose answer is cached; a transaction client is new every run and would re-check each time.
+    const lexicalKey = await lexicalIndexKeyColumnPresent(this.sql);
     const afterCommit: Array<() => void> = [];
     const snapshot = { run: { ...state.run }, stage: state.stage, statuses: state.documents.map(document => document.status) };
     try {
@@ -1028,7 +1030,7 @@ export class PostgresRunLedger implements CheckpointStore {
         // finalization statements go out right behind the statement that completes the documents (one flight; the
         // documents UPDATE holds their row locks first).
         const finalizeScope = { orgId: owner.orgId, runId: state.run.id, documentIds: "completed-in-run" as const };
-        const completed = await completeRunDocuments(client, state.run.id, finalizePageExtracts(client, finalizeScope));
+        const completed = await completeRunDocuments(client, state.run.id, lexicalKey, finalizePageExtracts(client, finalizeScope));
         logFinalizeOutcome(completed.finalized, finalizeScope);
         if (perDocument) {
           // Every completed document of the run without its Fast charge (those this transaction completed, and any the index
